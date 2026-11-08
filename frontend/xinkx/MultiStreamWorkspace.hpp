@@ -1,14 +1,11 @@
 #pragma once
 
-class QDockWidget;
-class QLabel;
-class QSettings;
-class OBSBasic;
+class QWidget;
 
 namespace xinkx {
 
-// Integrated right-side tab: each remote output is encoded and sent by libobs.
-QDockWidget *installMultiStreamWorkspace(OBSBasic *mainWindow, QDockWidget *inspector,
-					QSettings *settings, QLabel *multiStatus);
+// Extensions live in OBS's existing Settings -> Stream page. The main stream
+// remains fully managed by OBS; this list defines only extra destinations.
+void installMultiStreamSettings(QWidget *streamPage);
 
 } // namespace xinkx

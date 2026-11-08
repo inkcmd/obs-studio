@@ -2,6 +2,7 @@
 #include "ui_StatusBarWidget.h"
 
 #include <widgets/OBSBasic.hpp>
+#include <xinkx/MultiStreamManager.hpp>
 
 #include "moc_OBSBasicStatusBar.cpp"
 
@@ -177,6 +178,9 @@ void OBSBasicStatusBar::UpdateBandwidth()
 	}
 
 	uint64_t bytesSent = obs_output_get_total_bytes(output);
+	if (auto *manager = OBSBasic::Get()->findChild<xinkx::MultiStreamManager *>()) {
+		bytesSent += manager->totalBytes();
+	}
 	uint64_t bytesSentTime = os_gettime_ns();
 
 	if (bytesSent < lastBytesSent) {
@@ -325,11 +329,15 @@ void OBSBasicStatusBar::UpdateDroppedFrames()
 
 	int totalDropped = obs_output_get_frames_dropped(output);
 	int totalFrames = obs_output_get_total_frames(output);
-	double percent = (double)totalDropped / (double)totalFrames * 100.0;
+	if (auto *manager = OBSBasic::Get()->findChild<xinkx::MultiStreamManager *>()) {
+		totalDropped += manager->totalDroppedFrames();
+		totalFrames += manager->totalVideoFrames();
+	}
 
 	if (!totalFrames) {
 		return;
 	}
+	double percent = (double)totalDropped / (double)totalFrames * 100.0;
 
 	QString text = QTStr("DroppedFrames");
 	text = text.arg(QString::number(totalDropped), QString::number(percent, 'f', 1));

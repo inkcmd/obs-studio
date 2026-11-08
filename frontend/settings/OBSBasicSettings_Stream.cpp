@@ -8,6 +8,7 @@
 #include <utility/YoutubeApiWrappers.hpp>
 #endif
 #include <widgets/OBSBasic.hpp>
+#include <xinkx/MultiStreamWorkspace.hpp>
 
 #include <qt-wrappers.hpp>
 
@@ -90,6 +91,7 @@ void OBSBasicSettings::InitStreamPage()
 		&OBSBasicSettings::UpdateMultitrackVideo);
 	connect(ui->multitrackVideoConfigOverrideEnable, &QCheckBox::toggled, this,
 		&OBSBasicSettings::UpdateMultitrackVideo);
+	xinkx::installMultiStreamSettings(ui->streamPage);
 }
 
 void OBSBasicSettings::LoadStream1Settings()

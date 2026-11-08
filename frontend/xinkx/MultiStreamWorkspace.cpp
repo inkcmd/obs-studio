@@ -1,255 +1,301 @@
 #include "MultiStreamWorkspace.hpp"
 
-#include "MultiStreamManager.hpp"
+#include "OAuthLogin.hpp"
+#include "StreamAccounts.hpp"
 
-#include <widgets/OBSBasic.hpp>
-
+#include <QCheckBox>
+#include <QBrush>
+#include <QColor>
 #include <QComboBox>
-#include <QDockWidget>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFormLayout>
+#include <QGroupBox>
+#include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QPushButton>
-#include <QSettings>
 #include <QSpinBox>
-#include <QTabWidget>
-#include <QTimer>
+#include <QTreeWidget>
+#include <QUuid>
 #include <QVBoxLayout>
 
-#include <array>
 #include <memory>
-#include <utility>
 
 namespace xinkx {
 
 namespace {
 
-constexpr const char *platformIds[] = {"twitch", "youtube", "kick"};
-constexpr const char *platformLabels[] = {"Twitch", "YouTube", "Kick"};
-
-struct DestinationControls {
-	QLineEdit *url = nullptr;
-	QLineEdit *key = nullptr;
-	QSpinBox *bitrate = nullptr;
-	QSpinBox *width = nullptr;
-	QSpinBox *height = nullptr;
-	QComboBox *encoder = nullptr;
-	QLabel *status = nullptr;
-	QPushButton *toggle = nullptr;
-};
-
-using Destinations = std::array<DestinationControls, 3>;
-
-QSpinBox *makeSpin(QWidget *parent, int min, int max, int step, int value)
+QSpinBox *spin(QWidget *parent, int minimum, int maximum, int value)
 {
-	auto *spin = new QSpinBox(parent);
-	spin->setRange(min, max);
-	spin->setSingleStep(step);
-	spin->setValue(value);
-	spin->setKeyboardTracking(false);
-	return spin;
+	auto *result = new QSpinBox(parent);
+	result->setRange(minimum, maximum);
+	result->setValue(value);
+	result->setSingleStep(2);
+	return result;
 }
 
-StreamDestination currentDestination(const DestinationControls &controls)
+bool editAccount(QWidget *parent, StreamAccount &account, bool creating)
 {
-	StreamDestination result;
-	result.url = controls.url->text();
-	result.key = controls.key->text();
-	result.bitrateKbps = controls.bitrate->value();
-	result.width = controls.width->value();
-	result.height = controls.height->value();
-	result.encoder = controls.encoder->currentData().toString();
-	return result;
+	QDialog dialog(parent);
+	dialog.setWindowTitle(creating ? QStringLiteral("Добавить площадку") : QStringLiteral("Настроить площадку"));
+	dialog.resize(550, 520);
+	auto *layout = new QVBoxLayout(&dialog);
+	auto *form = new QFormLayout();
+	form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+	auto *platform = new QComboBox(&dialog);
+	platform->addItem(QStringLiteral("Twitch"), QStringLiteral("twitch"));
+	platform->addItem(QStringLiteral("YouTube"), QStringLiteral("youtube"));
+	platform->addItem(QStringLiteral("Kick"), QStringLiteral("kick"));
+	const int platformIndex = platform->findData(account.platform);
+	if (platformIndex >= 0) {
+		platform->setCurrentIndex(platformIndex);
+	}
+	platform->setEnabled(creating);
+	form->addRow(QStringLiteral("Платформа"), platform);
+	auto *label = new QLineEdit(account.label, &dialog);
+	label->setPlaceholderText(QStringLiteral("Название аккаунта"));
+	form->addRow(QStringLiteral("Имя"), label);
+	auto *enabled = new QCheckBox(QStringLiteral("Запускать вместе с OBS"), &dialog);
+	enabled->setChecked(account.enabled);
+	form->addRow(enabled);
+	auto *clientId = new QLineEdit(account.clientId, &dialog);
+	clientId->setPlaceholderText(QStringLiteral("Client ID из панели разработчика"));
+	form->addRow(QStringLiteral("OAuth Client ID"), clientId);
+	auto *clientSecret = new QLineEdit(account.clientSecret, &dialog);
+	clientSecret->setEchoMode(QLineEdit::Password);
+	clientSecret->setPlaceholderText(QStringLiteral("Twitch: обязателен; Google/Kick: если выдан"));
+	form->addRow(QStringLiteral("Client Secret"), clientSecret);
+	auto *callback = new QLabel(OAuthLogin::redirectUri(), &dialog);
+	callback->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	form->addRow(QStringLiteral("OAuth callback"), callback);
+	auto *url = new QLineEdit(account.ingestUrl, &dialog);
+	url->setPlaceholderText(QStringLiteral("rtmps://... (заполнится через OAuth)"));
+	form->addRow(QStringLiteral("RTMP(S) URL"), url);
+	auto *key = new QLineEdit(account.streamKey, &dialog);
+	key->setEchoMode(QLineEdit::Password);
+	key->setPlaceholderText(QStringLiteral("Ключ (не нужен после успешного получения через OAuth)"));
+	form->addRow(QStringLiteral("Ключ"), key);
+	auto *bitrate = spin(&dialog, 500, 51000, account.bitrate);
+	bitrate->setSingleStep(500);
+	bitrate->setSuffix(QStringLiteral(" kbps"));
+	form->addRow(QStringLiteral("Битрейт"), bitrate);
+	auto *width = spin(&dialog, 320, 7680, account.width);
+	auto *height = spin(&dialog, 240, 4320, account.height);
+	form->addRow(QStringLiteral("Ширина"), width);
+	form->addRow(QStringLiteral("Высота"), height);
+	auto *encoder = new QComboBox(&dialog);
+	encoder->addItem(QStringLiteral("Авто (NVENC, иначе x264)"), QStringLiteral("auto"));
+	encoder->addItem(QStringLiteral("NVENC H.264"), QStringLiteral("nvenc"));
+	encoder->addItem(QStringLiteral("x264 (CPU)"), QStringLiteral("x264"));
+	const int encoderIndex = encoder->findData(account.encoder);
+	if (encoderIndex >= 0) {
+		encoder->setCurrentIndex(encoderIndex);
+	}
+	form->addRow(QStringLiteral("Энкодер"), encoder);
+	if (creating) {
+		QObject::connect(platform, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog,
+				 [platform, width, height, bitrate](int) {
+					 const QString provider = platform->currentData().toString();
+					 width->setValue(provider == QStringLiteral("kick") ? 1280 :
+							provider == QStringLiteral("youtube") ? 2560 : 1920);
+					 height->setValue(provider == QStringLiteral("kick") ? 720 :
+							 provider == QStringLiteral("youtube") ? 1440 : 1080);
+					 bitrate->setValue(provider == QStringLiteral("youtube") ? 9000 :
+							   provider == QStringLiteral("kick") ? 4500 : 6000);
+				 });
+	}
+	layout->addLayout(form);
+	auto *info = new QLabel(QStringLiteral("Основной поток настраивается стандартными средствами OBS выше. "
+					     "Здесь только дополнительные выходы. OAuth-ключи и токены "
+					     "защищены Windows DPAPI."), &dialog);
+	info->setWordWrap(true);
+	layout->addWidget(info);
+	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+	QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+	QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+	layout->addWidget(buttons);
+	if (dialog.exec() != QDialog::Accepted) {
+		return false;
+	}
+	account.platform = platform->currentData().toString();
+	account.label = label->text().trimmed();
+	if (account.label.isEmpty()) {
+		account.label = platformTitle(account.platform);
+	}
+	account.enabled = enabled->isChecked();
+	if (account.clientId != clientId->text().trimmed()) {
+		account.accessToken.clear();
+		account.refreshToken.clear();
+		account.expiresAt = 0;
+	}
+	account.clientId = clientId->text().trimmed();
+	account.clientSecret = clientSecret->text().trimmed();
+	account.ingestUrl = url->text().trimmed();
+	account.streamKey = key->text().trimmed();
+	account.bitrate = bitrate->value();
+	account.width = width->value();
+	account.height = height->value();
+	account.encoder = encoder->currentData().toString();
+	if (creating) {
+		account.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+	}
+	return true;
 }
 
 } // namespace
 
-QDockWidget *installMultiStreamWorkspace(OBSBasic *mainWindow, QDockWidget *inspector, QSettings *settings,
-						 QLabel *multiStatus)
+void installMultiStreamSettings(QWidget *streamPage)
 {
-	auto *manager = new MultiStreamManager(mainWindow);
-	auto updateGlobalStatus = [manager, multiStatus] {
-		int count = 0;
-		for (int i = 0; i < 3; ++i) {
-			count += manager->active(i) ? 1 : 0;
-		}
-		multiStatus->setText(QStringLiteral("MULTI  %1/3").arg(count));
-		multiStatus->setStyleSheet(count > 0 ? QStringLiteral("color: #58dea2;") :
-					       QStringLiteral("color: #94a0b5;"));
-	};
-	QObject::connect(manager, &MultiStreamManager::destinationChanged, mainWindow,
-			 [updateGlobalStatus](int) { updateGlobalStatus(); });
-	updateGlobalStatus();
-	auto *dock = new QDockWidget(QStringLiteral("Мультистрим"), mainWindow);
-	dock->setObjectName(QStringLiteral("xinkxMultiStreamDock"));
-	dock->setAllowedAreas(Qt::RightDockWidgetArea);
-	dock->setFeatures(dock->features() & ~QDockWidget::DockWidgetFloatable);
-
-	auto *content = new QWidget(dock);
-	auto *layout = new QVBoxLayout(content);
-	layout->setContentsMargins(12, 12, 12, 12);
-	layout->setSpacing(10);
-	auto *intro = new QLabel(QStringLiteral("Прямые выходы в интернет"), content);
-	intro->setStyleSheet(QStringLiteral("font-weight: 600; font-size: 13px;"));
-	layout->addWidget(intro);
-	auto *note = new QLabel(QStringLiteral("Каждая платформа имеет собственный H.264/AAC энкодер, "
-						  "разрешение и битрейт. Без локального RTMP-сервера."), content);
-	note->setWordWrap(true);
-	note->setStyleSheet(QStringLiteral("color: #9da9bd;"));
-	layout->addWidget(note);
-
-	auto *tabs = new QTabWidget(content);
-	layout->addWidget(tabs, 1);
-	auto controls = std::make_shared<Destinations>();
-	const QString defaults[] = {QStringLiteral("rtmps://live.twitch.tv/app"),
-				    QStringLiteral("rtmps://a.rtmps.youtube.com/live2"), QString()};
-	const int defaultWidths[] = {1920, 2560, 1280};
-	const int defaultHeights[] = {1080, 1440, 720};
-	const int defaultBitrates[] = {6000, 9000, 4500};
-
-	for (int i = 0; i < 3; ++i) {
-		const QString configPrefix = QStringLiteral("multistream/%1/").arg(QString::fromLatin1(platformIds[i]));
-		const auto restore = [settings, configPrefix](const char *key, const QVariant &fallback) -> QVariant {
-			return settings ? settings->value(configPrefix + QString::fromLatin1(key), fallback) : fallback;
-		};
-		auto *page = new QWidget(tabs);
-		auto *pageLayout = new QVBoxLayout(page);
-		pageLayout->setContentsMargins(5, 12, 5, 5);
-		pageLayout->setSpacing(12);
-		auto *form = new QFormLayout();
-		form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
-		form->setSpacing(8);
-		DestinationControls &ui = (*controls)[i];
-		ui.url = new QLineEdit(page);
-		ui.url->setPlaceholderText(QStringLiteral("rtmps://..."));
-		ui.url->setText(restore("url", defaults[i]).toString());
-		form->addRow(QStringLiteral("RTMP(S) URL"), ui.url);
-		ui.key = new QLineEdit(page);
-		ui.key->setEchoMode(QLineEdit::Password);
-		ui.key->setPlaceholderText(QStringLiteral("Ключ трансляции"));
-		form->addRow(QStringLiteral("Ключ"), ui.key);
-		ui.bitrate = makeSpin(page, 500, 51000, 500,
-					  restore("bitrate", defaultBitrates[i]).toInt());
-		ui.bitrate->setSuffix(QStringLiteral(" kbps"));
-		form->addRow(QStringLiteral("Видео"), ui.bitrate);
-		ui.width = makeSpin(page, 320, 7680, 2, restore("width", defaultWidths[i]).toInt());
-		ui.height = makeSpin(page, 240, 4320, 2, restore("height", defaultHeights[i]).toInt());
-		form->addRow(QStringLiteral("Ширина"), ui.width);
-		form->addRow(QStringLiteral("Высота"), ui.height);
-		ui.encoder = new QComboBox(page);
-		ui.encoder->addItem(QStringLiteral("Авто (NVENC → x264)"), QStringLiteral("auto"));
-		ui.encoder->addItem(QStringLiteral("NVIDIA NVENC H.264"), QStringLiteral("nvenc"));
-		ui.encoder->addItem(QStringLiteral("x264 (CPU)"), QStringLiteral("x264"));
-		const int encoderIndex = ui.encoder->findData(restore("encoder", QStringLiteral("auto")));
-		if (encoderIndex >= 0) {
-			ui.encoder->setCurrentIndex(encoderIndex);
-		}
-		form->addRow(QStringLiteral("Кодер"), ui.encoder);
-		pageLayout->addLayout(form);
-		ui.toggle = new QPushButton(QStringLiteral("Запустить"), page);
-		pageLayout->addWidget(ui.toggle);
-		ui.status = new QLabel(QStringLiteral("Остановлен"), page);
-		ui.status->setWordWrap(true);
-		ui.status->setStyleSheet(QStringLiteral("color: #94a0b5;"));
-		pageLayout->addWidget(ui.status);
-		pageLayout->addStretch();
-		tabs->addTab(page, QString::fromLatin1(platformLabels[i]));
-		// Keys are deliberately never saved. Settings only hold public endpoints and encode parameters.
-		if (settings) {
-			QObject::connect(ui.url, &QLineEdit::editingFinished, mainWindow, [settings, configPrefix, line = ui.url] {
-				settings->setValue(configPrefix + QStringLiteral("url"), line->text());
-			});
-			for (const auto &field : {std::pair{ui.bitrate, "bitrate"}, std::pair{ui.width, "width"},
-						       std::pair{ui.height, "height"}}) {
-				auto *spin = field.first;
-				const char *key = field.second;
-				QObject::connect(spin, QOverload<int>::of(&QSpinBox::valueChanged), mainWindow,
-						 [settings, configPrefix, key](int value) {
-							 settings->setValue(configPrefix + QString::fromLatin1(key), value);
-						 });
-			}
-			QObject::connect(ui.encoder, QOverload<int>::of(&QComboBox::currentIndexChanged), mainWindow,
-					 [settings, configPrefix, combo = ui.encoder](int) {
-						 settings->setValue(configPrefix + QStringLiteral("encoder"), combo->currentData());
-					 });
-		}
+	if (!streamPage || !streamPage->layout()) {
+		return;
 	}
+	auto accounts = std::make_shared<QVector<StreamAccount>>(loadStreamAccounts());
+	auto *group = new QGroupBox(QStringLiteral("XINKX · Дополнительные трансляции"), streamPage);
+	group->setObjectName(QStringLiteral("xinkxStreamAccounts"));
+	auto *layout = new QVBoxLayout(group);
+	auto *description = new QLabel(QStringLiteral("Основная трансляция использует службу, энкодер и индикаторы OBS. "
+						"Когда нажимаешь «Начать трансляцию», отмеченные ниже аккаунты "
+						"запускаются параллельно с собственными настройками."), group);
+	description->setWordWrap(true);
+	layout->addWidget(description);
+	auto *tree = new QTreeWidget(group);
+	tree->setColumnCount(3);
+	tree->setHeaderLabels({QStringLiteral("Запуск"), QStringLiteral("Аккаунт"), QStringLiteral("Состояние")});
+	tree->setRootIsDecorated(false);
+	tree->setMinimumHeight(150);
+	layout->addWidget(tree);
+	auto *buttons = new QHBoxLayout();
+	auto *add = new QPushButton(QStringLiteral("Добавить"), group);
+	auto *edit = new QPushButton(QStringLiteral("Изменить"), group);
+	auto *remove = new QPushButton(QStringLiteral("Удалить"), group);
+	auto *login = new QPushButton(QStringLiteral("OAuth · Подключить"), group);
+	auto *getKey = new QPushButton(QStringLiteral("Получить ключ"), group);
+	for (auto *button : {add, edit, remove, login, getKey}) {
+		buttons->addWidget(button);
+	}
+	layout->addLayout(buttons);
+	auto *notice = new QLabel(QStringLiteral("OAuth redirect: %1").arg(OAuthLogin::redirectUri()), group);
+	notice->setTextFormat(Qt::PlainText);
+	notice->setWordWrap(true);
+	notice->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	notice->setStyleSheet(QStringLiteral("color: #9da9bd;"));
+	layout->addWidget(notice);
+	streamPage->layout()->addWidget(group);
 
-	auto *keysNote = new QLabel(QStringLiteral("Ключи не записываются на диск: их нужно ввести "
-						   "снова после перезапуска."), content);
-	keysNote->setWordWrap(true);
-	keysNote->setStyleSheet(QStringLiteral("color: #9da9bd;"));
-	layout->addWidget(keysNote);
-
-	auto *globalButtons = new QHBoxLayout();
-	auto *startAll = new QPushButton(QStringLiteral("Запустить все"), content);
-	auto *stopAll = new QPushButton(QStringLiteral("Остановить все"), content);
-	globalButtons->addWidget(startAll);
-	globalButtons->addWidget(stopAll);
-	layout->addLayout(globalButtons);
-	dock->setWidget(content);
-	mainWindow->AddDockWidget(dock, Qt::RightDockWidgetArea);
-
-	auto update = [manager, controls](int i) {
-		auto &ui = (*controls)[i];
-		const bool live = manager->active(i);
-		ui.toggle->setText(live ? QStringLiteral("Остановить") : QStringLiteral("Запустить"));
-		for (QWidget *field : {static_cast<QWidget *>(ui.url), static_cast<QWidget *>(ui.key),
-					     static_cast<QWidget *>(ui.bitrate), static_cast<QWidget *>(ui.width),
-					     static_cast<QWidget *>(ui.height), static_cast<QWidget *>(ui.encoder)}) {
-			field->setEnabled(!live);
+	auto rebuild = [accounts, tree] {
+		tree->blockSignals(true);
+		tree->clear();
+		for (const auto &a : *accounts) {
+			auto *item = new QTreeWidgetItem(tree);
+			item->setData(1, Qt::UserRole, a.id);
+			item->setCheckState(0, a.enabled ? Qt::Checked : Qt::Unchecked);
+			item->setText(1, QStringLiteral("%1 · %2 · %3×%4 · %5 kbps")
+					     .arg(platformTitle(a.platform), a.label)
+					     .arg(a.width).arg(a.height).arg(a.bitrate));
+			const bool ready = !a.ingestUrl.isEmpty() && !a.streamKey.isEmpty();
+			const bool oauthConnected = !a.accessToken.isEmpty();
+			item->setText(2, ready ? QStringLiteral("● Готов") :
+					       oauthConnected ? QStringLiteral("OAuth · нужен ключ") :
+								 QStringLiteral("Не настроен"));
+			item->setForeground(2, QBrush(QColor(ready ? "#58dea2" : "#9da9bd")));
 		}
-		ui.status->setText(manager->description(i));
-		ui.status->setStyleSheet(live ? QStringLiteral("color: #58dea2;") :
-					      QStringLiteral("color: #94a0b5;"));
+		tree->header()->setSectionResizeMode(1, QHeaderView::Stretch);
+		tree->blockSignals(false);
 	};
-
-	auto start = [manager, controls, update](int i) {
+	auto currentIndex = [accounts, tree]() -> int {
+		const auto *selected = tree->currentItem();
+		if (!selected) {
+			return -1;
+		}
+		const QString id = selected->data(1, Qt::UserRole).toString();
+		for (int i = 0; i < accounts->size(); ++i) {
+			if ((*accounts)[i].id == id) {
+				return i;
+			}
+		}
+		return -1;
+	};
+	QObject::connect(tree, &QTreeWidget::itemChanged, group, [accounts](QTreeWidgetItem *item, int column) {
+		if (column != 0) {
+			return;
+		}
+		for (auto &account : *accounts) {
+			if (account.id == item->data(1, Qt::UserRole).toString()) {
+				account.enabled = item->checkState(0) == Qt::Checked;
+				saveStreamAccounts(*accounts);
+				break;
+			}
+		}
+	});
+	QObject::connect(add, &QPushButton::clicked, group, [accounts, rebuild, group] {
+		StreamAccount account;
+		account.platform = QStringLiteral("twitch");
+		if (editAccount(group, account, true)) {
+			accounts->push_back(account);
+			saveStreamAccounts(*accounts);
+			rebuild();
+		}
+	});
+	QObject::connect(edit, &QPushButton::clicked, group, [accounts, rebuild, currentIndex, group] {
+		const int index = currentIndex();
+		if (index >= 0 && editAccount(group, (*accounts)[index], false)) {
+			saveStreamAccounts(*accounts);
+			rebuild();
+		}
+	});
+	QObject::connect(remove, &QPushButton::clicked, group, [accounts, rebuild, currentIndex, group] {
+		const int index = currentIndex();
+		if (index < 0 || QMessageBox::question(group, QStringLiteral("Удаление аккаунта"),
+						 QStringLiteral("Удалить эту площадку и её локальные токены?")) != QMessageBox::Yes) {
+			return;
+		}
+		accounts->removeAt(index);
+		saveStreamAccounts(*accounts);
+		rebuild();
+	});
+	auto *auth = new OAuthLogin(group);
+	QObject::connect(login, &QPushButton::clicked, group, [accounts, currentIndex, auth, notice] {
+		const int index = currentIndex();
+		if (index < 0) {
+			return;
+		}
 		QString error;
-		const bool started = manager->start(i, currentDestination((*controls)[i]), &error);
-		update(i);
-		if (!started && !error.isEmpty()) {
-			(*controls)[i].status->setText(error);
-		}
-	};
-	for (int i = 0; i < 3; ++i) {
-		QObject::connect((*controls)[i].toggle, &QPushButton::clicked, mainWindow,
-				 [manager, start, i] {
-					 if (manager->active(i)) {
-						 manager->stop(i);
-					 } else {
-						 start(i);
-					 }
-				 });
-		QObject::connect(manager, &MultiStreamManager::destinationChanged, mainWindow, [update, i](int changed) {
-			if (changed == i) {
-				update(i);
-			}
-		});
-	}
-	QObject::connect(startAll, &QPushButton::clicked, mainWindow, [manager, start] {
-		for (int i = 0; i < 3; ++i) {
-			if (!manager->active(i)) {
-				start(i);
-			}
-		}
-	});
-	QObject::connect(stopAll, &QPushButton::clicked, mainWindow, [manager] {
-		for (int i = 0; i < 3; ++i) {
-			manager->stop(i);
-		}
-	});
-	// Group both XINKX controls in one native sidebar rather than adding a third column.
-	QTimer::singleShot(0, mainWindow, [mainWindow, inspector, dock] {
-		mainWindow->tabifyDockWidget(inspector, dock);
-		if (inspector->isVisible()) {
-			inspector->raise();
+		if (auth->begin((*accounts)[index], &error)) {
+			notice->setText(QStringLiteral("Открой системный браузер и подтверди доступ к аккаунту"));
 		} else {
-			dock->raise();
+			notice->setText(error);
 		}
 	});
-	return dock;
+	QObject::connect(getKey, &QPushButton::clicked, group, [accounts, currentIndex, auth, notice] {
+		if (auth->isBusy()) {
+			notice->setText(QStringLiteral("Дождись завершения текущей операции OAuth"));
+			return;
+		}
+		const int index = currentIndex();
+		if (index >= 0) {
+			notice->setText(QStringLiteral("Получение RTMP-данных через API..."));
+			auth->retrieveIngest((*accounts)[index]);
+		}
+	});
+	QObject::connect(auth, &OAuthLogin::finished, group,
+			 [accounts, rebuild, notice](const StreamAccount &updated, const QString &message) {
+				for (auto &account : *accounts) {
+					if (account.id == updated.id) {
+						account = updated;
+						saveStreamAccounts(*accounts);
+						rebuild();
+						break;
+					}
+				}
+				notice->setText(message.isEmpty() ? QStringLiteral("OAuth подключён, RTMP-ключ получен") : message);
+			});
+	QObject::connect(auth, &OAuthLogin::failed, group, [notice](const QString &, const QString &error) {
+		notice->setText(error);
+	});
+	rebuild();
 }
 
 } // namespace xinkx

@@ -2,7 +2,6 @@
 
 #include "StudioController.hpp"
 #include "MultiStreamManager.hpp"
-#include "MultiStreamWorkspace.hpp"
 
 #include <OBSApp.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -19,9 +18,8 @@
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSpinBox>
-#include <QSizePolicy>
+#include <QStatusBar>
 #include <QTimer>
-#include <QToolBar>
 #include <QVBoxLayout>
 
 #include <memory>
@@ -52,41 +50,28 @@ QDoubleSpinBox *makeDimensionField(QWidget *parent, bool sizeField)
 void installStudioWorkspace(OBSBasic *mainWindow)
 {
 	auto *controller = new StudioController(mainWindow);
-
-	// Compact native header with live OBS state. No duplicate stream controls.
-	auto *header = new QToolBar(mainWindow);
-	header->setObjectName(QStringLiteral("xinkxStudioHeader"));
-	header->setMovable(false);
-	header->setFloatable(false);
-	header->setMinimumHeight(44);
-	header->setStyleSheet(QStringLiteral(
-		"QToolBar#xinkxStudioHeader { background: #171d28; border: 0; spacing: 14px; padding: 5px 12px; }"
-		"QToolBar#xinkxStudioHeader QLabel { color: #c4cddc; background: transparent; }"
-		"QLabel#xinkxStudioBrand { color: #f4f7fc; font-size: 14px; font-weight: 700; }"));
-
-	auto *brand = new QLabel(QStringLiteral("XINKX  /  STUDIO"), header);
-	brand->setObjectName(QStringLiteral("xinkxStudioBrand"));
-	header->addWidget(brand);
-	header->addSeparator();
-
-	auto *scene = new QLabel(QStringLiteral("Сцена: —"), header);
-	scene->setMinimumWidth(150);
-	header->addWidget(scene);
-
-	auto *spacer = new QWidget(header);
-	spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-	header->addWidget(spacer);
-
-	auto *streamStatus = new QLabel(QStringLiteral("STREAM  OFFLINE"), header);
-	auto *multiStatus = new QLabel(QStringLiteral("MULTI  0/3"), header);
-	auto *recordStatus = new QLabel(QStringLiteral("REC  OFF"), header);
-	header->addWidget(streamStatus);
-	header->addWidget(multiStatus);
-	auto *statusSpacer = new QWidget(header);
-	statusSpacer->setFixedWidth(22);
-	header->addWidget(statusSpacer);
-	header->addWidget(recordStatus);
-	mainWindow->addToolBar(Qt::TopToolBarArea, header);
+	auto *manager = new MultiStreamManager(mainWindow);
+	QObject::connect(mainWindow, &OBSBasic::StreamingStarted, manager,
+			 [manager](bool delayStarting) {
+				 if (!delayStarting) {
+					 manager->startConfigured();
+				 }
+			 });
+	QObject::connect(mainWindow, &OBSBasic::StreamingStopping, manager, [manager] { manager->stopAll(); });
+	QObject::connect(mainWindow, &OBSBasic::StreamingStopped, manager, [manager] { manager->stopAll(); });
+	auto *extraStatus = new QLabel(mainWindow);
+	mainWindow->statusBar()->addPermanentWidget(extraStatus);
+	auto updateExtraStatus = [extraStatus, manager] {
+		const int active = manager->activeCount();
+		const int count = manager->configuredCount();
+		extraStatus->setText(QStringLiteral("Доп. потоки: %1/%2").arg(active).arg(count));
+		extraStatus->setStyleSheet(active > 0 ? QStringLiteral("color: #58dea2;") : QString());
+	};
+	QObject::connect(manager, &MultiStreamManager::destinationChanged, mainWindow,
+			 [updateExtraStatus](int) { updateExtraStatus(); });
+	QObject::connect(manager, &MultiStreamManager::streamError, mainWindow,
+			 [mainWindow](const QString &message) { mainWindow->statusBar()->showMessage(message, 10000); });
+	updateExtraStatus();
 
 	// Inspector edits real OBS scene items; standard source dialogs stay available.
 	auto *inspector = new QDockWidget(QStringLiteral("Источник"), mainWindow);
@@ -235,17 +220,7 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	});
 
 	QObject::connect(controller, &StudioController::stateChanged, mainWindow,
-		[scene, streamStatus, recordStatus, sourceTitle, openProperties](
-			const QString &sceneName, const QString &selectedSource, bool streaming, bool recording) {
-			scene->setText(QStringLiteral("Сцена: %1")
-					       .arg(sceneName.isEmpty() ? QStringLiteral("—") : sceneName));
-			streamStatus->setText(streaming ? QStringLiteral("STREAM  LIVE") :
-						       QStringLiteral("STREAM  OFFLINE"));
-			recordStatus->setText(recording ? QStringLiteral("REC  ON") : QStringLiteral("REC  OFF"));
-			streamStatus->setStyleSheet(streaming ? QStringLiteral("color: #58dea2;") :
-							       QStringLiteral("color: #94a0b5;"));
-			recordStatus->setStyleSheet(recording ? QStringLiteral("color: #ff818f;") :
-							       QStringLiteral("color: #94a0b5;"));
+		[sourceTitle, openProperties](const QString &, const QString &selectedSource, bool, bool) {
 			sourceTitle->setText(selectedSource.isEmpty() ? QStringLiteral("Источник не выбран") :
 									 selectedSource);
 			openProperties->setEnabled(!selectedSource.isEmpty());
@@ -325,7 +300,6 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 		inspector->setVisible(inspectorVisible);
 		mainWindow->resizeDocks({inspector}, {280}, Qt::Horizontal);
 	});
-	installMultiStreamWorkspace(mainWindow, inspector, settings, multiStatus);
 }
 
 void shutdownStudioOutputs(OBSBasic *mainWindow)

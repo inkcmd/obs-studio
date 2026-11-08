@@ -10,6 +10,14 @@ target_sources(
     xinkx/MultiStreamManager.hpp
     xinkx/MultiStreamWorkspace.cpp
     xinkx/MultiStreamWorkspace.hpp
+    xinkx/StreamAccounts.cpp
+    xinkx/StreamAccounts.hpp
+    xinkx/OAuthLogin.cpp
+    xinkx/OAuthLogin.hpp
 )
 
 target_compile_definitions(obs-studio PRIVATE XINKX_STUDIO=1)
+
+if(WIN32)
+  target_link_libraries(obs-studio PRIVATE crypt32)
+endif()

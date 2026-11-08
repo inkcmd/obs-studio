@@ -3,7 +3,7 @@
 #include <QObject>
 #include <QString>
 
-#include <array>
+#include <vector>
 
 #include <obs.h>
 
@@ -27,6 +27,13 @@ public:
 	explicit MultiStreamManager(QObject *parent = nullptr);
 	~MultiStreamManager() override;
 	void shutdown();
+	void startConfigured();
+	void stopAll();
+	int activeCount() const;
+	int configuredCount() const;
+	uint64_t totalBytes() const;
+	int totalDroppedFrames() const;
+	int totalVideoFrames() const;
 
 	bool start(int index, const StreamDestination &destination, QString *error = nullptr);
 	void stop(int index);
@@ -36,6 +43,7 @@ public:
 
 signals:
 	void destinationChanged(int index);
+	void streamError(const QString &message);
 
 private:
 	struct Session {
@@ -50,7 +58,7 @@ private:
 		QString lastDisplay;
 	};
 
-	std::array<Session, 3> sessions{};
+	std::vector<Session> sessions;
 	void release(Session &session);
 	void updateStatus();
 };

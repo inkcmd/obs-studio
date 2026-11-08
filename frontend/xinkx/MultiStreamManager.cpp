@@ -1,4 +1,5 @@
 #include "MultiStreamManager.hpp"
+#include "StreamAccounts.hpp"
 
 #include <QByteArray>
 #include <QTimer>
@@ -9,8 +10,6 @@
 namespace xinkx {
 
 namespace {
-
-constexpr const char *destinationNames[] = {"twitch", "youtube", "kick"};
 
 bool hasEncoder(const char *name)
 {
@@ -42,6 +41,97 @@ MultiStreamManager::MultiStreamManager(QObject *parent) : QObject(parent)
 MultiStreamManager::~MultiStreamManager()
 {
 	shutdown();
+}
+
+void MultiStreamManager::startConfigured()
+{
+	// The OBS primary output has already started. These are additional encoded
+	// outputs of the same OBS program, not an independent streaming subsystem.
+	if (anythingActive()) {
+		return;
+	}
+	for (auto &session : sessions) {
+		release(session);
+	}
+	const QVector<StreamAccount> accounts = loadStreamAccounts();
+	sessions.clear();
+	sessions.resize(static_cast<size_t>(accounts.size()));
+	for (int i = 0; i < accounts.size(); ++i) {
+		const StreamAccount &account = accounts[i];
+		if (!account.enabled) {
+			continue;
+		}
+		StreamDestination dest;
+		dest.url = account.ingestUrl;
+		dest.key = account.streamKey;
+		dest.encoder = account.encoder;
+		dest.bitrateKbps = account.bitrate;
+		dest.width = account.width;
+		dest.height = account.height;
+		QString error;
+		if (!start(i, dest, &error)) {
+			blog(LOG_WARNING, "XINKX extra stream #%d failed: %s", i + 1, error.toUtf8().constData());
+			emit streamError(QStringLiteral("%1: %2").arg(account.label, error));
+		}
+	}
+}
+
+void MultiStreamManager::stopAll()
+{
+	for (int i = 0; i < static_cast<int>(sessions.size()); ++i) {
+		stop(i);
+	}
+}
+
+int MultiStreamManager::activeCount() const
+{
+	int result = 0;
+	for (int i = 0; i < static_cast<int>(sessions.size()); ++i) {
+		result += active(i) ? 1 : 0;
+	}
+	return result;
+}
+
+int MultiStreamManager::configuredCount() const
+{
+	int result = 0;
+	for (const auto &account : loadStreamAccounts()) {
+		result += account.enabled ? 1 : 0;
+	}
+	return result;
+}
+
+uint64_t MultiStreamManager::totalBytes() const
+{
+	uint64_t total = 0;
+	for (int i = 0; i < static_cast<int>(sessions.size()); ++i) {
+		if (active(i)) {
+			total += obs_output_get_total_bytes(sessions[i].output);
+		}
+	}
+	return total;
+}
+
+int MultiStreamManager::totalDroppedFrames() const
+{
+	int total = 0;
+	for (int i = 0; i < static_cast<int>(sessions.size()); ++i) {
+		if (active(i)) {
+			total += obs_output_get_frames_dropped(sessions[i].output);
+		}
+	}
+	return total;
+}
+
+int MultiStreamManager::totalVideoFrames() const
+{
+	int total = 0;
+	for (int i = 0; i < static_cast<int>(sessions.size()); ++i) {
+		if (active(i)) {
+			total += obs_output_get_total_frames(sessions[i].output);
+		}
+	}
+	return total;
 }
 
 void MultiStreamManager::shutdown()
@@ -130,7 +220,7 @@ bool MultiStreamManager::start(int index, const StreamDestination &destination, 
 	}
 	// The previous inactive output can be discarded; no local RTMP relay is used.
 	release(session);
-	const QByteArray name = QByteArray("xinkx_") + destinationNames[index];
+	const QByteArray name = QByteArray("xinkx_extra_") + QByteArray::number(index);
 	obs_data_t *serviceSettings = obs_data_create();
 	obs_data_set_string(serviceSettings, "server", url.toUtf8().constData());
 	obs_data_set_string(serviceSettings, "key", destination.key.toUtf8().constData());
