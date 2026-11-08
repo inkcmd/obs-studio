@@ -79,11 +79,11 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	inspector->setWidget(content);
 	mainWindow->AddDockWidget(inspector, Qt::RightDockWidgetArea);
 
-	connect(openProperties, &QPushButton::clicked, mainWindow, [mainWindow] {
+	QObject::connect(openProperties, &QPushButton::clicked, mainWindow, [mainWindow] {
 		mainWindow->actionOpenSourceProperties();
 	});
 
-	connect(controller, &StudioController::stateChanged, mainWindow,
+	QObject::connect(controller, &StudioController::stateChanged, mainWindow,
 		[scene, streamStatus, recordStatus, sourceTitle, sourceDetails, openProperties](
 			const QString &sceneName, const QString &selectedSource, const QString &details, bool streaming,
 			bool recording) {
@@ -110,7 +110,7 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 		QDir().mkpath(QFileInfo(path).absolutePath());
 		auto *settings = new QSettings(path, QSettings::IniFormat, mainWindow);
 		inspector->setVisible(settings->value(QStringLiteral("workspace/inspectorVisible"), true).toBool());
-		connect(inspector, &QDockWidget::visibilityChanged, mainWindow, [settings](bool visible) {
+		QObject::connect(inspector, &QDockWidget::visibilityChanged, mainWindow, [settings](bool visible) {
 			settings->setValue(QStringLiteral("workspace/inspectorVisible"), visible);
 		});
 	}
