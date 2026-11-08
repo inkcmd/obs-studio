@@ -15,6 +15,12 @@ OBSServiceAutoRelease createStreamService(const StreamDestination &destination, 
 		return {};
 	}
 	OBSDataAutoRelease settings = obs_data_create();
+	if (!destination.serviceName.isEmpty()) {
+		obs_data_set_string(settings, "service", destination.serviceName.toUtf8().constData());
+		obs_data_set_string(settings, "server", destination.serviceServer.toUtf8().constData());
+		obs_data_set_string(settings, "key", destination.streamKey.toUtf8().constData());
+		return obs_service_create("rtmp_common", name, settings, nullptr);
+	}
 	obs_data_set_string(settings, "server", destination.ingestUrl.toUtf8().constData());
 	obs_data_set_string(settings, "key", destination.streamKey.toUtf8().constData());
 	return obs_service_create("rtmp_custom", name, settings, nullptr);

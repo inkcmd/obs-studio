@@ -17,6 +17,10 @@ struct OAuthSession {
 struct StreamDestination {
 	QString ingestUrl;
 	QString streamKey;
+	// A named service and server from OBS's built-in RTMP service catalog.
+	// Empty serviceName means the explicit ingestUrl is used instead.
+	QString serviceName;
+	QString serviceServer;
 	QString encoder = QStringLiteral("auto");
 	int bitrate = 6000;
 	int width = 1920;

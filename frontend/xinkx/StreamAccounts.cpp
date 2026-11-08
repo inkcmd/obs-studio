@@ -82,7 +82,13 @@ QString studioSettingsPath()
 QString platformTitle(const QString &platform)
 {
 	const auto *api = platformApi(platform);
-	return api ? api->title : platform;
+	if (api) {
+		return api->title;
+	}
+	if (platform == QStringLiteral("obs_service")) {
+		return QStringLiteral("OBS RTMP");
+	}
+	return platform == QStringLiteral("custom") ? QStringLiteral("RTMP(S)") : platform;
 }
 
 bool validIngestUrl(const QString &value)
@@ -95,7 +101,8 @@ bool validIngestUrl(const QString &value)
 
 bool StreamDestination::ready() const
 {
-	return validIngestUrl(ingestUrl) && !streamKey.trimmed().isEmpty() && width >= 320 && width <= 7680 &&
+	const bool validServer = serviceName.isEmpty() ? validIngestUrl(ingestUrl) : !serviceServer.isEmpty();
+	return validServer && !streamKey.trimmed().isEmpty() && width >= 320 && width <= 7680 &&
 	       height >= 240 && height <= 4320 && width % 2 == 0 && height % 2 == 0 &&
 	       bitrate >= 500 && bitrate <= 51000;
 }
@@ -138,7 +145,8 @@ QVector<StreamAccount> loadStreamAccounts(bool withSecrets)
 		StreamAccount account;
 		account.id = settings.value(QStringLiteral("id")).toString();
 		account.platform = settings.value(QStringLiteral("platform")).toString();
-		if (account.id.isEmpty() || (!platformApi(account.platform) && account.platform != QStringLiteral("custom"))) {
+		if (account.id.isEmpty() || (!platformApi(account.platform) && account.platform != QStringLiteral("custom") &&
+					   account.platform != QStringLiteral("obs_service"))) {
 			continue;
 		}
 		account.label = settings.value(QStringLiteral("label"), platformTitle(account.platform)).toString();
@@ -159,6 +167,8 @@ QVector<StreamAccount> loadStreamAccounts(bool withSecrets)
 			account.destination.streamKey = unprotect(settings.value(QStringLiteral("streamKey")).toString());
 		}
 		account.destination.encoder = settings.value(QStringLiteral("encoder"), QStringLiteral("auto")).toString();
+		account.destination.serviceName = settings.value(QStringLiteral("serviceName")).toString();
+		account.destination.serviceServer = settings.value(QStringLiteral("serviceServer")).toString();
 		account.destination.bitrate = settings.value(QStringLiteral("bitrate"), 6000).toInt();
 		account.destination.width = settings.value(QStringLiteral("width"), 1920).toInt();
 		account.destination.height = settings.value(QStringLiteral("height"), 1080).toInt();
@@ -213,6 +223,8 @@ bool saveStreamAccounts(const QVector<StreamAccount> &accounts)
 		settings.setValue(QStringLiteral("ingestUrlDpapi"), encrypted[i][4]);
 		settings.setValue(QStringLiteral("streamKey"), encrypted[i][3]);
 		settings.setValue(QStringLiteral("encoder"), a.destination.encoder);
+		settings.setValue(QStringLiteral("serviceName"), a.destination.serviceName);
+		settings.setValue(QStringLiteral("serviceServer"), a.destination.serviceServer);
 		settings.setValue(QStringLiteral("bitrate"), a.destination.bitrate);
 		settings.setValue(QStringLiteral("width"), a.destination.width);
 		settings.setValue(QStringLiteral("height"), a.destination.height);
