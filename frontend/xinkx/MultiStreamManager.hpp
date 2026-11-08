@@ -25,11 +25,8 @@ public:
 	explicit MultiStreamManager(QObject *parent = nullptr);
 	~MultiStreamManager() override;
 
-	bool hasPrimaryAccount() const;
-	StreamAccount prepareSession();
-	void setPrimaryOutput(obs_output_t *output, obs_service_t *service);
-	void primaryStopped(bool error);
-	void startConfigured();
+	bool hasConfiguredAccounts() const;
+	int startConfigured();
 	void stopAll(bool force = false);
 	void shutdown();
 	bool anythingActive() const;
@@ -37,6 +34,7 @@ public:
 	int configuredCount() const;
 	uint64_t totalBytes() const;
 	uint64_t extraBitrate() const;
+	float worstCongestion() const;
 	int totalDroppedFrames() const;
 	int totalVideoFrames() const;
 	QString sessionDetails() const;
@@ -72,11 +70,6 @@ private:
 
 	QHash<QString, bool> selection;
 	QVector<StreamAccount> configured;
-	StreamAccount primary;
-	OBSService primaryService;
-	OBSOutput primaryOutput;
-	QString primaryState;
-	OutputStats primaryStats;
 	QElapsedTimer clock;
 	std::vector<std::unique_ptr<Session>> sessions;
 	bool lastActive = false;

@@ -52,6 +52,8 @@ OBSBasicStatusBar::OBSBasicStatusBar(QWidget *parent)
 
 void OBSBasicStatusBar::Activate()
 {
+	const auto *manager = OBSBasic::Get()->findChild<xinkx::MultiStreamManager *>();
+	const bool managedActive = manager && manager->anythingActive();
 	if (!active) {
 		refreshTimer = new QTimer(this);
 		connect(refreshTimer, &QTimer::timeout, this, &OBSBasicStatusBar::UpdateStatusBar);
@@ -68,12 +70,12 @@ void OBSBasicStatusBar::Activate()
 		refreshTimer->start(1000);
 		active = true;
 
-		if (streamOutput) {
+		if (streamOutput || managedActive) {
 			statusWidget->ui->statusIcon->setPixmap(inactivePixmap);
 		}
 	}
 
-	if (streamOutput) {
+	if (streamOutput || managedActive) {
 		statusWidget->ui->streamIcon->setPixmap(streamingActivePixmap);
 		statusWidget->ui->streamTime->setDisabled(false);
 		statusWidget->ui->issuesFrame->show();
@@ -93,8 +95,10 @@ void OBSBasicStatusBar::Deactivate()
 	if (!main) {
 		return;
 	}
+	const auto *manager = main->findChild<xinkx::MultiStreamManager *>();
+	const bool managedActive = manager && manager->anythingActive();
 
-	if (!streamOutput) {
+	if (!streamOutput && !managedActive) {
 		statusWidget->ui->streamTime->setText(QString("00:00:00"));
 		statusWidget->ui->streamTime->setDisabled(true);
 		statusWidget->ui->streamIcon->setPixmap(streamingInactivePixmap);
@@ -115,7 +119,7 @@ void OBSBasicStatusBar::Deactivate()
 		totalRecordSeconds = 0;
 	}
 
-	if (main->outputHandler && !main->outputHandler->Active()) {
+	if (main->outputHandler && !main->outputHandler->Active() && !managedActive) {
 		delete refreshTimer;
 
 		statusWidget->ui->delayInfo->setText("");
@@ -164,7 +168,14 @@ void OBSBasicStatusBar::UpdateDelayMsg()
 
 void OBSBasicStatusBar::UpdateBandwidth()
 {
+	auto *manager = OBSBasic::Get()->findChild<xinkx::MultiStreamManager *>();
+	if (!streamOutput && (!manager || !manager->anythingActive())) {
+		return;
+	}
 	if (!streamOutput) {
+		// No synthetic OBS output: all managed outputs are measured independently.
+		statusWidget->ui->kbps->setText(QStringLiteral("%1 kbps").arg(manager->extraBitrate()));
+		statusWidget->ui->kbps->show();
 		return;
 	}
 
@@ -178,7 +189,7 @@ void OBSBasicStatusBar::UpdateBandwidth()
 	}
 
 	uint64_t bytesSent = obs_output_get_total_bytes(output);
-	if (auto *manager = OBSBasic::Get()->findChild<xinkx::MultiStreamManager *>()) {
+	if (manager) {
 		bytesSent += manager->totalBytes();
 	}
 	uint64_t bytesSentTime = os_gettime_ns();
@@ -250,7 +261,8 @@ void OBSBasicStatusBar::UpdateStreamTime()
 
 	QString text = QString::asprintf("%02d:%02d:%02d", hours, minutes, seconds);
 	statusWidget->ui->streamTime->setText(text);
-	if (streamOutput && !statusWidget->ui->streamTime->isEnabled()) {
+	const auto *manager = OBSBasic::Get()->findChild<xinkx::MultiStreamManager *>();
+	if ((streamOutput || (manager && manager->anythingActive())) && !statusWidget->ui->streamTime->isEnabled()) {
 		statusWidget->ui->streamTime->setDisabled(false);
 	}
 
@@ -318,18 +330,19 @@ void OBSBasicStatusBar::UpdateRecordTimeLabel()
 
 void OBSBasicStatusBar::UpdateDroppedFrames()
 {
-	if (!streamOutput) {
+	auto *manager = OBSBasic::Get()->findChild<xinkx::MultiStreamManager *>();
+	if (!streamOutput && (!manager || !manager->anythingActive())) {
 		return;
 	}
 
-	OBSOutput output = OBSGetStrongRef(streamOutput);
-	if (!output) {
+	OBSOutput output = streamOutput ? OBSGetStrongRef(streamOutput) : OBSOutput{};
+	if (streamOutput && !output) {
 		return;
 	}
 
-	int totalDropped = obs_output_get_frames_dropped(output);
-	int totalFrames = obs_output_get_total_frames(output);
-	if (auto *manager = OBSBasic::Get()->findChild<xinkx::MultiStreamManager *>()) {
+	int totalDropped = output ? obs_output_get_frames_dropped(output) : 0;
+	int totalFrames = output ? obs_output_get_total_frames(output) : 0;
+	if (manager) {
 		totalDropped += manager->totalDroppedFrames();
 		totalFrames += manager->totalVideoFrames();
 	}
@@ -350,7 +363,7 @@ void OBSBasicStatusBar::UpdateDroppedFrames()
 	/* ----------------------------------- *
 	 * calculate congestion color          */
 
-	float congestion = obs_output_get_congestion(output);
+	float congestion = output ? obs_output_get_congestion(output) : manager->worstCongestion();
 	float avgCongestion = (congestion + lastCongestion) * 0.5f;
 	if (avgCongestion < congestion) {
 		avgCongestion = congestion;
@@ -469,7 +482,8 @@ void OBSBasicStatusBar::UpdateStatusBar()
 
 	UpdateBandwidth();
 
-	if (streamOutput) {
+	const auto *manager = main->findChild<xinkx::MultiStreamManager *>();
+	if (streamOutput || (manager && manager->anythingActive())) {
 		UpdateStreamTime();
 	}
 
@@ -546,6 +560,15 @@ void OBSBasicStatusBar::StreamStopped()
 	}
 }
 
+void OBSBasicStatusBar::ManagedStreamingChanged(bool streaming)
+{
+	if (streaming) {
+		Activate();
+	} else {
+		Deactivate();
+	}
+}
+
 void OBSBasicStatusBar::RecordingStarted(obs_output_t *output)
 {
 	recordOutput = OBSGetWeakRef(output);
@@ -593,7 +616,8 @@ void OBSBasicStatusBar::UpdateIcons()
 	recordingInactivePixmap = GetPixmap("recording-inactive.svg");
 	recordingPauseInactivePixmap = GetPixmap("recording-pause-inactive.svg");
 
-	bool streaming = obs_frontend_streaming_active();
+	const auto *manager = OBSBasic::Get()->findChild<xinkx::MultiStreamManager *>();
+	bool streaming = obs_frontend_streaming_active() || (manager && manager->anythingActive());
 
 	if (!streaming) {
 		statusWidget->ui->streamIcon->setPixmap(streamingInactivePixmap);

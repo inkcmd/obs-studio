@@ -57,9 +57,9 @@ OAuthLogin::OAuthLogin(QObject *parent) : QObject(parent)
 	connect(&callback, &QTcpServer::newConnection, this, &OAuthLogin::receiveCallback);
 }
 
-QString OAuthLogin::redirectUri()
+QString OAuthLogin::redirectUri(const QString &platform)
 {
-	return u"http://127.0.0.1:45678/"_s;
+	return u"http://localhost:8765/api/oauth/%1/callback"_s.arg(platform);
 }
 
 QString OAuthLogin::Response::error(const QString &operation) const
@@ -79,8 +79,8 @@ bool OAuthLogin::begin(const StreamAccount &account, QString *error)
 			      : u"Проверь Client ID и обязательный для площадки Client Secret"_s;
 		return false;
 	}
-	if (!callback.listen(QHostAddress::LocalHost, 45678)) {
-		*error = u"Не удалось открыть локальный OAuth-порт 45678"_s;
+	if (!callback.listen(QHostAddress::LocalHost, 8765)) {
+		*error = u"Порт 8765 занят. Удали прежний portproxy для legacy OAuth и повтори вход"_s;
 		return false;
 	}
 
@@ -99,7 +99,7 @@ bool OAuthLogin::begin(const StreamAccount &account, QString *error)
 		// Kick's authorize frontend rewrites the first 127.0.0.1 in the query.
 		query.addQueryItem(u"redirect"_s, u"127.0.0.1"_s);
 	}
-	query.addQueryItem(u"redirect_uri"_s, redirectUri());
+	query.addQueryItem(u"redirect_uri"_s, redirectUri(account.platform));
 	query.addQueryItem(u"scope"_s, api->scopes);
 	query.addQueryItem(u"state"_s, state);
 	if (api->pkce) {
@@ -115,12 +115,10 @@ bool OAuthLogin::begin(const StreamAccount &account, QString *error)
 		query.addQueryItem(u"force_verify"_s, u"true"_s);
 	}
 	url.setQuery(query);
-	if (!QDesktopServices::openUrl(url)) {
-		callback.close();
-		busy = false;
-		*error = u"Не удалось открыть браузер для OAuth"_s;
-		return false;
-	}
+	pendingAuthorizationUrl = url.toString(QUrl::FullyEncoded);
+	// The default browser can belong to a different account. The dialog also
+	// exposes this link for pasting into the browser where the user is signed in.
+	QDesktopServices::openUrl(url);
 	QTimer::singleShot(180000, this, [this, thisAttempt] {
 		if (attempt == thisAttempt && callback.isListening()) {
 			fail(u"Время ожидания OAuth истекло"_s);
@@ -155,7 +153,8 @@ void OAuthLogin::receiveCallback()
 						 ? QUrl::fromEncoded(parts[1], QUrl::StrictMode)
 						 : QUrl{};
 			const QUrlQuery params(url);
-			const bool valid = url.isRelative() && url.path() == u"/"_s &&
+			const bool valid = url.isRelative() &&
+					   url.path() == u"/api/oauth/%1/callback"_s.arg(current.platform) &&
 					   params.allQueryItemValues(u"state"_s).size() == 1 &&
 					   params.queryItemValue(u"state"_s) == state;
 			const auto code = params.queryItemValue(u"code"_s, QUrl::FullyDecoded);
@@ -204,7 +203,12 @@ void OAuthLogin::request(const QUrl &url, const QUrlQuery *form, bool authorized
 	} else {
 		reply = network.get(req);
 	}
-	connect(reply, &QNetworkReply::finished, this, [reply, done] {
+	const auto thisAttempt = attempt;
+	connect(reply, &QNetworkReply::finished, this, [this, reply, done, thisAttempt] {
+		if (thisAttempt != attempt) {
+			reply->deleteLater();
+			return;
+		}
 		const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
 		const bool ok = status >= 200 && status < 300 && reply->error() == QNetworkReply::NoError;
 		const auto json = QJsonDocument::fromJson(reply->readAll()).object();
@@ -217,7 +221,7 @@ void OAuthLogin::exchangeCode(const QString &code)
 {
 	QUrlQuery form;
 	form.addQueryItem(u"grant_type"_s, u"authorization_code"_s);
-	form.addQueryItem(u"redirect_uri"_s, redirectUri());
+	form.addQueryItem(u"redirect_uri"_s, redirectUri(current.platform));
 	form.addQueryItem(u"code"_s, code);
 	if (!verifier.isEmpty()) {
 		form.addQueryItem(u"code_verifier"_s, verifier);
@@ -295,6 +299,7 @@ void OAuthLogin::retrieveIngest(const StreamAccount &account)
 		return;
 	}
 	current = account;
+	++attempt;
 	busy = true;
 	refreshed = false;
 	if (current.oauth.accessToken.isEmpty() && current.oauth.refreshToken.isEmpty()) {
@@ -417,6 +422,7 @@ void OAuthLogin::revoke(const StreamAccount &account)
 		return;
 	}
 	current = account;
+	++attempt;
 	busy = true;
 	const auto done = [this](const Response &response) {
 		if (response.ok || (response.status == 400 && response.json.value(u"error"_s) == u"invalid_token"_s)) {
@@ -448,6 +454,7 @@ void OAuthLogin::revoke(const StreamAccount &account)
 
 void OAuthLogin::complete(const QString &notice, bool success)
 {
+	pendingAuthorizationUrl.clear();
 	busy = false;
 	emit finished(current, notice, success);
 }
@@ -455,8 +462,26 @@ void OAuthLogin::complete(const QString &notice, bool success)
 void OAuthLogin::fail(const QString &notice)
 {
 	callback.close();
+	pendingAuthorizationUrl.clear();
 	busy = false;
 	emit failed(current.id, notice);
+}
+
+void OAuthLogin::cancel()
+{
+	if (!busy) {
+		return;
+	}
+	++attempt;
+	callback.close();
+	for (auto *reply : network.findChildren<QNetworkReply *>()) {
+		reply->abort();
+	}
+	pendingAuthorizationUrl.clear();
+	state.clear();
+	verifier.clear();
+	busy = false;
+	emit cancelled(current.id);
 }
 
 } // namespace xinkx

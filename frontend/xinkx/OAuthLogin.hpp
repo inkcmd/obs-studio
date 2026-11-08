@@ -22,12 +22,15 @@ public:
 	bool begin(const StreamAccount &account, QString *error);
 	void retrieveIngest(const StreamAccount &account);
 	void revoke(const StreamAccount &account);
+	void cancel();
 	bool isBusy() const { return busy; }
-	static QString redirectUri();
+	QString authorizationUrl() const { return pendingAuthorizationUrl; }
+	static QString redirectUri(const QString &platform);
 
 signals:
 	void finished(const StreamAccount &account, const QString &notice, bool success);
 	void failed(const QString &accountId, const QString &message);
+	void cancelled(const QString &accountId);
 
 private:
 	struct Response {
@@ -43,6 +46,7 @@ private:
 	QNetworkAccessManager network;
 	QString state;
 	QString verifier;
+	QString pendingAuthorizationUrl;
 	quint64 attempt = 0;
 	bool busy = false;
 	bool refreshed = false;

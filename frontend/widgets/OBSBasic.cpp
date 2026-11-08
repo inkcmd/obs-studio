@@ -95,6 +95,7 @@ extern volatile long insideEventLoop;
 extern bool restart;
 
 extern bool EncoderAvailable(const char *encoder);
+extern volatile bool streaming_active;
 
 extern void RegisterTwitchAuth();
 extern void RegisterRestreamAuth();
@@ -602,10 +603,29 @@ OBSBasic::OBSBasic(QWidget *parent) : OBSMainWindow(parent), undo_s(ui), ui(new 
 		if (!outputHandler) {
 			return;
 		}
+		// OBS frontend API consumers (including scene integrations) must see
+		// independent XINKX outputs as a real broadcast session.
+		if (managedStream) {
+			os_atomic_set_bool(&streaming_active, active || outputHandler->StreamingActive());
+		}
+		ui->statusbar->ManagedStreamingChanged(active);
 		if (active) {
 			OnActivate();
 		} else {
 			OnDeactivate();
+		}
+		if (managedStream) {
+			if (!active && !outputHandler->StreamingActive()) {
+				managedStream = false;
+				emit StreamingStopped();
+				OnEvent(OBS_FRONTEND_EVENT_STREAMING_STOPPED);
+				SetBroadcastFlowEnabled(auth && auth->broadcastFlow());
+				if (sysTrayStream) {
+					sysTrayStream->setText(QTStr("Basic.Main.StartStreaming"));
+					sysTrayStream->setEnabled(true);
+				}
+			}
+			return;
 		}
 		if (StreamingActive() || streamingStarting) {
 			return;

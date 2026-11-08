@@ -98,6 +98,7 @@ public:
 	void StreamDelayStopping(int sec);
 	void StreamStarted(obs_output_t *output);
 	void StreamStopped();
+	void ManagedStreamingChanged(bool active);
 	void RecordingStarted(obs_output_t *output);
 	void RecordingStopped();
 	void RecordingPaused();

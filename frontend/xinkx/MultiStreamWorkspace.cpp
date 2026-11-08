@@ -6,11 +6,13 @@
 
 #include <QCheckBox>
 #include <QBrush>
+#include <QClipboard>
 #include <QColor>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFormLayout>
+#include <QGuiApplication>
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QHash>
@@ -171,7 +173,7 @@ bool editAccount(QWidget *parent, StreamAccount &account, bool creating)
 	auto *label = new QLineEdit(account.label, &dialog);
 	label->setPlaceholderText(QStringLiteral("Название аккаунта"));
 	form->addRow(QStringLiteral("Имя"), label);
-	auto *enabled = new QCheckBox(QStringLiteral("Запускать вместе с OBS"), &dialog);
+	auto *enabled = new QCheckBox(QStringLiteral("Участвует в общей трансляции"), &dialog);
 	enabled->setChecked(account.enabled);
 	form->addRow(enabled);
 	auto *clientId = new QLineEdit(account.oauth.clientId, &dialog);
@@ -183,13 +185,14 @@ bool editAccount(QWidget *parent, StreamAccount &account, bool creating)
 	clientSecret->setPlaceholderText(QStringLiteral("Twitch и Kick: обязателен; Google: если выдан"));
 	clientSecret->setToolTip(QStringLiteral("Конфиденциальный секрет хранится локально через DPAPI. Не встраивай его в распространяемый EXE."));
 	form->addRow(QStringLiteral("Client Secret"), clientSecret);
-	auto *callback = new QLabel(OAuthLogin::redirectUri(), &dialog);
+	auto *callback = new QLabel(OAuthLogin::redirectUri(account.platform), &dialog);
 	callback->setTextInteractionFlags(Qt::TextSelectableByMouse);
 	form->addRow(QStringLiteral("OAuth callback"), callback);
 	auto *youtubeId = new QLineEdit(account.youtubeStreamId, &dialog);
 	form->addRow(QStringLiteral("ID видеопотока YouTube"), youtubeId);
 	const auto updateOAuthFields = [=] {
 		const auto provider = platform->currentData().toString();
+		callback->setText(OAuthLogin::redirectUri(provider));
 		const bool oauth = platformApi(provider) != nullptr;
 		for (auto *field : {static_cast<QWidget *>(clientId), static_cast<QWidget *>(clientSecret),
 				    static_cast<QWidget *>(callback)}) {
@@ -316,18 +319,18 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 	auto accounts = std::make_shared<QVector<StreamAccount>>(loadStreamAccounts());
 	auto dirty = std::make_shared<bool>(false);
 	auto notices = std::make_shared<QHash<QString, QString>>();
-	auto *group = new QGroupBox(u"XINKX · Аккаунты трансляции"_s, streamPage);
+	auto *group = new QGroupBox(u"XINKX · Выходы трансляции"_s, streamPage);
 	group->setObjectName(u"xinkxStreamAccounts"_s);
 	auto *layout = new QVBoxLayout(group);
 	auto *description = new QLabel(group);
 	description->setWordWrap(true);
 	layout->addWidget(description);
-	auto *showNative = new QCheckBox(u"Показать сохранённые настройки OBS (резервный выход)"_s, group);
-	showNative->setToolTip(u"Профиль OBS не изменяется при назначении основного аккаунта XINKX."_s);
+	auto *showNative = new QCheckBox(u"Показать штатные настройки OBS (режим без аккаунтов XINKX)"_s, group);
+	showNative->setToolTip(u"Штатная служба OBS сохраняется в профиле, но не запускается вместе с выходами XINKX."_s);
 	layout->addWidget(showNative);
 	auto *tree = new QTreeWidget(group);
 	tree->setColumnCount(3);
-	tree->setHeaderLabels({u"Запуск"_s, u"Аккаунт"_s, u"Состояние"_s});
+	tree->setHeaderLabels({u"Эфир"_s, u"Выход"_s, u"Состояние"_s});
 	tree->setRootIsDecorated(false);
 	tree->setMinimumHeight(150);
 	tree->header()->setSectionResizeMode(1, QHeaderView::Stretch);
@@ -337,8 +340,7 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 	auto *add = new QPushButton(u"Добавить"_s, group);
 	auto *edit = new QPushButton(u"Изменить"_s, group);
 	auto *remove = new QPushButton(u"Удалить"_s, group);
-	auto *primary = new QPushButton(u"Основной выход"_s, group);
-	for (auto *button : {add, edit, remove, primary}) {
+	for (auto *button : {add, edit, remove}) {
 		actions->addWidget(button);
 	}
 	layout->addLayout(actions);
@@ -350,7 +352,15 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 		oauthActions->addWidget(button);
 	}
 	layout->addLayout(oauthActions);
-	auto *notice = new QLabel(u"OAuth callback: %1"_s.arg(OAuthLogin::redirectUri()), group);
+	auto *pendingActions = new QHBoxLayout();
+	auto *copyLink = new QPushButton(u"Скопировать ссылку OAuth"_s, group);
+	auto *cancelAuth = new QPushButton(u"Отменить ожидание"_s, group);
+	copyLink->hide();
+	cancelAuth->hide();
+	pendingActions->addWidget(copyLink);
+	pendingActions->addWidget(cancelAuth);
+	layout->addLayout(pendingActions);
+	auto *notice = new QLabel(u"OAuth callback: http://localhost:8765/api/oauth/{platform}/callback"_s, group);
 	notice->setTextFormat(Qt::PlainText);
 	notice->setWordWrap(true);
 	layout->addWidget(notice);
@@ -365,8 +375,6 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 		const bool oauth = hasSelection && platformApi(it->platform);
 		edit->setEnabled(hasSelection);
 		remove->setEnabled(hasSelection);
-		primary->setEnabled(hasSelection);
-		primary->setText(hasSelection && it->primary ? u"Вернуть службу OBS"_s : u"Сделать основным"_s);
 		login->setEnabled(oauth);
 		getKey->setEnabled(oauth);
 		revoke->setEnabled(oauth);
@@ -379,16 +387,13 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 		const auto selected = tree->currentItem() ? tree->currentItem()->data(1, Qt::UserRole).toString() : QString{};
 		tree->blockSignals(true);
 		tree->clear();
-		bool hasPrimary = false;
 		for (const auto &account : *accounts) {
-			hasPrimary |= account.primary;
 			auto *item = new QTreeWidgetItem(tree);
 			item->setData(1, Qt::UserRole, account.id);
 			item->setCheckState(0, account.enabled ? Qt::Checked : Qt::Unchecked);
 			const QString provider = account.platform == u"obs_service"_s
 						 ? account.destination.serviceName : platformTitle(account.platform);
-			item->setText(1, u"%1 · %2%3"_s.arg(provider, account.displayName(),
-							 account.primary ? u" ★ OBS"_s : QString{}));
+			item->setText(1, u"%1 · %2"_s.arg(provider, account.displayName()));
 			const auto &dest = account.destination;
 			const bool connected = !account.oauth.requiresAuthorization() && !account.providerId.isEmpty();
 			const bool ready = dest.ready() && (!dest.fromOAuth || !account.oauth.accessToken.isEmpty());
@@ -414,13 +419,14 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 		}
 		tree->blockSignals(false);
 		updateActions();
-		showNative->setVisible(hasPrimary);
-		const bool stockVisible = !hasPrimary || showNative->isChecked();
+		const bool hasAccounts = !accounts->isEmpty();
+		showNative->setVisible(hasAccounts);
+		const bool stockVisible = !hasAccounts || showNative->isChecked();
 		nativeService->setVisible(stockVisible);
 		nativeStack->setVisible(stockVisible);
-		description->setText(hasPrimary
-					 ? u"★ — основной выход использует выбранный аккаунт. Остальные отмеченные выходы передают видео параллельно. Настройки службы OBS сохранены как резервные."_s
-					 : u"Пока основной аккаунт не назначен, OBS использует службу из штатных настроек выше. Дополнительные выходы работают независимо."_s);
+		description->setText(hasAccounts
+					 ? u"Все отмеченные выходы равноправны: каждый кодирует и передаёт видео независимо. Общая кнопка запускает и останавливает их вместе; штатная служба OBS не используется."_s
+					 : u"Пока выходы XINKX не добавлены, работает штатная служба OBS из настроек выше."_s);
 	};
 	QObject::connect(tree, &QTreeWidget::currentItemChanged, group, [=] { updateActions(); });
 	QObject::connect(showNative, &QCheckBox::toggled, group, [=] { rebuild(); });
@@ -476,22 +482,12 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 		markChanged();
 		rebuild();
 	});
-	QObject::connect(primary, &QPushButton::clicked, group, [=] {
-		if (const auto *account = current()) {
-			const auto id = account->primary ? QString{} : account->id;
-			for (auto &entry : *accounts) {
-				entry.primary = entry.id == id;
-				entry.enabled |= entry.primary;
-			}
-			markChanged();
-			rebuild();
-		}
-	});
-
 	auto *auth = new OAuthLogin(group);
 	const auto setBusy = [=](bool busy) {
+		copyLink->setVisible(busy && !auth->authorizationUrl().isEmpty());
+		cancelAuth->setVisible(busy);
 		if (busy) {
-			for (auto *button : {add, edit, remove, primary, login, getKey, revoke}) {
+			for (auto *button : {add, edit, remove, login, getKey, revoke}) {
 				button->setEnabled(false);
 			}
 		} else {
@@ -501,6 +497,15 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 		tree->setEnabled(!busy);
 		busyChanged(busy);
 	};
+	QObject::connect(copyLink, &QPushButton::clicked, group, [=] {
+		QGuiApplication::clipboard()->setText(auth->authorizationUrl());
+		notice->setText(u"Ссылка скопирована. Открой её в браузере, где выполнен вход на площадку."_s);
+	});
+	QObject::connect(cancelAuth, &QPushButton::clicked, auth, &OAuthLogin::cancel);
+	QObject::connect(auth, &OAuthLogin::cancelled, group, [=](const QString &) {
+		setBusy(false);
+		notice->setText(u"Авторизация отменена. Можно закрыть настройки или начать заново."_s);
+	});
 	const auto oauthAccount = [=]() -> StreamAccount * {
 		if (*dirty) {
 			notice->setText(u"Сначала примени изменения списка аккаунтов"_s);
@@ -514,7 +519,7 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 			QString error;
 			if (auth->begin(*account, &error)) {
 				setBusy(true);
-				notice->setText(u"Заверши авторизацию в системном браузере"_s);
+				notice->setText(u"Заверши авторизацию в браузере. Если открылся не тот профиль, скопируй ссылку."_s);
 			} else {
 				notices->insert(account->id, error);
 				notice->setText(error);

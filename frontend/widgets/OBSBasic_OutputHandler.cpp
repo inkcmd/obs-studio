@@ -30,7 +30,7 @@ void OBSBasic::ResetOutputs()
 	const char *mode = config_get_string(activeConfiguration, "Output", "Mode");
 	bool advOut = astrcmpi(mode, "Advanced") == 0;
 
-	if ((!outputHandler || !outputHandler->Active()) &&
+	if ((!outputHandler || !outputHandler->Active()) && !StreamSessionActive() &&
 	    (!setupStreamingGuard.valid() ||
 	     setupStreamingGuard.wait_for(std::chrono::seconds{0}) == std::future_status::ready)) {
 		outputHandler.reset();

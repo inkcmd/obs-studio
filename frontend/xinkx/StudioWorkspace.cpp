@@ -8,11 +8,16 @@
 
 #include <QDir>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QDoubleSpinBox>
 #include <QDockWidget>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QGuiApplication>
 #include <QGridLayout>
+#include <QHBoxLayout>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QPushButton>
 #include <QSettings>
@@ -32,6 +37,7 @@ namespace {
 struct InspectorState {
 	qint64 itemId = -1;
 	double ratio = 1.0;
+	SelectedTransform current;
 };
 
 QDoubleSpinBox *makeDimensionField(QWidget *parent, bool sizeField)
@@ -56,8 +62,8 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	auto updateExtraStatus = [extraStatus, manager, mainWindow] {
 		const int active = manager->activeCount();
 		const int count = manager->configuredCount();
-		auto text = QStringLiteral("Доп. потоки: %1/%2").arg(active).arg(count);
-		if (active && !mainWindow->StreamingActive()) {
+		auto text = QStringLiteral("Выходы: %1/%2").arg(active).arg(count);
+		if (active) {
 			text += QStringLiteral(" · %1 кбит/с · пропущено: %2")
 					.arg(manager->extraBitrate()).arg(manager->totalDroppedFrames());
 		}
@@ -102,6 +108,24 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	auto *keepAspect = new QCheckBox(QStringLiteral("Сохранять пропорции"), content);
 	keepAspect->setChecked(true);
 	layout->addWidget(keepAspect);
+	// This is OBS's own preview snapping setting, not a separate XINKX scene model.
+	auto *snapping = new QCheckBox(QStringLiteral("Магнитные направляющие OBS"), content);
+	snapping->setToolTip(QStringLiteral("Привязка к краям холста, центру и другим источникам при перетаскивании."));
+	snapping->setChecked(config_get_bool(App()->GetUserConfig(), "BasicWindow", "SnappingEnabled"));
+	layout->addWidget(snapping);
+	QObject::connect(snapping, &QCheckBox::toggled, mainWindow, [](bool enabled) {
+		config_set_bool(App()->GetUserConfig(), "BasicWindow", "SnappingEnabled", enabled);
+	});
+	auto *snapSync = new QTimer(mainWindow);
+	snapSync->setInterval(1000);
+	QObject::connect(snapSync, &QTimer::timeout, mainWindow, [snapping] {
+		const bool enabled = config_get_bool(App()->GetUserConfig(), "BasicWindow", "SnappingEnabled");
+		if (snapping->isChecked() != enabled) {
+			const QSignalBlocker blocker(snapping);
+			snapping->setChecked(enabled);
+		}
+	});
+	snapSync->start();
 
 	auto *rotate = makeDimensionField(content, false);
 	rotate->setRange(-360.0, 360.0);
@@ -145,6 +169,14 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	alignmentGrid->addWidget(hCenter, 1, 0);
 	alignmentGrid->addWidget(vCenter, 1, 1);
 	layout->addLayout(alignmentGrid);
+	auto *copyLayout = new QPushButton(QStringLiteral("Копировать размещение"), content);
+	auto *pasteLayout = new QPushButton(QStringLiteral("Вставить размещение"), content);
+	copyLayout->setEnabled(false);
+	pasteLayout->setEnabled(false);
+	auto *clipboardRow = new QHBoxLayout();
+	clipboardRow->addWidget(copyLayout);
+	clipboardRow->addWidget(pasteLayout);
+	layout->addLayout(clipboardRow);
 
 	auto *lockedHint = new QLabel(content);
 	lockedHint->setWordWrap(true);
@@ -160,6 +192,44 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	inspector->setFeatures(inspector->features() & ~QDockWidget::DockWidgetFloatable);
 
 	auto editor = std::make_shared<InspectorState>();
+	const QString transformPrefix = QStringLiteral("XINKX_TRANSFORM:");
+	QObject::connect(copyLayout, &QPushButton::clicked, mainWindow, [editor, transformPrefix] {
+		const auto &value = editor->current;
+		if (value.itemId < 0) {
+			return;
+		}
+		QJsonObject layout{{QStringLiteral("version"), 1}, {QStringLiteral("x"), value.x},
+				   {QStringLiteral("y"), value.y}, {QStringLiteral("width"), value.width},
+				   {QStringLiteral("height"), value.height}, {QStringLiteral("rotation"), value.rotation},
+				   {QStringLiteral("cropLeft"), value.cropLeft}, {QStringLiteral("cropTop"), value.cropTop},
+				   {QStringLiteral("cropRight"), value.cropRight}, {QStringLiteral("cropBottom"), value.cropBottom}};
+		QGuiApplication::clipboard()->setText(transformPrefix +
+						  QString::fromUtf8(QJsonDocument(layout).toJson(QJsonDocument::Compact)));
+	});
+	QObject::connect(pasteLayout, &QPushButton::clicked, mainWindow, [editor, controller, mainWindow, transformPrefix] {
+		const QString text = QGuiApplication::clipboard()->text();
+		if (editor->itemId < 0 || editor->current.locked || !text.startsWith(transformPrefix) || text.size() > 8192) {
+			mainWindow->statusBar()->showMessage(QStringLiteral("Буфер не содержит размещение XINKX"), 4000);
+			return;
+		}
+		const auto doc = QJsonDocument::fromJson(text.mid(transformPrefix.size()).toUtf8());
+		const auto value = doc.object();
+		if (!doc.isObject() || value.value(QStringLiteral("version")).toInt() != 1 ||
+		    !value.value(QStringLiteral("width")).isDouble() || !value.value(QStringLiteral("height")).isDouble()) {
+			mainWindow->statusBar()->showMessage(QStringLiteral("Неверный формат размещения"), 4000);
+			return;
+		}
+		const bool moved = controller->applySelectedTransform(
+			editor->itemId, value.value(QStringLiteral("x")).toDouble(), value.value(QStringLiteral("y")).toDouble(),
+			value.value(QStringLiteral("width")).toDouble(), value.value(QStringLiteral("height")).toDouble());
+		const bool cropped = controller->applySelectedCropRotation(
+			editor->itemId, value.value(QStringLiteral("rotation")).toDouble(),
+			value.value(QStringLiteral("cropLeft")).toInt(), value.value(QStringLiteral("cropTop")).toInt(),
+			value.value(QStringLiteral("cropRight")).toInt(), value.value(QStringLiteral("cropBottom")).toInt());
+		mainWindow->statusBar()->showMessage(
+			moved && cropped ? QStringLiteral("Размещение применено к выбранному источнику")
+						 : QStringLiteral("Часть параметров не подходит для выбранного источника"), 4000);
+	});
 	auto apply = [controller, editor, x, y, width, height] {
 		if (editor->itemId < 0) {
 			return;
@@ -223,14 +293,17 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 
 	QObject::connect(controller, &StudioController::selectedTransformChanged, mainWindow,
 		[editor, x, y, width, height, rotate, cropLeft, cropTop, cropRight, cropBottom, fit, center,
-		 hCenter, vCenter, lockedHint, openProperties](const SelectedTransform &transform) {
+		 hCenter, vCenter, copyLayout, pasteLayout, lockedHint, openProperties](const SelectedTransform &transform) {
 			const bool selectedChanged = editor->itemId != transform.itemId;
 			if (selectedChanged) {
 				editor->itemId = -1;
 			}
+			editor->current = transform;
 			const bool editable = transform.itemId >= 0 && !transform.locked;
 			const bool resize = editable && transform.resizable;
 			openProperties->setEnabled(transform.itemId >= 0);
+			copyLayout->setEnabled(transform.itemId >= 0);
+			pasteLayout->setEnabled(editable);
 			for (auto *field : {x, y}) {
 				field->setEnabled(editable);
 			}

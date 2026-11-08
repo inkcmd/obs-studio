@@ -72,10 +72,9 @@ MultiStreamManager::~MultiStreamManager()
 	shutdown();
 }
 
-bool MultiStreamManager::hasPrimaryAccount() const
+bool MultiStreamManager::hasConfiguredAccounts() const
 {
-	const auto accounts = loadStreamAccounts(false);
-	return std::any_of(accounts.cbegin(), accounts.cend(), [](const auto &account) { return account.primary; });
+	return !loadStreamAccounts(false).isEmpty();
 }
 
 bool MultiStreamManager::enabled(const StreamAccount &account) const
@@ -83,52 +82,21 @@ bool MultiStreamManager::enabled(const StreamAccount &account) const
 	return selection.value(account.id, account.enabled);
 }
 
-StreamAccount MultiStreamManager::prepareSession()
-{
-	configured = loadStreamAccounts();
-	primary = {};
-	primaryOutput = nullptr;
-	primaryService = nullptr;
-	primaryState.clear();
-	primaryStats = {};
-	for (const auto &account : configured) {
-		if (account.primary) {
-			primary = account;
-			primary.enabled = enabled(account);
-			primaryState = u"Подключение"_s;
-			break;
-		}
-	}
-	return primary;
-}
-
-void MultiStreamManager::setPrimaryOutput(obs_output_t *output, obs_service_t *service)
-{
-	primaryService = service;
-	primaryOutput = output;
-	primaryStats.sampleTime = clock.elapsed();
-}
-
-void MultiStreamManager::primaryStopped(bool error)
-{
-	primaryState = error ? u"Ошибка основного выхода"_s : u"Остановлен"_s;
-	primaryOutput = nullptr;
-	primaryService = nullptr;
-	updateStatus();
-}
-
-void MultiStreamManager::startConfigured()
+int MultiStreamManager::startConfigured()
 {
 	if (anythingActive()) {
-		return;
+		return activeCount();
 	}
+	configured = loadStreamAccounts();
 	sessions.clear();
 	for (const auto &account : configured) {
-		if (account.id != primary.id && enabled(account)) {
+		if (enabled(account)) {
 			start(account);
 		}
 	}
 	updateStatus();
+	return static_cast<int>(std::count_if(sessions.cbegin(), sessions.cend(),
+						   [](const auto &entry) { return entry->running; }));
 }
 
 void MultiStreamManager::start(const StreamAccount &account)
@@ -206,8 +174,6 @@ void MultiStreamManager::shutdown()
 {
 	stopAll(true);
 	sessions.clear();
-	primaryOutput = nullptr;
-	primaryService = nullptr;
 }
 
 bool MultiStreamManager::anythingActive() const
@@ -226,7 +192,7 @@ int MultiStreamManager::configuredCount() const
 {
 	const auto accounts = loadStreamAccounts(false);
 	return static_cast<int>(std::count_if(accounts.cbegin(), accounts.cend(), [this](const auto &account) {
-		return !account.primary && enabled(account);
+		return enabled(account);
 	}));
 }
 
@@ -234,7 +200,7 @@ uint64_t MultiStreamManager::totalBytes() const
 {
 	uint64_t total = 0;
 	for (const auto &session : sessions) {
-		if (session->output) {
+		if (session->running && session->output) {
 			total += obs_output_get_total_bytes(session->output);
 		}
 	}
@@ -252,11 +218,22 @@ uint64_t MultiStreamManager::extraBitrate() const
 	return total;
 }
 
+float MultiStreamManager::worstCongestion() const
+{
+	float worst = 0.0f;
+	for (const auto &session : sessions) {
+		if (session->running && session->output) {
+			worst = std::max(worst, obs_output_get_congestion(session->output));
+		}
+	}
+	return worst;
+}
+
 int MultiStreamManager::totalDroppedFrames() const
 {
 	int total = 0;
 	for (const auto &session : sessions) {
-		if (session->output) {
+		if (session->running && session->output) {
 			total += obs_output_get_frames_dropped(session->output);
 		}
 	}
@@ -267,7 +244,7 @@ int MultiStreamManager::totalVideoFrames() const
 {
 	int total = 0;
 	for (const auto &session : sessions) {
-		if (session->output) {
+		if (session->running && session->output) {
 			total += obs_output_get_total_frames(session->output);
 		}
 	}
@@ -306,12 +283,6 @@ QString MultiStreamManager::OutputStats::liveDescription(obs_output_t *output) c
 QString MultiStreamManager::sessionDetails() const
 {
 	QStringList details;
-	if (!primary.id.isEmpty()) {
-		const auto state = primaryOutput && obs_output_reconnecting(primaryOutput) ? u"Переподключение"_s
-				   : primaryOutput ? primaryStats.liveDescription(primaryOutput)
-										  : primaryState;
-		details.push_back(primary.displayName() + u" (OBS): "_s + state);
-	}
 	for (const auto &session : sessions) {
 		details.push_back(session->account.displayName() + u": "_s + session->description());
 	}
@@ -321,7 +292,7 @@ QString MultiStreamManager::sessionDetails() const
 void MultiStreamManager::populateMenu(QMenu *menu)
 {
 	menu->clear();
-	if (anythingActive() || obs_output_active(primaryOutput)) {
+	if (anythingActive()) {
 		for (const auto &session : sessions) {
 			const auto id = session->account.id;
 			auto *action = menu->addAction(u"%1: %2"_s.arg(session->account.displayName(), session->description()));
@@ -337,14 +308,11 @@ void MultiStreamManager::populateMenu(QMenu *menu)
 				}
 			});
 		}
-		if (menu->isEmpty()) {
-			menu->addAction(u"Основной выход управляется кнопкой OBS"_s)->setEnabled(false);
-		}
 		return;
 	}
 
 	for (const auto &account : loadStreamAccounts()) {
-		auto *action = menu->addAction(account.displayName() + (account.primary ? u" (основной OBS)"_s : QString{}));
+		auto *action = menu->addAction(account.displayName());
 		action->setCheckable(true);
 		action->setChecked(enabled(account));
 		connect(action, &QAction::toggled, this, [this, id = account.id](bool checked) {
@@ -374,9 +342,6 @@ void MultiStreamManager::OutputStats::sample(obs_output_t *output, qint64 now)
 void MultiStreamManager::updateStatus()
 {
 	const auto now = clock.elapsed();
-	if (primaryOutput) {
-		primaryStats.sample(primaryOutput, now);
-	}
 	for (auto &session : sessions) {
 		if (session->running) {
 			session->stats.sample(session->output, now);
