@@ -1,25 +1,31 @@
 #include "StudioWorkspace.hpp"
 
 #include "StudioController.hpp"
+#include "MultiStreamManager.hpp"
+#include "MultiStreamWorkspace.hpp"
 
 #include <OBSApp.hpp>
 #include <widgets/OBSBasic.hpp>
 
 #include <QDir>
+#include <QCheckBox>
 #include <QDoubleSpinBox>
 #include <QDockWidget>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QGridLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QSettings>
 #include <QSignalBlocker>
+#include <QSpinBox>
 #include <QSizePolicy>
 #include <QTimer>
 #include <QToolBar>
 #include <QVBoxLayout>
 
 #include <memory>
+#include <utility>
 
 namespace xinkx {
 
@@ -27,6 +33,7 @@ namespace {
 
 struct InspectorState {
 	qint64 itemId = -1;
+	double ratio = 1.0;
 };
 
 QDoubleSpinBox *makeDimensionField(QWidget *parent, bool sizeField)
@@ -71,8 +78,10 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	header->addWidget(spacer);
 
 	auto *streamStatus = new QLabel(QStringLiteral("STREAM  OFFLINE"), header);
+	auto *multiStatus = new QLabel(QStringLiteral("MULTI  0/3"), header);
 	auto *recordStatus = new QLabel(QStringLiteral("REC  OFF"), header);
 	header->addWidget(streamStatus);
+	header->addWidget(multiStatus);
 	auto *statusSpacer = new QWidget(header);
 	statusSpacer->setFixedWidth(22);
 	header->addWidget(statusSpacer);
@@ -110,6 +119,53 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	form->addRow(QStringLiteral("Высота"), height);
 	layout->addLayout(form);
 
+	auto *keepAspect = new QCheckBox(QStringLiteral("Сохранять пропорции"), content);
+	keepAspect->setChecked(true);
+	layout->addWidget(keepAspect);
+
+	auto *rotate = makeDimensionField(content, false);
+	rotate->setRange(-360.0, 360.0);
+	rotate->setSuffix(QStringLiteral("°"));
+	auto *angleForm = new QFormLayout();
+	angleForm->addRow(QStringLiteral("Поворот"), rotate);
+	layout->addLayout(angleForm);
+
+	auto *cropTitle = new QLabel(QStringLiteral("Обрезка · пиксели источника"), content);
+	cropTitle->setStyleSheet(QStringLiteral("font-weight: 600;"));
+	layout->addWidget(cropTitle);
+	auto *cropGrid = new QGridLayout();
+	auto createCrop = [content] {
+		auto *field = new QSpinBox(content);
+		field->setRange(0, 32768);
+		field->setKeyboardTracking(false);
+		field->setEnabled(false);
+		return field;
+	};
+	auto *cropLeft = createCrop();
+	auto *cropTop = createCrop();
+	auto *cropRight = createCrop();
+	auto *cropBottom = createCrop();
+	cropGrid->addWidget(new QLabel(QStringLiteral("Слева"), content), 0, 0);
+	cropGrid->addWidget(cropLeft, 0, 1);
+	cropGrid->addWidget(new QLabel(QStringLiteral("Сверху"), content), 1, 0);
+	cropGrid->addWidget(cropTop, 1, 1);
+	cropGrid->addWidget(new QLabel(QStringLiteral("Справа"), content), 2, 0);
+	cropGrid->addWidget(cropRight, 2, 1);
+	cropGrid->addWidget(new QLabel(QStringLiteral("Снизу"), content), 3, 0);
+	cropGrid->addWidget(cropBottom, 3, 1);
+	layout->addLayout(cropGrid);
+
+	auto *fit = new QPushButton(QStringLiteral("Вписать в холст"), content);
+	auto *center = new QPushButton(QStringLiteral("В центр"), content);
+	auto *hCenter = new QPushButton(QStringLiteral("По горизонтали"), content);
+	auto *vCenter = new QPushButton(QStringLiteral("По вертикали"), content);
+	auto *alignmentGrid = new QGridLayout();
+	alignmentGrid->addWidget(fit, 0, 0);
+	alignmentGrid->addWidget(center, 0, 1);
+	alignmentGrid->addWidget(hCenter, 1, 0);
+	alignmentGrid->addWidget(vCenter, 1, 1);
+	layout->addLayout(alignmentGrid);
+
 	auto *lockedHint = new QLabel(content);
 	lockedHint->setWordWrap(true);
 	lockedHint->setStyleSheet(QStringLiteral("color: #9da9bd;"));
@@ -131,8 +187,47 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 		controller->applySelectedTransform(editor->itemId, x->value(), y->value(), width->value(),
 						   height->value());
 	};
-	for (auto *field : {x, y, width, height}) {
+	for (auto *field : {x, y}) {
 		QObject::connect(field, &QDoubleSpinBox::editingFinished, mainWindow, apply);
+	}
+	QObject::connect(width, &QDoubleSpinBox::editingFinished, mainWindow,
+			 [editor, width, height, keepAspect, apply] {
+				 if (keepAspect->isChecked() && editor->ratio > 0.001) {
+					 const QSignalBlocker blocker(height);
+					 height->setValue(width->value() / editor->ratio);
+				 }
+				 apply();
+			 });
+	QObject::connect(height, &QDoubleSpinBox::editingFinished, mainWindow,
+			 [editor, width, height, keepAspect, apply] {
+				 if (keepAspect->isChecked() && editor->ratio > 0.001) {
+					 const QSignalBlocker blocker(width);
+					 width->setValue(height->value() * editor->ratio);
+				 }
+				 apply();
+			 });
+	auto applyCropRotation = [controller, editor, rotate, cropLeft, cropTop, cropRight, cropBottom] {
+		if (editor->itemId < 0) {
+			return;
+		}
+		controller->applySelectedCropRotation(editor->itemId, rotate->value(), cropLeft->value(),
+						      cropTop->value(), cropRight->value(), cropBottom->value());
+	};
+	QObject::connect(rotate, &QDoubleSpinBox::editingFinished, mainWindow, applyCropRotation);
+	for (auto *field : {cropLeft, cropTop, cropRight, cropBottom}) {
+		QObject::connect(field, &QSpinBox::editingFinished, mainWindow, applyCropRotation);
+	}
+	for (const auto &action : {
+		     std::pair{fit, "on_actionFitToScreen_triggered"},
+		     std::pair{center, "on_actionCenterToScreen_triggered"},
+		     std::pair{hCenter, "on_actionHorizontalCenter_triggered"},
+		     std::pair{vCenter, "on_actionVerticalCenter_triggered"},
+	     }) {
+		const char *slot = action.second;
+		auto *button = action.first;
+		QObject::connect(button, &QPushButton::clicked, mainWindow, [mainWindow, slot] {
+			QMetaObject::invokeMethod(mainWindow, slot, Qt::DirectConnection);
+		});
 	}
 
 	QObject::connect(openProperties, &QPushButton::clicked, mainWindow, [mainWindow] {
@@ -157,7 +252,8 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 		});
 
 	QObject::connect(controller, &StudioController::selectedTransformChanged, mainWindow,
-		[editor, x, y, width, height, lockedHint, openProperties](const SelectedTransform &transform) {
+		[editor, x, y, width, height, rotate, cropLeft, cropTop, cropRight, cropBottom, fit, center,
+		 hCenter, vCenter, lockedHint, openProperties](const SelectedTransform &transform) {
 			const bool selectedChanged = editor->itemId != transform.itemId;
 			if (selectedChanged) {
 				editor->itemId = -1;
@@ -171,20 +267,35 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 			for (auto *field : {width, height}) {
 				field->setEnabled(resize);
 			}
+			rotate->setEnabled(editable);
+			for (auto *field : {cropLeft, cropTop, cropRight, cropBottom}) {
+				field->setEnabled(editable);
+			}
+			for (auto *button : {fit, center, hCenter, vCenter}) {
+				button->setEnabled(editable);
+			}
 			lockedHint->setText(transform.locked ? QStringLiteral("Источник заблокирован в OBS") :
 						  QString());
 
 			// Do not overwrite an in-progress edit during the 500 ms OBS state refresh.
 			if (!selectedChanged && (x->hasFocus() || y->hasFocus() || width->hasFocus() ||
-					 height->hasFocus())) {
+						 height->hasFocus() || rotate->hasFocus() || cropLeft->hasFocus() ||
+						 cropTop->hasFocus() || cropRight->hasFocus() || cropBottom->hasFocus())) {
 				return;
 			}
-			const QSignalBlocker bx(x), by(y), bw(width), bh(height);
+			const QSignalBlocker bx(x), by(y), bw(width), bh(height), br(rotate);
+			const QSignalBlocker bcl(cropLeft), bct(cropTop), bcr(cropRight), bcb(cropBottom);
 			x->setValue(transform.x);
 			y->setValue(transform.y);
+			rotate->setValue(transform.rotation);
+			cropLeft->setValue(transform.cropLeft);
+			cropTop->setValue(transform.cropTop);
+			cropRight->setValue(transform.cropRight);
+			cropBottom->setValue(transform.cropBottom);
 			if (transform.resizable) {
 				width->setValue(transform.width);
 				height->setValue(transform.height);
+				editor->ratio = transform.height > 0.001 ? transform.width / transform.height : 1.0;
 			} else {
 				width->setValue(width->minimum());
 				height->setValue(height->minimum());
@@ -195,17 +306,17 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	// XINKX-only settings are kept separately from OBS profile/scene data.
 	char configPath[512];
 	bool inspectorVisible = true;
+	QSettings *settings = nullptr;
 	const int configLength = GetAppConfigPath(configPath, sizeof(configPath), "xinkx-studio/studio.ini");
 	if (configLength > 0 && static_cast<size_t>(configLength) < sizeof(configPath)) {
 		const QString path = QString::fromUtf8(configPath);
 		QDir().mkpath(QFileInfo(path).absolutePath());
-		auto *settings = new QSettings(path, QSettings::IniFormat, mainWindow);
+		settings = new QSettings(path, QSettings::IniFormat, mainWindow);
 		inspectorVisible = settings->value(QStringLiteral("workspace/inspectorVisible"), true).toBool();
 		QObject::connect(inspector, &QDockWidget::visibilityChanged, mainWindow, [settings](bool visible) {
 			settings->setValue(QStringLiteral("workspace/inspectorVisible"), visible);
 		});
 	}
-
 	// OBS restores its saved window layout after constructing the frontend.
 	// Re-dock the inspector once that has finished; floating windows must not cover Preview.
 	QTimer::singleShot(0, mainWindow, [mainWindow, inspector, inspectorVisible] {
@@ -214,6 +325,14 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 		inspector->setVisible(inspectorVisible);
 		mainWindow->resizeDocks({inspector}, {280}, Qt::Horizontal);
 	});
+	installMultiStreamWorkspace(mainWindow, inspector, settings, multiStatus);
+}
+
+void shutdownStudioOutputs(OBSBasic *mainWindow)
+{
+	if (auto *manager = mainWindow->findChild<MultiStreamManager *>()) {
+		manager->shutdown();
+	}
 }
 
 } // namespace xinkx

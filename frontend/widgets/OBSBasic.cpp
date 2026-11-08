@@ -2039,6 +2039,7 @@ void OBSBasic::closeWindow()
 
 	/* Clear all scene data (dialogs, widgets, widget sub-items, scenes,
 	 * sources, etc) so that all references are released before shutdown */
+	xinkx::shutdownStudioOutputs(this);
 	ClearSceneData();
 
 	OnEvent(OBS_FRONTEND_EVENT_EXIT);

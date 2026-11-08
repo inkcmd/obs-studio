@@ -12,13 +12,20 @@ struct SelectedTransform {
 	double y = 0.0;
 	double width = 0.0;
 	double height = 0.0;
+	double rotation = 0.0;
+	int cropLeft = 0;
+	int cropTop = 0;
+	int cropRight = 0;
+	int cropBottom = 0;
 	bool locked = false;
 	bool resizable = false;
 
 	bool operator==(const SelectedTransform &other) const
 	{
 		return itemId == other.itemId && x == other.x && y == other.y && width == other.width &&
-		       height == other.height && locked == other.locked && resizable == other.resizable;
+		       height == other.height && rotation == other.rotation && cropLeft == other.cropLeft &&
+		       cropTop == other.cropTop && cropRight == other.cropRight &&
+		       cropBottom == other.cropBottom && locked == other.locked && resizable == other.resizable;
 	}
 };
 
@@ -29,6 +36,7 @@ class StudioController final : public QObject {
 public:
 	explicit StudioController(QObject *parent = nullptr);
 	bool applySelectedTransform(qint64 itemId, double x, double y, double width, double height);
+	bool applySelectedCropRotation(qint64 itemId, double rotation, int left, int top, int right, int bottom);
 
 signals:
 	void stateChanged(const QString &sceneName, const QString &selectedSource, bool streaming, bool recording);

@@ -49,6 +49,13 @@ bool collectSelectedSource(obs_scene_t *, obs_sceneitem_t *item, void *userData)
 	info->transform.locked = obs_sceneitem_locked(item);
 	info->transform.x = position.x;
 	info->transform.y = position.y;
+	info->transform.rotation = obs_sceneitem_get_rot(item);
+	obs_sceneitem_crop crop{};
+	obs_sceneitem_get_crop(item, &crop);
+	info->transform.cropLeft = crop.left;
+	info->transform.cropTop = crop.top;
+	info->transform.cropRight = crop.right;
+	info->transform.cropBottom = crop.bottom;
 
 	if (obs_sceneitem_get_bounds_type(item) != OBS_BOUNDS_NONE) {
 		vec2 bounds{};
@@ -59,8 +66,6 @@ bool collectSelectedSource(obs_scene_t *, obs_sceneitem_t *item, void *userData)
 	} else {
 		const uint32_t sourceWidth = obs_source_get_width(source);
 		const uint32_t sourceHeight = obs_source_get_height(source);
-		obs_sceneitem_crop crop{};
-		obs_sceneitem_get_crop(item, &crop);
 		if (sourceWidth > 0 && sourceHeight > 0) {
 			const double contentWidth = std::max(1, static_cast<int>(sourceWidth) - crop.left - crop.right);
 			const double contentHeight = std::max(1, static_cast<int>(sourceHeight) - crop.top - crop.bottom);
@@ -221,6 +226,58 @@ bool StudioController::applySelectedTransform(qint64 itemId, double x, double y,
 	mainWindow->CreateSceneUndoRedoAction(QStringLiteral("XINKX: Transform %1")
 						     .arg(QString::fromUtf8(obs_source_get_name(source))),
 						 before, after);
+	refresh();
+	return true;
+}
+
+bool StudioController::applySelectedCropRotation(qint64 itemId, double rotation, int left, int top,
+						 int right, int bottom)
+{
+	if (itemId < 0 || !std::isfinite(rotation) || rotation < -360.0 || rotation > 360.0 ||
+	    std::min({left, top, right, bottom}) < 0) {
+		return false;
+	}
+	OBSBasic *mainWindow = OBSBasic::Get();
+	if (!mainWindow) {
+		return false;
+	}
+	OBSScene scene = mainWindow->GetCurrentScene();
+	if (!scene) {
+		return false;
+	}
+	ItemLookup lookup{itemId};
+	obs_scene_enum_items(scene, findSelectedItem, &lookup);
+	obs_sceneitem_t *item = lookup.item;
+	if (!item || obs_sceneitem_locked(item)) {
+		return false;
+	}
+	obs_source_t *source = obs_sceneitem_get_source(item);
+	if (!source) {
+		return false;
+	}
+	const int sourceWidth = static_cast<int>(obs_source_get_width(source));
+	const int sourceHeight = static_cast<int>(obs_source_get_height(source));
+	// Cropping a zero-sized/dynamic source is not meaningful. Rotation remains editable.
+	if ((left != 0 || right != 0 || top != 0 || bottom != 0) &&
+	    (sourceWidth <= left + right || sourceHeight <= top + bottom)) {
+		return false;
+	}
+	obs_sceneitem_crop oldCrop{};
+	obs_sceneitem_get_crop(item, &oldCrop);
+	if (std::abs(obs_sceneitem_get_rot(item) - rotation) < 0.01 && oldCrop.left == left &&
+	    oldCrop.top == top && oldCrop.right == right && oldCrop.bottom == bottom) {
+		return true;
+	}
+	OBSData before = OBSBasic::BackupScene(scene);
+	const obs_sceneitem_crop crop{left, top, right, bottom};
+	obs_sceneitem_defer_update_begin(item);
+	obs_sceneitem_set_crop(item, &crop);
+	obs_sceneitem_set_rot(item, static_cast<float>(rotation));
+	obs_sceneitem_defer_update_end(item);
+	OBSData after = OBSBasic::BackupScene(scene);
+	mainWindow->CreateSceneUndoRedoAction(
+		QStringLiteral("XINKX: Crop / rotate %1").arg(QString::fromUtf8(obs_source_get_name(source))),
+		before, after);
 	refresh();
 	return true;
 }

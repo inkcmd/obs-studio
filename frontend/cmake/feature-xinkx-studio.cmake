@@ -6,6 +6,10 @@ target_sources(
     xinkx/StudioController.hpp
     xinkx/StudioWorkspace.cpp
     xinkx/StudioWorkspace.hpp
+    xinkx/MultiStreamManager.cpp
+    xinkx/MultiStreamManager.hpp
+    xinkx/MultiStreamWorkspace.cpp
+    xinkx/MultiStreamWorkspace.hpp
 )
 
 target_compile_definitions(obs-studio PRIVATE XINKX_STUDIO=1)
