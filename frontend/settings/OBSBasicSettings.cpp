@@ -3767,8 +3767,11 @@ static void AddChangedVal(std::string &changed, const char *str)
 	changed += str;
 }
 
-void OBSBasicSettings::SaveSettings()
+bool OBSBasicSettings::SaveSettings()
 {
+	if (streamAccountsChanged && saveStreamAccounts && !saveStreamAccounts()) {
+		return false;
+	}
 	if (generalChanged) {
 		SaveGeneralSettings();
 	}
@@ -3848,6 +3851,7 @@ void OBSBasicSettings::SaveSettings()
 	} else {
 		restart = false;
 	}
+	return true;
 }
 
 bool OBSBasicSettings::QueryChanges()
@@ -3864,7 +3868,9 @@ bool OBSBasicSettings::QueryChanges()
 			return false;
 		}
 
-		SaveSettings();
+		if (!SaveSettings()) {
+			return false;
+		}
 	} else {
 		if (savedTheme != App()->GetTheme()) {
 			App()->SetTheme(savedTheme->id);
@@ -4013,7 +4019,9 @@ void OBSBasicSettings::on_buttonBox_clicked(QAbstractButton *button)
 			return;
 		}
 
-		SaveSettings();
+		if (!SaveSettings()) {
+			return;
+		}
 
 		UpdateYouTubeAppDockSettings();
 		ClearChanged();
@@ -4220,6 +4228,9 @@ void OBSBasicSettings::RecalcOutputResPixels(const char *resText)
 
 bool OBSBasicSettings::AskIfCanCloseSettings()
 {
+	if (streamOAuthBusy) {
+		return false;
+	}
 	bool canCloseSettings = false;
 
 	if (!Changed() || QueryChanges()) {

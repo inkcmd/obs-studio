@@ -1,40 +1,63 @@
 #include "MultiStreamManager.hpp"
-#include "StreamAccounts.hpp"
 
-#include <QByteArray>
+#include <QMenu>
 #include <QTimer>
 
 #include <algorithm>
-#include <cstring>
 
 namespace xinkx {
 
-namespace {
+using namespace Qt::StringLiterals;
 
-bool hasEncoder(const char *name)
+OBSServiceAutoRelease createStreamService(const StreamDestination &destination, const char *name)
 {
-	const char *id = nullptr;
-	for (size_t i = 0; obs_enum_encoder_types(i, &id); ++i) {
-		if (id && std::strcmp(id, name) == 0) {
-			return true;
+	if (!destination.ready()) {
+		return {};
+	}
+	OBSDataAutoRelease settings = obs_data_create();
+	obs_data_set_string(settings, "server", destination.ingestUrl.toUtf8().constData());
+	obs_data_set_string(settings, "key", destination.streamKey.toUtf8().constData());
+	return obs_service_create("rtmp_custom", name, settings, nullptr);
+}
+
+OBSEncoderAutoRelease createStreamEncoder(const StreamDestination &destination, const char *name)
+{
+	const auto nvenc = [] {
+		if (obs_get_encoder_codec("obs_nvenc_h264_tex")) {
+			return "obs_nvenc_h264_tex";
+		}
+		return obs_get_encoder_codec("ffmpeg_nvenc") ? "ffmpeg_nvenc" : nullptr;
+	};
+	const char *encoderId = destination.encoder == u"x264"_s ? "obs_x264" : nvenc();
+	if (!encoderId && destination.encoder == u"auto"_s) {
+		encoderId = "obs_x264";
+	}
+	if (!encoderId) {
+		return {};
+	}
+
+	OBSDataAutoRelease settings = obs_data_create();
+	obs_data_set_string(settings, "rate_control", "CBR");
+	obs_data_set_int(settings, "bitrate", destination.bitrate);
+	obs_data_set_int(settings, "keyint_sec", 2);
+	OBSEncoderAutoRelease encoder = obs_video_encoder_create(encoderId, name, settings, nullptr);
+	if (encoder) {
+		obs_encoder_set_video(encoder, obs_get_video());
+		obs_encoder_set_scaled_size(encoder, destination.width, destination.height);
+		if (obs_encoder_get_caps(encoder) & OBS_ENCODER_CAP_PASS_TEXTURE) {
+			// NVENC's CPU fallback can encode at the global resolution instead.
+			obs_encoder_set_gpu_scale_type(encoder, OBS_SCALE_BICUBIC);
 		}
 	}
-	return false;
+	return encoder;
 }
-
-QString startFailure(obs_output_t *output)
-{
-	const char *detail = output ? obs_output_get_last_error(output) : nullptr;
-	return detail && *detail ? QString::fromUtf8(detail) : QStringLiteral("OBS не запустил RTMP-выход");
-}
-
-} // namespace
 
 MultiStreamManager::MultiStreamManager(QObject *parent) : QObject(parent)
 {
+	clock.start();
 	auto *timer = new QTimer(this);
 	timer->setInterval(500);
-	QObject::connect(timer, &QTimer::timeout, this, [this] { updateStatus(); });
+	connect(timer, &QTimer::timeout, this, &MultiStreamManager::updateStatus);
 	timer->start();
 }
 
@@ -43,70 +66,181 @@ MultiStreamManager::~MultiStreamManager()
 	shutdown();
 }
 
+bool MultiStreamManager::hasPrimaryAccount() const
+{
+	const auto accounts = loadStreamAccounts(false);
+	return std::any_of(accounts.cbegin(), accounts.cend(), [](const auto &account) { return account.primary; });
+}
+
+bool MultiStreamManager::enabled(const StreamAccount &account) const
+{
+	return selection.value(account.id, account.enabled);
+}
+
+StreamAccount MultiStreamManager::prepareSession()
+{
+	configured = loadStreamAccounts();
+	primary = {};
+	primaryOutput = nullptr;
+	primaryService = nullptr;
+	primaryState.clear();
+	primaryStats = {};
+	for (const auto &account : configured) {
+		if (account.primary) {
+			primary = account;
+			primary.enabled = enabled(account);
+			primaryState = u"Подключение"_s;
+			break;
+		}
+	}
+	return primary;
+}
+
+void MultiStreamManager::setPrimaryOutput(obs_output_t *output, obs_service_t *service)
+{
+	primaryService = service;
+	primaryOutput = output;
+	primaryStats.sampleTime = clock.elapsed();
+}
+
+void MultiStreamManager::primaryStopped(bool error)
+{
+	primaryState = error ? u"Ошибка основного выхода"_s : u"Остановлен"_s;
+	primaryOutput = nullptr;
+	primaryService = nullptr;
+	updateStatus();
+}
+
 void MultiStreamManager::startConfigured()
 {
-	// The OBS primary output has already started. These are additional encoded
-	// outputs of the same OBS program, not an independent streaming subsystem.
 	if (anythingActive()) {
 		return;
 	}
-	for (auto &session : sessions) {
-		release(session);
-	}
-	const QVector<StreamAccount> accounts = loadStreamAccounts();
 	sessions.clear();
-	sessions.resize(static_cast<size_t>(accounts.size()));
-	for (int i = 0; i < accounts.size(); ++i) {
-		const StreamAccount &account = accounts[i];
-		if (!account.enabled) {
-			continue;
+	for (const auto &account : configured) {
+		if (account.id != primary.id && enabled(account)) {
+			start(account);
 		}
-		StreamDestination dest;
-		dest.url = account.ingestUrl;
-		dest.key = account.streamKey;
-		dest.encoder = account.encoder;
-		dest.bitrateKbps = account.bitrate;
-		dest.width = account.width;
-		dest.height = account.height;
-		QString error;
-		if (!start(i, dest, &error)) {
-			blog(LOG_WARNING, "XINKX extra stream #%d failed: %s", i + 1, error.toUtf8().constData());
-			emit streamError(QStringLiteral("%1: %2").arg(account.label, error));
+	}
+	updateStatus();
+}
+
+void MultiStreamManager::start(const StreamAccount &account)
+{
+	auto &session = *sessions.emplace_back(std::make_unique<Session>());
+	session.manager = this;
+	session.serial = ++nextSerial;
+	session.account = account;
+	const auto name = QByteArray("xinkx_extra_") + QByteArray::number(sessions.size() - 1);
+	session.service = createStreamService(account.destination, (name + "_service").constData());
+	const auto video = createStreamEncoder(account.destination, (name + "_video").constData());
+	OBSDataAutoRelease audioSettings = obs_data_create();
+	obs_data_set_int(audioSettings, "bitrate", 160);
+	OBSEncoderAutoRelease audio =
+		obs_audio_encoder_create("ffmpeg_aac", (name + "_audio").constData(), audioSettings, 0, nullptr);
+	OBSDataAutoRelease outputSettings = obs_data_create();
+	obs_data_set_bool(outputSettings, "hide_server_url", true);
+	session.output = obs_output_create("rtmp_output", (name + "_output").constData(), outputSettings, nullptr);
+	if (!session.service || !video || !audio || !session.output) {
+		session.failed = true;
+		return;
+	}
+	obs_encoder_set_audio(audio, obs_get_audio());
+	obs_output_set_video_encoder(session.output, video);
+	obs_output_set_audio_encoder(session.output, audio, 0);
+	obs_output_set_service(session.output, session.service);
+	obs_output_set_reconnect_settings(session.output, 5, 5);
+	session.stopped.Connect(obs_output_get_signal_handler(session.output), "stop", outputStopped, &session);
+	session.stats.sampleTime = clock.elapsed();
+	session.running = obs_output_start(session.output);
+	session.failed = !session.running;
+}
+
+void MultiStreamManager::outputStopped(void *data, calldata_t *params)
+{
+	auto *session = static_cast<Session *>(data);
+	auto *manager = session->manager;
+	const auto code = calldata_int(params, "code");
+	const auto serial = session->serial;
+	QMetaObject::invokeMethod(manager, [manager, serial, code] {
+		for (auto &entry : manager->sessions) {
+			if (entry->serial == serial) {
+				entry->running = false;
+				entry->failed = !entry->stopping && code != OBS_OUTPUT_SUCCESS;
+				entry->stopping = false;
+				manager->updateStatus();
+				break;
+			}
 		}
+	}, Qt::QueuedConnection);
+}
+
+void MultiStreamManager::stop(Session &session, bool force)
+{
+	if (!session.running || (session.stopping && !force)) {
+		return;
+	}
+	session.stopping = true;
+	if (force || !obs_output_active(session.output)) {
+		obs_output_force_stop(session.output);
+	} else {
+		obs_output_stop(session.output);
 	}
 }
 
-void MultiStreamManager::stopAll()
+void MultiStreamManager::stopAll(bool force)
 {
-	for (int i = 0; i < static_cast<int>(sessions.size()); ++i) {
-		stop(i);
+	for (auto &session : sessions) {
+		stop(*session, force);
 	}
+	updateStatus();
+}
+
+void MultiStreamManager::shutdown()
+{
+	stopAll(true);
+	sessions.clear();
+	primaryOutput = nullptr;
+	primaryService = nullptr;
+}
+
+bool MultiStreamManager::anythingActive() const
+{
+	return std::any_of(sessions.cbegin(), sessions.cend(), [](const auto &session) { return session->running; });
 }
 
 int MultiStreamManager::activeCount() const
 {
-	int result = 0;
-	for (int i = 0; i < static_cast<int>(sessions.size()); ++i) {
-		result += active(i) ? 1 : 0;
-	}
-	return result;
+	return static_cast<int>(std::count_if(sessions.cbegin(), sessions.cend(), [](const auto &session) {
+		return session->running && session->stats.timer.isValid() && !obs_output_reconnecting(session->output);
+	}));
 }
 
 int MultiStreamManager::configuredCount() const
 {
-	int result = 0;
-	for (const auto &account : loadStreamAccounts()) {
-		result += account.enabled ? 1 : 0;
-	}
-	return result;
+	const auto accounts = loadStreamAccounts(false);
+	return static_cast<int>(std::count_if(accounts.cbegin(), accounts.cend(), [this](const auto &account) {
+		return !account.primary && enabled(account);
+	}));
 }
 
 uint64_t MultiStreamManager::totalBytes() const
 {
 	uint64_t total = 0;
-	for (int i = 0; i < static_cast<int>(sessions.size()); ++i) {
-		if (active(i)) {
-			total += obs_output_get_total_bytes(sessions[i].output);
+	for (const auto &session : sessions) {
+		if (session->output) {
+			total += obs_output_get_total_bytes(session->output);
+		}
+	}
+	return total;
+}
+
+uint64_t MultiStreamManager::extraBitrate() const
+{
+	uint64_t total = 0;
+	for (const auto &session : sessions) {
+		if (session->running) {
+			total += session->stats.kbps;
 		}
 	}
 	return total;
@@ -115,9 +249,9 @@ uint64_t MultiStreamManager::totalBytes() const
 int MultiStreamManager::totalDroppedFrames() const
 {
 	int total = 0;
-	for (int i = 0; i < static_cast<int>(sessions.size()); ++i) {
-		if (active(i)) {
-			total += obs_output_get_frames_dropped(sessions[i].output);
+	for (const auto &session : sessions) {
+		if (session->output) {
+			total += obs_output_get_frames_dropped(session->output);
 		}
 	}
 	return total;
@@ -126,229 +260,128 @@ int MultiStreamManager::totalDroppedFrames() const
 int MultiStreamManager::totalVideoFrames() const
 {
 	int total = 0;
-	for (int i = 0; i < static_cast<int>(sessions.size()); ++i) {
-		if (active(i)) {
-			total += obs_output_get_total_frames(sessions[i].output);
+	for (const auto &session : sessions) {
+		if (session->output) {
+			total += obs_output_get_total_frames(session->output);
 		}
 	}
 	return total;
 }
 
-void MultiStreamManager::shutdown()
+QString MultiStreamManager::Session::description() const
 {
-	for (auto &session : sessions) {
-		if (session.output && obs_output_active(session.output)) {
-			// A normal stop is asynchronous; force a synchronous shutdown on exit.
-			obs_output_force_stop(session.output);
-		}
-		release(session);
+	if (failed) {
+		return account.destination.ready() ? u"Ошибка выхода"_s : u"Нужны параметры RTMP(S)"_s;
 	}
+	if (!running) {
+		return u"Остановлен"_s;
+	}
+	if (stopping) {
+		return u"Остановка"_s;
+	}
+	if (obs_output_reconnecting(output)) {
+		return u"Переподключение"_s;
+	}
+	return stats.liveDescription(output);
 }
 
-void MultiStreamManager::release(Session &session)
+QString MultiStreamManager::OutputStats::liveDescription(obs_output_t *output) const
 {
-	if (session.output) {
-		obs_output_release(session.output);
-		session.output = nullptr;
+	if (!timer.isValid()) {
+		return u"Подключение"_s;
 	}
-	if (session.service) {
-		obs_service_release(session.service);
-		session.service = nullptr;
-	}
-	if (session.video) {
-		obs_encoder_release(session.video);
-		session.video = nullptr;
-	}
-	if (session.audio) {
-		obs_encoder_release(session.audio);
-		session.audio = nullptr;
-	}
-	session.connecting = false;
-	session.stopRequested = false;
-	session.started = false;
+	const auto seconds = timer.elapsed() / 1000;
+	return u"LIVE · %1 кбит/с · %2:%3:%4 · пропущено: %5"_s
+		.arg(kbps).arg(seconds / 3600, 2, 10, QLatin1Char('0'))
+		.arg(seconds / 60 % 60, 2, 10, QLatin1Char('0')).arg(seconds % 60, 2, 10, QLatin1Char('0'))
+		.arg(obs_output_get_frames_dropped(output));
 }
 
-bool MultiStreamManager::active(int index) const
+QString MultiStreamManager::sessionDetails() const
 {
-	return index >= 0 && index < static_cast<int>(sessions.size()) && sessions[index].output &&
-	       obs_output_active(sessions[index].output);
+	QStringList details;
+	if (!primary.id.isEmpty()) {
+		const auto state = primaryOutput && obs_output_reconnecting(primaryOutput) ? u"Переподключение"_s
+				   : primaryOutput ? primaryStats.liveDescription(primaryOutput)
+										  : primaryState;
+		details.push_back(primary.displayName() + u" (OBS): "_s + state);
+	}
+	for (const auto &session : sessions) {
+		details.push_back(session->account.displayName() + u": "_s + session->description());
+	}
+	return details.join(QLatin1Char('\n'));
 }
 
-bool MultiStreamManager::anythingActive() const
+void MultiStreamManager::populateMenu(QMenu *menu)
 {
-	for (int i = 0; i < static_cast<int>(sessions.size()); ++i) {
-		if (active(i)) {
-			return true;
+	menu->clear();
+	if (anythingActive() || obs_output_active(primaryOutput)) {
+		for (const auto &session : sessions) {
+			const auto id = session->account.id;
+			auto *action = menu->addAction(u"%1: %2"_s.arg(session->account.displayName(), session->description()));
+			action->setEnabled(session->running && !session->stopping);
+			action->setToolTip(u"Остановить только этот выход"_s);
+			connect(action, &QAction::triggered, this, [this, id] {
+				for (auto &entry : sessions) {
+					if (entry->account.id == id) {
+						stop(*entry, false);
+						updateStatus();
+						break;
+					}
+				}
+			});
 		}
-	}
-	return false;
-}
-
-bool MultiStreamManager::start(int index, const StreamDestination &destination, QString *error)
-{
-	if (index < 0 || index >= static_cast<int>(sessions.size())) {
-		return false;
-	}
-	Session &session = sessions[index];
-	const auto reject = [this, &session, error, index](const QString &reason) {
-		session.message = reason;
-		if (error) {
-			*error = reason;
+		if (menu->isEmpty()) {
+			menu->addAction(u"Основной выход управляется кнопкой OBS"_s)->setEnabled(false);
 		}
-		emit destinationChanged(index);
-		return false;
-	};
-	if (active(index) || session.connecting) {
-		if (error) {
-			*error = QStringLiteral("Выход уже запущен");
-		}
-		return false;
-	}
-	const QString url = destination.url.trimmed();
-	if (!(url.startsWith(QStringLiteral("rtmp://"), Qt::CaseInsensitive) ||
-	      url.startsWith(QStringLiteral("rtmps://"), Qt::CaseInsensitive)) ||
-	    destination.key.trimmed().isEmpty()) {
-		return reject(QStringLiteral("Укажи RTMP(S)-адрес и ключ трансляции"));
-	}
-	obs_video_info videoInfo{};
-	if (!obs_get_video_info(&videoInfo) || !obs_get_video() || !obs_get_audio()) {
-		return reject(QStringLiteral("Видео и звук OBS ещё не инициализированы"));
-	}
-	if (destination.width < 320 || destination.height < 240 || destination.width % 2 != 0 ||
-	    destination.height % 2 != 0 || destination.bitrateKbps < 500 || destination.bitrateKbps > 51000) {
-		return reject(QStringLiteral("Некорректные размеры кадра или битрейт"));
-	}
-	// The previous inactive output can be discarded; no local RTMP relay is used.
-	release(session);
-	const QByteArray name = QByteArray("xinkx_extra_") + QByteArray::number(index);
-	obs_data_t *serviceSettings = obs_data_create();
-	obs_data_set_string(serviceSettings, "server", url.toUtf8().constData());
-	obs_data_set_string(serviceSettings, "key", destination.key.toUtf8().constData());
-	session.service = obs_service_create("rtmp_custom", (name + "_service").constData(), serviceSettings, nullptr);
-	obs_data_release(serviceSettings);
-
-	const QString encoderChoice = destination.encoder;
-	const char *encoderId = nullptr;
-	if (encoderChoice == QStringLiteral("x264")) {
-		encoderId = "obs_x264";
-	} else if (encoderChoice == QStringLiteral("nvenc")) {
-		encoderId = hasEncoder("obs_nvenc_h264_tex") ? "obs_nvenc_h264_tex" : "ffmpeg_nvenc";
-	} else {
-		encoderId = hasEncoder("obs_nvenc_h264_tex") ? "obs_nvenc_h264_tex" :
-			    hasEncoder("ffmpeg_nvenc") ? "ffmpeg_nvenc" : "obs_x264";
-	}
-
-	obs_data_t *videoSettings = obs_data_create();
-	obs_data_set_string(videoSettings, "rate_control", "CBR");
-	obs_data_set_int(videoSettings, "bitrate", destination.bitrateKbps);
-	obs_data_set_int(videoSettings, "keyint_sec", 2);
-	session.video = obs_video_encoder_create(encoderId, (name + "_video").constData(), videoSettings, nullptr);
-	obs_data_release(videoSettings);
-
-	obs_data_t *audioSettings = obs_data_create();
-	obs_data_set_int(audioSettings, "bitrate", 160);
-	session.audio = obs_audio_encoder_create("ffmpeg_aac", (name + "_audio").constData(), audioSettings, 0,
-					  nullptr);
-	obs_data_release(audioSettings);
-	session.output = obs_output_create("rtmp_output", (name + "_output").constData(), nullptr, nullptr);
-	if (!session.video || !session.audio || !session.service || !session.output) {
-		session.message = QStringLiteral("Не удалось создать RTMP-выход или H.264/AAC энкодер");
-		if (error) {
-			*error = session.message;
-		}
-		release(session);
-		emit destinationChanged(index);
-		return false;
-	}
-	obs_encoder_set_video(session.video, obs_get_video());
-	obs_encoder_set_audio(session.audio, obs_get_audio());
-	obs_encoder_set_scaled_size(session.video, static_cast<uint32_t>(destination.width),
-				    static_cast<uint32_t>(destination.height));
-	obs_output_set_video_encoder(session.output, session.video);
-	obs_output_set_audio_encoder(session.output, session.audio, 0);
-	obs_output_set_service(session.output, session.service);
-	obs_output_set_reconnect_settings(session.output, 5, 5);
-	session.stopRequested = false;
-	session.started = false;
-	session.connecting = true;
-	session.message.clear();
-	if (!obs_output_start(session.output)) {
-		session.message = startFailure(session.output);
-		if (error) {
-			*error = session.message;
-		}
-		release(session);
-		emit destinationChanged(index);
-		return false;
-	}
-	emit destinationChanged(index);
-	return true;
-}
-
-void MultiStreamManager::stop(int index)
-{
-	if (index < 0 || index >= static_cast<int>(sessions.size())) {
 		return;
 	}
-	Session &session = sessions[index];
-	if (session.output && obs_output_active(session.output)) {
-		session.stopRequested = true;
-		session.connecting = false;
-		obs_output_stop(session.output);
-		emit destinationChanged(index);
+
+	for (const auto &account : loadStreamAccounts()) {
+		auto *action = menu->addAction(account.displayName() + (account.primary ? u" (основной OBS)"_s : QString{}));
+		action->setCheckable(true);
+		action->setChecked(enabled(account));
+		connect(action, &QAction::toggled, this, [this, id = account.id](bool checked) {
+			selection[id] = checked;
+			updateStatus();
+		});
+	}
+	if (menu->isEmpty()) {
+		menu->addAction(u"Добавь аккаунты в настройках трансляции"_s)->setEnabled(false);
 	}
 }
 
-QString MultiStreamManager::description(int index) const
+void MultiStreamManager::OutputStats::sample(obs_output_t *output, qint64 now)
 {
-	if (index < 0 || index >= static_cast<int>(sessions.size())) {
-		return QString();
+	const auto totalBytes = obs_output_get_total_bytes(output);
+	if (totalBytes && !timer.isValid()) {
+		timer.start();
 	}
-	const Session &session = sessions[index];
-	if (session.stopRequested && active(index)) {
-		return QStringLiteral("Остановка...");
+	const auto elapsed = now - sampleTime;
+	if (elapsed >= 250) {
+		kbps = totalBytes >= bytes ? 8 * (totalBytes - bytes) / elapsed : 0;
+		bytes = totalBytes;
+		sampleTime = now;
 	}
-	if (active(index)) {
-		if (session.connecting && !session.started) {
-			return QStringLiteral("Подключение...");
-		}
-		const uint64_t bytes = obs_output_get_total_bytes(session.output);
-		const int dropped = obs_output_get_frames_dropped(session.output);
-		return QStringLiteral("LIVE · %1 МиБ · пропущено кадров: %2")
-			.arg(QString::number(bytes / (1024.0 * 1024.0), 'f', 1))
-			.arg(dropped);
-	}
-	return session.message.isEmpty() ? QStringLiteral("Остановлен") : session.message;
 }
 
 void MultiStreamManager::updateStatus()
 {
-	for (int i = 0; i < static_cast<int>(sessions.size()); ++i) {
-		Session &session = sessions[i];
-		if (session.output && !obs_output_active(session.output) &&
-		    (session.connecting || session.started || session.stopRequested)) {
-			if (!session.stopRequested) {
-				session.message = startFailure(session.output);
-			} else {
-				session.message.clear();
-			}
-			session.connecting = false;
-			session.stopRequested = false;
-			session.started = false;
-		}
-		if (session.output && obs_output_active(session.output) && session.connecting) {
-			// OBS reports active during connection. Actual network progress appears in stats.
-			if (obs_output_get_total_bytes(session.output) > 0) {
-				session.started = true;
-				session.connecting = false;
-			}
-		}
-		const QString display = description(i);
-		if (display != session.lastDisplay) {
-			session.lastDisplay = display;
-			emit destinationChanged(i);
+	const auto now = clock.elapsed();
+	if (primaryOutput) {
+		primaryStats.sample(primaryOutput, now);
+	}
+	for (auto &session : sessions) {
+		if (session->running) {
+			session->stats.sample(session->output, now);
 		}
 	}
+	const bool active = anythingActive();
+	if (lastActive != active) {
+		lastActive = active;
+		emit activityChanged(active);
+	}
+	emit statusChanged();
 }
 
 } // namespace xinkx

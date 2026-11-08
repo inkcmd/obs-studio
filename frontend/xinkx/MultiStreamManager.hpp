@@ -1,24 +1,22 @@
 #pragma once
 
-#include <QObject>
-#include <QString>
+#include "StreamAccounts.hpp"
 
+#include <QObject>
+#include <QHash>
+#include <QElapsedTimer>
+
+#include <obs.hpp>
+
+#include <memory>
 #include <vector>
 
-#include <obs.h>
+class QMenu;
 
 namespace xinkx {
 
-// The platform is a destination, not an OBS profile. Each destination owns its
-// own RTMP service, output, H.264 video encoder and AAC audio encoder.
-struct StreamDestination {
-	QString url;
-	QString key;
-	QString encoder = QStringLiteral("auto");
-	int bitrateKbps = 6000;
-	int width = 1920;
-	int height = 1080;
-};
+OBSServiceAutoRelease createStreamService(const StreamDestination &destination, const char *name);
+OBSEncoderAutoRelease createStreamEncoder(const StreamDestination &destination, const char *name);
 
 class MultiStreamManager final : public QObject {
 	Q_OBJECT
@@ -26,41 +24,68 @@ class MultiStreamManager final : public QObject {
 public:
 	explicit MultiStreamManager(QObject *parent = nullptr);
 	~MultiStreamManager() override;
-	void shutdown();
+
+	bool hasPrimaryAccount() const;
+	StreamAccount prepareSession();
+	void setPrimaryOutput(obs_output_t *output, obs_service_t *service);
+	void primaryStopped(bool error);
 	void startConfigured();
-	void stopAll();
+	void stopAll(bool force = false);
+	void shutdown();
+	bool anythingActive() const;
 	int activeCount() const;
 	int configuredCount() const;
 	uint64_t totalBytes() const;
+	uint64_t extraBitrate() const;
 	int totalDroppedFrames() const;
 	int totalVideoFrames() const;
-
-	bool start(int index, const StreamDestination &destination, QString *error = nullptr);
-	void stop(int index);
-	bool active(int index) const;
-	QString description(int index) const;
-	bool anythingActive() const;
+	QString sessionDetails() const;
+	void populateMenu(QMenu *menu);
 
 signals:
-	void destinationChanged(int index);
-	void streamError(const QString &message);
+	void statusChanged();
+	void activityChanged(bool active);
 
 private:
-	struct Session {
-		obs_output_t *output = nullptr;
-		obs_service_t *service = nullptr;
-		obs_encoder_t *video = nullptr;
-		obs_encoder_t *audio = nullptr;
-		bool connecting = false;
-		bool stopRequested = false;
-		bool started = false;
-		QString message;
-		QString lastDisplay;
+	struct OutputStats {
+		QElapsedTimer timer;
+		uint64_t bytes = 0;
+		qint64 sampleTime = 0;
+		uint64_t kbps = 0;
+		void sample(obs_output_t *output, qint64 now);
+		QString liveDescription(obs_output_t *output) const;
 	};
 
-	std::vector<Session> sessions;
-	void release(Session &session);
+	struct Session {
+		MultiStreamManager *manager;
+		quint64 serial;
+		StreamAccount account;
+		OBSServiceAutoRelease service;
+		OBSOutputAutoRelease output;
+		OBSSignal stopped;
+		OutputStats stats;
+		bool running = false;
+		bool stopping = false;
+		bool failed = false;
+		QString description() const;
+	};
+
+	QHash<QString, bool> selection;
+	QVector<StreamAccount> configured;
+	StreamAccount primary;
+	OBSService primaryService;
+	OBSOutput primaryOutput;
+	QString primaryState;
+	OutputStats primaryStats;
+	QElapsedTimer clock;
+	std::vector<std::unique_ptr<Session>> sessions;
+	bool lastActive = false;
+	quint64 nextSerial = 0;
+	bool enabled(const StreamAccount &account) const;
+	void start(const StreamAccount &account);
+	void stop(Session &session, bool force);
 	void updateStatus();
+	static void outputStopped(void *data, calldata_t *params);
 };
 
 } // namespace xinkx

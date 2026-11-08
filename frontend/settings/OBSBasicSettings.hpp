@@ -60,6 +60,9 @@ private:
 
 	bool generalChanged = false;
 	bool stream1Changed = false;
+	bool streamAccountsChanged = false;
+	bool streamOAuthBusy = false;
+	std::function<bool()> saveStreamAccounts;
 	bool outputsChanged = false;
 	bool audioChanged = false;
 	bool videoChanged = false;
@@ -144,7 +147,7 @@ private:
 	inline bool Changed() const
 	{
 		return generalChanged || appearanceChanged || outputsChanged || stream1Changed || audioChanged ||
-		       videoChanged || advancedChanged || hotkeysChanged || a11yChanged;
+		       videoChanged || advancedChanged || hotkeysChanged || a11yChanged || streamAccountsChanged;
 	}
 
 	inline void EnableApplyButton(bool en) { ui->buttonBox->button(QDialogButtonBox::Apply)->setEnabled(en); }
@@ -153,6 +156,7 @@ private:
 	{
 		generalChanged = false;
 		stream1Changed = false;
+		streamAccountsChanged = false;
 		outputsChanged = false;
 		audioChanged = false;
 		videoChanged = false;
@@ -295,7 +299,7 @@ private:
 	void SaveA11ySettings();
 	void SaveAppearanceSettings();
 	void SaveAdvancedSettings();
-	void SaveSettings();
+	bool SaveSettings();
 
 	void SearchHotkeys(const QString &text, obs_key_combination_t filterCombo);
 

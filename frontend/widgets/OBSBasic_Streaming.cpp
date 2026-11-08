@@ -26,35 +26,53 @@
 #endif
 
 #include <qt-wrappers.hpp>
+#include <xinkx/MultiStreamManager.hpp>
+
+#include <QStatusBar>
 
 #define STREAMING_START "==== Streaming Start ==============================================="
 #define STREAMING_STOP "==== Streaming Stop ================================================"
 
 void OBSBasic::DisplayStreamStartError()
 {
-	QString message = !outputHandler->lastError.empty() ? QTStr(outputHandler->lastError.c_str())
+	QString message = !managedStream && !outputHandler->lastError.empty() ? QTStr(outputHandler->lastError.c_str())
 							    : QTStr("Output.StartFailedGeneric");
 
+	if (auto *manager = findChild<xinkx::MultiStreamManager *>()) {
+		manager->primaryStopped(true);
+	}
+	if (managedStream) {
+		SetBroadcastFlowEnabled(auth && auth->broadcastFlow());
+	}
+	managedStream = false;
 	emit StreamingStopped();
 
 	if (sysTrayStream) {
-		sysTrayStream->setText(QTStr("Basic.Main.StartStreaming"));
+		sysTrayStream->setText(QTStr(StreamSessionActive() ? "Basic.Main.StopStreaming" : "Basic.Main.StartStreaming"));
 		sysTrayStream->setEnabled(true);
 	}
 
-	QMessageBox::critical(this, QTStr("Output.StartStreamFailed"), message);
+	if (StreamSessionActive()) {
+		statusBar()->showMessage(QTStr("Output.StartStreamFailed"), 10000);
+	} else {
+		QMessageBox::critical(this, QTStr("Output.StartStreamFailed"), message);
+	}
 }
 
 void OBSBasic::StartStreaming()
 {
-	if (outputHandler->StreamingActive()) {
+	if (StreamSessionActive() || streamingStarting) {
 		return;
 	}
 	if (disableOutputsRef) {
 		return;
 	}
 
-	if (auth && auth->broadcastFlow()) {
+	auto *manager = findChild<xinkx::MultiStreamManager *>();
+	const auto primary = manager ? manager->prepareSession() : xinkx::StreamAccount{};
+	managedStream = !primary.id.isEmpty();
+
+	if (!managedStream && auth && auth->broadcastFlow()) {
 		if (!broadcastActive && !broadcastReady) {
 			QMessageBox no_broadcast(this);
 			no_broadcast.setText(QTStr("Output.NoBroadcast.Text"));
@@ -73,6 +91,18 @@ void OBSBasic::StartStreaming()
 		}
 	}
 
+	OBSService streamService = service;
+	if (managedStream) {
+		const auto managed = primary.enabled ? xinkx::createStreamService(primary.destination, "xinkx_primary_service")
+						    : OBSServiceAutoRelease{};
+		if (!managed) {
+			manager->startConfigured();
+			DisplayStreamStartError();
+			return;
+		}
+		streamService = managed.Get();
+		SetBroadcastFlowEnabled(false);
+	}
 	emit StreamingPreparing();
 
 	if (sysTrayStream) {
@@ -80,8 +110,11 @@ void OBSBasic::StartStreaming()
 		sysTrayStream->setText("Basic.Main.PreparingStream");
 	}
 
-	auto finish_stream_setup = [&](bool setupStreamingResult) {
+	auto finish_stream_setup = [this, manager, primary, streamService](bool setupStreamingResult) {
 		if (!setupStreamingResult) {
+			if (manager) {
+				manager->startConfigured();
+			}
 			DisplayStreamStartError();
 			return;
 		}
@@ -90,18 +123,44 @@ void OBSBasic::StartStreaming()
 
 		SaveProject();
 
-		emit StreamingStarting(autoStartBroadcast);
+		emit StreamingStarting(managedStream || autoStartBroadcast);
 
 		if (sysTrayStream) {
 			sysTrayStream->setText("Basic.Main.Connecting");
 		}
 
-		if (!outputHandler->StartStreaming(service)) {
+		if (managedStream) {
+			const auto encoder = xinkx::createStreamEncoder(primary.destination, "xinkx_primary_video");
+			const auto output = outputHandler->StreamingOutput();
+			if (!output || !encoder) {
+				manager->startConfigured();
+				DisplayStreamStartError();
+				return;
+			}
+			OBSDataAutoRelease settings = obs_data_create();
+			obs_data_set_bool(settings, "hide_server_url", true);
+			obs_output_update(output, settings);
+			obs_output_set_video_encoder(output, encoder);
+			manager->setPrimaryOutput(output, streamService);
+		}
+		if (!managedStream) {
+			const auto output = outputHandler->StreamingOutput();
+			if (output) {
+				OBSDataAutoRelease settings = obs_data_create();
+				obs_data_set_bool(settings, "hide_server_url", false);
+				obs_output_update(output, settings);
+			}
+		}
+		const bool started = outputHandler->StartStreaming(streamService);
+		if (manager) {
+			manager->startConfigured();
+		}
+		if (!started) {
 			DisplayStreamStartError();
 			return;
 		}
 
-		if (autoStartBroadcast) {
+		if (!managedStream && autoStartBroadcast) {
 			emit BroadcastStreamStarted(autoStopBroadcast);
 			broadcastActive = true;
 		}
@@ -119,17 +178,20 @@ void OBSBasic::StartStreaming()
 		}
 
 #ifdef YOUTUBE_ENABLED
-		if (!autoStartBroadcast)
+		if (!managedStream && !autoStartBroadcast)
 			OBSBasic::ShowYouTubeAutoStartWarning();
 #endif
 	};
 
-	setupStreamingGuard = outputHandler->SetupStreaming(service, finish_stream_setup);
+	setupStreamingGuard = outputHandler->SetupStreaming(streamService, finish_stream_setup);
 }
 
 void OBSBasic::StopStreaming()
 {
 	SaveProject();
+	if (auto *manager = findChild<xinkx::MultiStreamManager *>()) {
+		manager->stopAll();
+	}
 
 	if (outputHandler->StreamingActive()) {
 		outputHandler->StopStreaming(streamingStopping);
@@ -172,6 +234,9 @@ void OBSBasic::StopStreaming()
 void OBSBasic::ForceStopStreaming()
 {
 	SaveProject();
+	if (auto *manager = findChild<xinkx::MultiStreamManager *>()) {
+		manager->stopAll(true);
+	}
 
 	if (outputHandler->StreamingActive()) {
 		outputHandler->StopStreaming(true);
@@ -251,7 +316,7 @@ void OBSBasic::StreamingStart()
 	}
 
 #ifdef YOUTUBE_ENABLED
-	if (!autoStartBroadcast) {
+	if (!managedStream && !autoStartBroadcast) {
 		// get a current stream key
 		obs_service_t *service_obj = GetService();
 		OBSDataAutoRelease settings = obs_service_get_settings(service_obj);
@@ -269,7 +334,7 @@ void OBSBasic::StreamingStart()
 	OnActivate();
 
 #ifdef YOUTUBE_ENABLED
-	if (YouTubeAppDock::IsYTServiceSelected()) {
+	if (!managedStream && YouTubeAppDock::IsYTServiceSelected()) {
 		youtubeAppDock->IngestionStarted();
 	}
 #endif
@@ -339,18 +404,23 @@ void OBSBasic::StreamingStop(int code, QString last_error)
 		errorDescription = Str("Output.ConnectFail.Disconnected");
 	}
 
-	if (use_last_error && !last_error.isEmpty()) {
+	if (!managedStream && use_last_error && !last_error.isEmpty()) {
 		dstr_printf(errorMessage, "%s\n\n%s", errorDescription, QT_TO_UTF8(last_error));
 	} else {
 		dstr_copy(errorMessage, errorDescription);
 	}
 
 	ui->statusbar->StreamStopped();
+	const bool wasManaged = managedStream;
+	managedStream = false;
+	if (auto *manager = findChild<xinkx::MultiStreamManager *>()) {
+		manager->primaryStopped(code != OBS_OUTPUT_SUCCESS);
+	}
 
 	emit StreamingStopped();
 
 	if (sysTrayStream) {
-		sysTrayStream->setText(QTStr("Basic.Main.StartStreaming"));
+		sysTrayStream->setText(QTStr(StreamSessionActive() ? "Basic.Main.StopStreaming" : "Basic.Main.StartStreaming"));
 		sysTrayStream->setEnabled(true);
 	}
 
@@ -360,15 +430,17 @@ void OBSBasic::StreamingStop(int code, QString last_error)
 	OnDeactivate();
 
 #ifdef YOUTUBE_ENABLED
-	if (YouTubeAppDock::IsYTServiceSelected()) {
+	if (!wasManaged && YouTubeAppDock::IsYTServiceSelected()) {
 		youtubeAppDock->IngestionStopped();
 	}
 #endif
 
 	blog(LOG_INFO, STREAMING_STOP);
 
-	if (encode_error) {
-		QString msg = last_error.isEmpty() ? QTStr("Output.StreamEncodeError.Msg")
+	if (wasManaged && code != OBS_OUTPUT_SUCCESS && StreamSessionActive()) {
+		statusBar()->showMessage(QTStr("Output.StartStreamFailed"), 10000);
+	} else if (encode_error) {
+		QString msg = wasManaged || last_error.isEmpty() ? QTStr("Output.StreamEncodeError.Msg")
 						   : QTStr("Output.StreamEncodeError.Msg.LastError").arg(last_error);
 		OBSMessageBox::information(this, QTStr("Output.StreamEncodeError.Title"), msg);
 
@@ -380,7 +452,7 @@ void OBSBasic::StreamingStop(int code, QString last_error)
 	}
 
 	// Reset broadcast button state/text
-	if (!broadcastActive) {
+	if (wasManaged || !broadcastActive) {
 		SetBroadcastFlowEnabled(auth && auth->broadcastFlow());
 	}
 	if (should_reconnect) {
@@ -390,11 +462,13 @@ void OBSBasic::StreamingStop(int code, QString last_error)
 
 void OBSBasic::StreamActionTriggered()
 {
-	if (outputHandler->StreamingActive()) {
+	auto *manager = findChild<xinkx::MultiStreamManager *>();
+	const bool hasManagedPrimary = manager && manager->hasPrimaryAccount();
+	if (StreamSessionActive()) {
 		bool confirm = config_get_bool(App()->GetUserConfig(), "BasicWindow", "WarnBeforeStoppingStream");
 
 #ifdef YOUTUBE_ENABLED
-		if (isVisible() && auth && IsYouTubeService(auth->service()) && autoStopBroadcast) {
+		if (!hasManagedPrimary && isVisible() && auth && IsYouTubeService(auth->service()) && autoStopBroadcast) {
 			QMessageBox::StandardButton button = OBSMessageBox::question(
 				this, QTStr("ConfirmStop.Title"), QTStr("YouTube.Actions.AutoStopStreamingWarning"),
 				QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
@@ -424,7 +498,7 @@ void OBSBasic::StreamActionTriggered()
 
 		Auth *auth = GetAuth();
 
-		auto action = (auth && auth->external()) ? StreamSettingsAction::ContinueStream
+		auto action = (hasManagedPrimary || (auth && auth->external())) ? StreamSettingsAction::ContinueStream
 							 : UIValidation::StreamSettingsConfirmation(this, service);
 		switch (action) {
 		case StreamSettingsAction::ContinueStream:
@@ -440,7 +514,7 @@ void OBSBasic::StreamActionTriggered()
 
 		bool bwtest = false;
 
-		if (this->auth) {
+		if (!hasManagedPrimary && this->auth) {
 			OBSDataAutoRelease settings = obs_service_get_settings(service);
 			bwtest = obs_data_get_bool(settings, "bwtest");
 			// Disable confirmation if this is going to open broadcast setup
@@ -467,6 +541,19 @@ void OBSBasic::StreamActionTriggered()
 		}
 
 		StartStreaming();
+	}
+}
+
+bool OBSBasic::StreamSessionActive() const
+{
+	const auto *manager = findChild<xinkx::MultiStreamManager *>();
+	return (outputHandler && outputHandler->StreamingActive()) || (manager && manager->anythingActive());
+}
+
+void OBSBasic::ShowStreamAccountsMenu(QMenu *menu)
+{
+	if (auto *manager = findChild<xinkx::MultiStreamManager *>()) {
+		manager->populateMenu(menu);
 	}
 }
 

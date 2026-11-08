@@ -12,6 +12,8 @@ target_sources(
     xinkx/MultiStreamWorkspace.hpp
     xinkx/StreamAccounts.cpp
     xinkx/StreamAccounts.hpp
+    xinkx/PlatformApi.cpp
+    xinkx/PlatformApi.hpp
     xinkx/OAuthLogin.cpp
     xinkx/OAuthLogin.hpp
 )

@@ -51,26 +51,21 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 {
 	auto *controller = new StudioController(mainWindow);
 	auto *manager = new MultiStreamManager(mainWindow);
-	QObject::connect(mainWindow, &OBSBasic::StreamingStarted, manager,
-			 [manager](bool delayStarting) {
-				 if (!delayStarting) {
-					 manager->startConfigured();
-				 }
-			 });
-	QObject::connect(mainWindow, &OBSBasic::StreamingStopping, manager, [manager] { manager->stopAll(); });
-	QObject::connect(mainWindow, &OBSBasic::StreamingStopped, manager, [manager] { manager->stopAll(); });
 	auto *extraStatus = new QLabel(mainWindow);
 	mainWindow->statusBar()->addPermanentWidget(extraStatus);
-	auto updateExtraStatus = [extraStatus, manager] {
+	auto updateExtraStatus = [extraStatus, manager, mainWindow] {
 		const int active = manager->activeCount();
 		const int count = manager->configuredCount();
-		extraStatus->setText(QStringLiteral("Доп. потоки: %1/%2").arg(active).arg(count));
+		auto text = QStringLiteral("Доп. потоки: %1/%2").arg(active).arg(count);
+		if (active && !mainWindow->StreamingActive()) {
+			text += QStringLiteral(" · %1 кбит/с · пропущено: %2")
+					.arg(manager->extraBitrate()).arg(manager->totalDroppedFrames());
+		}
+		extraStatus->setText(text);
 		extraStatus->setStyleSheet(active > 0 ? QStringLiteral("color: #58dea2;") : QString());
+		extraStatus->setToolTip(manager->sessionDetails().toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>")));
 	};
-	QObject::connect(manager, &MultiStreamManager::destinationChanged, mainWindow,
-			 [updateExtraStatus](int) { updateExtraStatus(); });
-	QObject::connect(manager, &MultiStreamManager::streamError, mainWindow,
-			 [mainWindow](const QString &message) { mainWindow->statusBar()->showMessage(message, 10000); });
+	QObject::connect(manager, &MultiStreamManager::statusChanged, mainWindow, updateExtraStatus);
 	updateExtraStatus();
 
 	// Inspector edits real OBS scene items; standard source dialogs stay available.

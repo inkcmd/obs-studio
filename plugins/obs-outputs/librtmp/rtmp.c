@@ -802,7 +802,8 @@ add_addr_info(struct sockaddr_storage *service, socklen_t *addrlen, AVal *host, 
 #ifndef _WIN32
 #define gai_strerrorA gai_strerror
 #endif
-        RTMP_Log(RTMP_LOGERROR, "Could not resolve %s: %s (%d)", hostname, gai_strerrorA(GetSockError()), GetSockError());
+        RTMP_Log(RTMP_LOGERROR, "Could not resolve %.*s: %s (%d)", host->av_len, hostname,
+                 gai_strerrorA(GetSockError()), GetSockError());
         *socket_error = GetSockError();
         ret = FALSE;
         goto finish;
@@ -1087,7 +1088,13 @@ RTMP_Connect(RTMP *r, RTMPPacket *cp)
         /* Error while connecting */
         int err = happy_eyeballs_get_error_code(happy_ctx);
         if (err == E_CONNREFUSED)
-            RTMP_Log(RTMP_LOGERROR, "%s is offline. Try a different server (ECONNREFUSED).", r->Link.hostname.av_val);
+        {
+            if (r->m_bRedactLogs)
+                RTMP_Log(RTMP_LOGERROR, "The configured RTMP server refused the connection (ECONNREFUSED).");
+            else
+                RTMP_Log(RTMP_LOGERROR, "%.*s is offline. Try a different server (ECONNREFUSED).",
+                         r->Link.hostname.av_len, r->Link.hostname.av_val);
+        }
         else if (err == E_ACCES)
             RTMP_Log(RTMP_LOGERROR, "The connection is being blocked by a firewall or other security software (EACCES).");
         else if (err == E_TIMEDOUT)
@@ -3358,7 +3365,9 @@ HandleInvoke(RTMP *r, const char *body, unsigned int nBodySize)
             r->m_stream_id = -1;
             RTMP_Close(r);
 
-            if (description.av_len)
+            if (r->m_bRedactLogs)
+                RTMP_Log(RTMP_LOGERROR, "RTMP server rejected the stream.");
+            else if (description.av_len)
                 RTMP_Log(RTMP_LOGERROR, "%s:\n%s (%s)", r->Link.tcUrl.av_val, code.av_val, description.av_val);
             else
                 RTMP_Log(RTMP_LOGERROR, "%s:\n%s", r->Link.tcUrl.av_val, code.av_val);
@@ -3418,9 +3427,13 @@ HandleInvoke(RTMP *r, const char *body, unsigned int nBodySize)
 
         else
         {
-            RTMP_Log(RTMP_LOGWARNING, "Unhandled: %s:\n%s", r->Link.tcUrl.av_val, code.av_val);
-            if (description.av_len)
-                RTMP_Log(RTMP_LOGDEBUG, "Description: %s", description.av_val);
+            if (r->m_bRedactLogs)
+                RTMP_Log(RTMP_LOGWARNING, "Unhandled RTMP server status.");
+            else {
+                RTMP_Log(RTMP_LOGWARNING, "Unhandled: %s:\n%s", r->Link.tcUrl.av_val, code.av_val);
+                if (description.av_len)
+                    RTMP_Log(RTMP_LOGDEBUG, "Description: %s", description.av_val);
+            }
         }
     }
     else if (AVMATCH(&method, &av_playlist_ready))

@@ -458,7 +458,8 @@ std::shared_future<void> BasicOutputHandler::SetupMultitrackVideo(obs_service_t 
 								  std::function<void(std::optional<bool>)> continuation)
 {
 	auto start_streaming_guard = std::make_shared<StartMultitrackVideoStreamingGuard>();
-	if (!multitrackVideo) {
+	if (!multitrackVideo || service != main->GetService()) {
+		multitrackVideoActive = false;
 		continuation(std::nullopt);
 		return start_streaming_guard->GetFuture();
 	}

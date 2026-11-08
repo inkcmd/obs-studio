@@ -1169,12 +1169,13 @@ static int try_connect(struct rtmp_stream *stream)
 		return OBS_OUTPUT_BAD_PATH;
 	}
 
-	info("Connecting to RTMP URL %s...", stream->path.array);
+	info("Connecting to RTMP URL %s...", stream->hide_server_url ? "<configured server>" : stream->path.array);
 
 	// free any existing RTMP TLS context
 	RTMP_TLS_Free(&stream->rtmp);
 
 	RTMP_Init(&stream->rtmp);
+	stream->rtmp.m_bRedactLogs = stream->hide_server_url;
 
 	if (!RTMP_SetupURL(&stream->rtmp, stream->path.array))
 		return OBS_OUTPUT_BAD_PATH;
@@ -1224,7 +1225,8 @@ static int try_connect(struct rtmp_stream *stream)
 
 	char ip_address[INET6_ADDRSTRLEN] = {0};
 	netif_addr_to_str(&stream->rtmp.m_sb.sb_addr, ip_address, INET6_ADDRSTRLEN);
-	info("Connection to %s (%s) successful", stream->path.array, ip_address);
+	info("Connection to %s (%s) successful", stream->hide_server_url ? "<configured server>" : stream->path.array,
+	     ip_address);
 
 	return init_send(stream);
 }
@@ -1350,6 +1352,7 @@ static bool init_connect(struct rtmp_stream *stream)
 	stream->got_first_packet = false;
 
 	settings = obs_output_get_settings(stream->output);
+	stream->hide_server_url = obs_data_get_bool(settings, "hide_server_url");
 	dstr_copy(&stream->path, obs_service_get_connect_info(service, OBS_SERVICE_CONNECT_INFO_SERVER_URL));
 	dstr_copy(&stream->key, obs_service_get_connect_info(service, OBS_SERVICE_CONNECT_INFO_STREAM_KEY));
 	dstr_copy(&stream->username, obs_service_get_connect_info(service, OBS_SERVICE_CONNECT_INFO_USERNAME));
@@ -1527,7 +1530,7 @@ static void *connect_thread(void *data)
 
 	if (ret != OBS_OUTPUT_SUCCESS) {
 		obs_output_signal_stop(stream->output, ret);
-		info("Connection to %s failed: %d", stream->path.array, ret);
+		info("Connection to %s failed: %d", stream->hide_server_url ? "<configured server>" : stream->path.array, ret);
 	}
 
 	if (!stopping(stream))

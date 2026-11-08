@@ -91,7 +91,16 @@ void OBSBasicSettings::InitStreamPage()
 		&OBSBasicSettings::UpdateMultitrackVideo);
 	connect(ui->multitrackVideoConfigOverrideEnable, &QCheckBox::toggled, this,
 		&OBSBasicSettings::UpdateMultitrackVideo);
-	xinkx::installMultiStreamSettings(ui->streamPage);
+	saveStreamAccounts = xinkx::installMultiStreamSettings(
+		ui->streamPage, ui->widget_5, ui->streamStackWidget,
+		[this] {
+			streamAccountsChanged = true;
+			EnableApplyButton(true);
+		},
+		[this](bool busy) {
+			streamOAuthBusy = busy;
+			ui->buttonBox->setEnabled(!busy);
+		});
 }
 
 void OBSBasicSettings::LoadStream1Settings()

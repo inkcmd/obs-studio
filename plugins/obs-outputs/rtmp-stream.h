@@ -58,6 +58,7 @@ struct dbr_interpolation_point {
 };
 
 struct rtmp_stream {
+	bool hide_server_url;
 	obs_output_t *output;
 
 	pthread_mutex_t packets_mutex;

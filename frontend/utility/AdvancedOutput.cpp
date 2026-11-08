@@ -642,7 +642,7 @@ std::shared_future<void> AdvancedOutput::SetupStreaming(obs_service_t *service,
 	}
 
 	Auth *auth = main->GetAuth();
-	if (auth) {
+	if (auth && service == main->GetService()) {
 		auth->OnStreamConfig();
 	}
 
@@ -735,8 +735,7 @@ bool AdvancedOutput::StartStreaming(obs_service_t *service)
 	bool enableDynBitrate = config_get_bool(main->Config(), "Output", "DynamicBitrate");
 
 	bool is_rtmp = false;
-	obs_service_t *service_obj = main->GetService();
-	const char *protocol = obs_service_get_protocol(service_obj);
+	const char *protocol = obs_service_get_protocol(service);
 	if (protocol) {
 		if (astrcmpi_n(protocol, RTMP_PROTOCOL, strlen(RTMP_PROTOCOL)) == 0) {
 			is_rtmp = true;

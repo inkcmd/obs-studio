@@ -614,7 +614,7 @@ std::shared_future<void> SimpleOutput::SetupStreaming(obs_service_t *service, Se
 	}
 
 	Auth *auth = main->GetAuth();
-	if (auth) {
+	if (auth && service == main->GetService()) {
 		auth->OnStreamConfig();
 	}
 

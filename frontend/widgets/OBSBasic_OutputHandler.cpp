@@ -53,7 +53,7 @@ bool OBSBasic::Active() const
 	if (!outputHandler) {
 		return false;
 	}
-	return outputHandler->Active();
+	return outputHandler->Active() || StreamSessionActive();
 }
 
 void OBSBasic::ResizeOutputSizeOfSource()

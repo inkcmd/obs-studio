@@ -714,7 +714,7 @@ private:
 
 	inline void OnDeactivate()
 	{
-		if (!outputHandler->Active() && !ui->profileMenu->isEnabled()) {
+		if (!Active() && !ui->profileMenu->isEnabled()) {
 			ui->profileMenu->setEnabled(true);
 			ui->autoConfigure->setEnabled(true);
 			App()->DecrementSleepInhibition();
@@ -1376,6 +1376,7 @@ private:
 	std::shared_future<void> setupStreamingGuard;
 	bool streamingStopping = false;
 	bool streamingStarting = false;
+	bool managedStream = false;
 
 public slots:
 	void DisplayStreamStartError();
@@ -1391,6 +1392,8 @@ public slots:
 	void StreamingStop(int errorcode, QString last_error);
 
 	bool StreamingActive();
+	bool StreamSessionActive() const;
+	void ShowStreamAccountsMenu(QMenu *menu);
 
 private slots:
 	/* Stream action (start/stop) slot */
@@ -1399,6 +1402,7 @@ private slots:
 signals:
 	/* Streaming signals */
 	void StreamingPreparing();
+	void ExtraStreamingChanged(bool active);
 	void StreamingStarting(bool broadcastAutoStart);
 	void StreamingStarted(bool withDelay = false);
 	void StreamingStopping();

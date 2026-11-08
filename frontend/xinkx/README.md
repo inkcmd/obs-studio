@@ -1,98 +1,37 @@
-# XINKX Studio — Stage 4 (0.15-dev)
+# XINKX Studio — Stage 5 (0.15-dev)
 
-This directory contains code linked directly into the Qt frontend of the OBS Studio fork.
-There are **no additional runtime services or separately installed plugins**.
+The Qt frontend uses the OBS scene graph, video pipeline and output handlers. The source inspector edits OBS scene items and uses the native undo/redo stack.
 
-## Implemented
-
-- `StudioController`: state of the active OBS scene, selected scene item,
-  streaming and recording status; native transform editing with OBS undo/redo.
-- `StudioWorkspace`: native docked source inspector: X/Y, size,
-  aspect-ratio lock, rotation, four-sided cropping, fit and alignment. Alignment
-  uses OBS's own scene-transform actions, retaining undo/redo.
-- `MultiStreamManager`: any number of additional RTMP(S) outputs using native
-  OBS services, H.264 encoders, AAC audio encoders, independent bitrates and
-  resolutions, all managed by OBS's main streaming lifecycle.
-- `MultiStreamWorkspace`: dynamic account list directly in the standard OBS
-  Settings → Stream page (no independent dock or extra Start/Stop button).
-- `OAuthLogin`: browser authorization-code flow with local callback and PKCE
-  for YouTube/Kick; optional Twitch OAuth, ingest key retrieval via provider APIs.
-- Standard OBS status bar displays combined bandwidth and dropped frames;
-  primary OBS controls continue to drive the live session and timer.
-- Settings for this UI are stored in `config/xinkx-studio/studio.ini` during local development.
-- On Windows, RTMP keys and OAuth tokens are encrypted by Windows DPAPI before
-  being saved to `studio.ini`, bound to the current Windows user account.
-- Title and Windows resource metadata identify the application as XINKX Studio.
-
-## Development build (Windows)
-
-From `C:\Homelab\XINKX-Studio`:
+## Build on Windows
 
 ```powershell
+Set-Location C:\codex-homelab\XINKX-Studio
 cmake --preset windows-x64
 cmake --build --preset windows-x64 --parallel 12
 ```
 
-**Important**: the executable is still `obs64.exe`. OBS currently uses this
-filename for virtual camera registration and for the updater. We will rename
-the executable only after adapting those integrations.
+The portable runtime is in `build_x64/rundir/RelWithDebInfo`. Start `bin/64bit/obs64.exe` with `bin/64bit` as its working directory. Its profiles and scenes are under the runtime's `config/` directory. The OBS executable name is retained for virtual camera compatibility.
 
-This development build *forces OBS portable mode* and disables the stock OBS
-updater. Its OBS-format profiles, scenes, and log files live beneath its own
-build/runtime `config/` directory; it does not read or update the installed OBS
-profile under `%APPDATA%\obs-studio`. The user must **not install this build
-into Program Files**: the final app will use an independent writable XINKX
-application-data location instead of mandatory portable mode.
+## Stream accounts
 
-## OAuth setup
+1. In **Settings → Stream**, add accounts for Twitch, YouTube, Kick or manual RTMP(S). Multiple accounts from a provider can coexist.
+2. Enter a server URL and stream key, or use the provider's OAuth flow. Each account has its own encoder, bitrate and output resolution. For native 1440p set both the base and output OBS resolution to 2560×1440.
+3. Select an account and click **Основной выход** to assign it to the native OBS output. Clicking it again restores the OBS profile's stream service. Additional enabled accounts run in parallel in either mode.
+4. Use **Apply** or **OK** to save edits. **Cancel** discards draft edits. OAuth actions require a saved account and persist their result immediately. A revoked grant cannot be restored by Cancel.
+5. The account menu next to **Start Streaming** (**Ctrl+Alt+S**) changes which accounts participate without editing their saved defaults. During a session it lists additional outputs and lets you stop one individually. The main OBS button stops the session. The status bar shows totals and its additional-stream counter has a per-output tooltip.
 
-1. Configure one **primary stream** using the original OBS Settings → Stream
-   controls; it is needed for OBS's own status/timer and Start Streaming button.
-2. Add additional Twitch, YouTube or Kick accounts in the XINKX section below
-   the native stream settings. Select enabled accounts with checkboxes.
-3. For OAuth, register a developer application with the platform, set redirect
-   URI to `http://127.0.0.1:45678/`, and enter its Client ID and (when required)
-   Client Secret into the account editor. No OAuth client credentials are
-   bundled. Click OAuth · Подключить, then Получить ключ. Manual keys also work.
-4. Click the **existing OBS Начать трансляцию** button. Enabled additional
-   outputs start automatically and stop with the same OBS button. The independent
-   OBS **Начать запись** button still controls recording, not multistream.
+The selected primary service and video encoder are attached only to the native stream output. The account's RTMP URL and key are kept out of the OBS profile's `service.json`. Recording continues to use the OBS profile's recording settings. Stage 4 account records are read from `config/xinkx-studio/studio.ini`. After saving, the managed ingest URL, stream key, client secret and OAuth tokens use Windows DPAPI under the current user account.
 
-YouTube requires a pre-existing stream created in YouTube Studio to retrieve
-an ingest key. If several streams exist, this version selects the first one;
-selection and event creation remain future work. Token refresh is supported
-when requesting keys. Kick APIs require the appropriate application permissions.
+## Provider OAuth
 
-For genuine 2560×1440 output, configure **both Base and Output Resolution** in
-OBS Settings → Video as 2560×1440. Setting only an additional stream to 1440p
-upscales the OBS 720p output if the global scaled output is 1280×720.
+Enter the credentials for your developer app in the account editor and apply the settings. Use **Подключить OAuth** to authorize in the system browser. The loopback callback is `http://127.0.0.1:45678/`. **Обновить данные** loads account identity and ingest information and refreshes an expired or rejected token when a refresh token is available. **Отключить OAuth** requests provider revocation and clears the local session and OAuth-derived ingest data after success. A manual RTMP key stays available.
 
-## Not yet implemented
+- **Twitch** uses a developer app with the loopback redirect URI, Client ID and Client Secret. The authorization-code flow requests access to the channel's stream key. [Twitch authorization code flow](https://dev.twitch.tv/docs/authentication/getting-tokens-oauth/)
+- **YouTube** uses a Google OAuth client of type **Desktop app** with YouTube Data API v3 enabled. Use a YouTube channel enabled for Live and add the Google account as a test user if the consent screen is in testing mode. If the API returns multiple ingestion streams, specify the desired stream ID in the account editor or supply RTMP parameters manually. Set up and bind the event in YouTube Studio. [Google desktop OAuth](https://developers.google.com/identity/protocols/oauth2/native-app), [YouTube liveStreams.list](https://developers.google.com/youtube/v3/live/docs/liveStreams/list)
+- **Kick** uses a developer app with the loopback redirect URI, Client ID and Client Secret. The token needs `user:read`, `channel:read` and `streamkey:read` to retrieve the channel and ingest information. Use a manual key if access is unavailable. [Kick OAuth 2.1](https://docs.kick.com/getting-started/generating-tokens-oauth2-flow), [Kick scopes](https://docs.kick.com/scopes/scopes)
 
-1. Automatic fallback on NVENC hardware-init failure, YouTube broadcast/event
-   selection and provisioning, platform keychain support outside Windows.
-2. Port platform chat and local overlay assets from XINKX Studio 0.14.5.
-3. Multi-selection transforms, nested source groups, source-specific property UI.
-4. Rework the permanent config namespace and installer; rename the executable,
-   update virtual camera integration, and implement XINKX-specific updates.
+## Verification
 
-## Manual verification on Windows
+The Windows MSVC build and portable launch passed. Local RTMP testing covered a managed OBS primary and two extra H.264/AAC outputs at 2560×1440, 1920×1080 and 1280×720 at 60 fps, including NVENC. Recording remained active after the stream stopped. Both additional receivers continued receiving video after the primary connection was refused. The Qt smoke test covered two accounts from one provider, primary selection, Apply/Cancel, persistence, removal, DPAPI and expired/invalid OAuth handling against a local HTTP mock.
 
-1. Start the `RelWithDebInfo` build. There must be no XINKX top toolbar or
-   independent multistream dock; `Источник` remains the optional right dock.
-2. Select a camera/image. Change size (with ratio lock on/off), rotation,
-   cropping and all four align/fit actions; verify preview and Ctrl+Z/ Ctrl+Y.
-3. Lock a source; the controls must be disabled. Test another source and Studio Mode.
-4. Configure one primary OBS stream and add two separate additional accounts,
-   with OAuth or manual RTMP(S) keys, and differing resolution/bitrate.
-5. Start **OBS's primary stream**. Both additional outputs must start. Verify
-   native live timer, bandwidth, status indicator and platform-side reception.
-6. Stop **OBS's primary stream**. All additional outputs must stop. Restart
-   the app: additional accounts and encrypted stream keys must persist.
-7. Check that OBS recording still starts and stops independently.
-
-**This stage has not yet been compiled with MSVC in the authoring environment.**
-Do not use production stream keys for initial verification. Output launch
-and GPU encoder initialization can fail depending on the installed graphics
-drivers; failed outputs should display an OBS error rather than affect other
-destinations or normal OBS recording.
+Use private test channels for the remaining provider sign-in, refresh, revocation and ingest checks. Multichat and YouTube event provisioning are separate work.

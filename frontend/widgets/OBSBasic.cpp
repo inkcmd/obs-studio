@@ -47,6 +47,7 @@
 #include <widgets/AudioMixer.hpp>
 #include <widgets/OBSProjector.hpp>
 #include <xinkx/StudioWorkspace.hpp>
+#include <xinkx/MultiStreamManager.hpp>
 
 #include <OBSStudioAPI.hpp>
 #ifdef BROWSER_AVAILABLE
@@ -596,6 +597,25 @@ OBSBasic::OBSBasic(QWidget *parent) : OBSMainWindow(parent), undo_s(ui), ui(new 
 	UpdatePreviewSpacingHelpers();
 	UpdatePreviewOverflowSettings();
 	xinkx::installStudioWorkspace(this);
+	auto *streamManager = findChild<xinkx::MultiStreamManager *>();
+	connect(streamManager, &xinkx::MultiStreamManager::activityChanged, this, [this](bool active) {
+		if (!outputHandler) {
+			return;
+		}
+		if (active) {
+			OnActivate();
+		} else {
+			OnDeactivate();
+		}
+		if (StreamingActive() || streamingStarting) {
+			return;
+		}
+		emit ExtraStreamingChanged(active);
+		if (sysTrayStream) {
+			sysTrayStream->setText(QTStr(active ? "Basic.Main.StopStreaming" : "Basic.Main.StartStreaming"));
+			sysTrayStream->setEnabled(true);
+		}
+	});
 }
 
 static const double scaled_vals[] = {1.0, 1.25, (1.0 / 0.75), 1.5, (1.0 / 0.6), 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 0.0};

@@ -36,7 +36,7 @@ void OBSBasic::SystemTrayInit()
 
 	showHide = new QAction(QTStr("Basic.SystemTray.Show"), trayMenu);
 	sysTrayStream = new QAction(
-		StreamingActive() ? QTStr("Basic.Main.StopStreaming") : QTStr("Basic.Main.StartStreaming"), trayMenu);
+		StreamSessionActive() ? QTStr("Basic.Main.StopStreaming") : QTStr("Basic.Main.StartStreaming"), trayMenu);
 	sysTrayRecord = new QAction(
 		RecordingActive() ? QTStr("Basic.Main.StopRecording") : QTStr("Basic.Main.StartRecording"), trayMenu);
 	sysTrayReplayBuffer = new QAction(ReplayBufferActive() ? QTStr("Basic.Main.StopReplayBuffer")

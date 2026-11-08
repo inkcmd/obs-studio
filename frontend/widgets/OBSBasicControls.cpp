@@ -2,12 +2,28 @@
 #include "OBSBasic.hpp"
 #include "qt-wrappers.hpp"
 
+#include <QKeySequence>
+#include <QToolButton>
+
 #include "moc_OBSBasicControls.cpp"
 
 OBSBasicControls::OBSBasicControls(OBSBasic *main) : QFrame(nullptr), ui(new Ui::OBSBasicControls)
 {
 	/* Create UI elements */
 	ui->setupUi(this);
+
+	auto *accounts = new QToolButton(this);
+	accounts->setObjectName(QStringLiteral("xinkxStreamSelection"));
+	accounts->setText(QStringLiteral("▾"));
+	accounts->setAccessibleName(QStringLiteral("Аккаунты трансляции"));
+	const QKeySequence accountsShortcut(QStringLiteral("Ctrl+Alt+S"));
+	accounts->setShortcut(accountsShortcut);
+	accounts->setToolTip(QStringLiteral("%1 (%2)").arg(accounts->accessibleName(), accountsShortcut.toString()));
+	accounts->setPopupMode(QToolButton::InstantPopup);
+	auto *accountMenu = new QMenu(accounts);
+	accounts->setMenu(accountMenu);
+	ui->horizontalLayout_7->insertWidget(1, accounts);
+	connect(accountMenu, &QMenu::aboutToShow, this, [main, accountMenu] { main->ShowStreamAccountsMenu(accountMenu); });
 
 	streamButtonMenu.reset(new QMenu());
 	startStreamAction = streamButtonMenu->addAction(QTStr("Basic.Main.StartStreaming"));
@@ -70,7 +86,19 @@ OBSBasicControls::OBSBasicControls(OBSBasic *main) : QFrame(nullptr), ui(new Ui:
 	connect(main, &OBSBasic::StreamingStarting, this, &OBSBasicControls::StreamingStarting);
 	connect(main, &OBSBasic::StreamingStarted, this, &OBSBasicControls::StreamingStarted);
 	connect(main, &OBSBasic::StreamingStopping, this, &OBSBasicControls::StreamingStopping);
-	connect(main, &OBSBasic::StreamingStopped, this, &OBSBasicControls::StreamingStopped);
+	connect(main, &OBSBasic::StreamingStopped, this, [this, main](bool withDelay) {
+		StreamingStopped(withDelay);
+		if (!withDelay && main->StreamSessionActive() && !main->StreamingActive()) {
+			StreamingStarted(false);
+		}
+	});
+	connect(main, &OBSBasic::ExtraStreamingChanged, this, [this](bool active) {
+		if (active) {
+			StreamingStarted(false);
+		} else {
+			StreamingStopped(false);
+		}
+	});
 
 	connect(main, &OBSBasic::BroadcastStreamReady, this, &OBSBasicControls::BroadcastStreamReady);
 	connect(main, &OBSBasic::BroadcastStreamActive, this, &OBSBasicControls::BroadcastStreamActive);
