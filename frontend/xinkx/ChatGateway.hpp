@@ -46,8 +46,7 @@ public:
 	void inspectBroadcast(const QString &accountId, const QString &youtubeBroadcastId = {});
 	void searchCategories(const QString &accountId, const QString &query);
 	void updateBroadcast(const QString &accountId, const QString &youtubeBroadcastId,
-			     const QString &title, const QString &description, const QString &categoryId,
-			     const QString &youtubeGameTitle = {});
+			     const QString &title, const QString &description, const QString &categoryId);
 	void createYouTubeBroadcast(const QString &accountId, const QString &title,
 				    const QString &description, const QString &categoryId);
 	void bindYouTubeStream(const QString &accountId, const QString &broadcastId, const QString &streamId);
@@ -62,6 +61,7 @@ signals:
 	void broadcastInfo(const QString &accountId, const QJsonObject &details);
 	void categoryResults(const QString &accountId, const QJsonArray &categories);
 	void broadcastResult(const QString &accountId, const QString &message, bool success);
+	void youtubeMetadataUpdated(const QString &accountId, bool success);
 	void viewersReceived(const QString &accountId, int count);
 
 private:

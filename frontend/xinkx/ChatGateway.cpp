@@ -546,8 +546,7 @@ void ChatGateway::searchCategories(const QString &id, const QString &query)
 }
 
 void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
-				  const QString &title, const QString &description, const QString &categoryId,
-				  const QString &youtubeGameTitle)
+				  const QString &title, const QString &description, const QString &categoryId)
 {
 	const auto account = known.value(id);
 	if (account.id.isEmpty()) return;
@@ -594,9 +593,11 @@ void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
 		}
 		const auto readUrl = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts"),
 			{{QStringLiteral("part"), QStringLiteral("snippet")}, {QStringLiteral("id"), broadcastId}});
-		authorized(id, readUrl, {}, [this, id, broadcastId, heading, description, category, youtubeGameTitle](const HttpResult &result) {
+		authorized(id, readUrl, {}, [this, id, broadcastId, heading, description, category](const HttpResult &result) {
 			if (!result.ok || result.json.value(QStringLiteral("items")).toArray().isEmpty()) {
-				emit broadcastResult(id, QStringLiteral("YouTube: не удалось прочитать эфир: ") + result.error, false); return;
+				emit broadcastResult(id, QStringLiteral("YouTube: не удалось прочитать эфир: ") + result.error, false);
+				emit youtubeMetadataUpdated(id, false);
+				return;
 			}
 			auto snippet = result.json.value(QStringLiteral("items")).toArray().first().toObject()
 				.value(QStringLiteral("snippet")).toObject();
@@ -604,48 +605,12 @@ void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
 			if (!description.isEmpty()) snippet.insert(QStringLiteral("description"), description.left(5000));
 			if (!category.isEmpty()) snippet.insert(QStringLiteral("categoryId"), category);
 			const auto endpoint = QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts?part=snippet");
-			const QString game = youtubeGameTitle.trimmed().left(150);
-			const auto safeBody = QJsonObject{{QStringLiteral("id"), broadcastId},
+			const auto body = QJsonObject{{QStringLiteral("id"), broadcastId},
 				{QStringLiteral("snippet"), snippet}};
-			if (game.isEmpty()) {
-				jsonApi(id, endpoint, QByteArray("PUT"), safeBody, [this, id](const HttpResult &reply) {
-					emit broadcastResult(id, reply.ok ? QStringLiteral("YouTube: параметры эфира сохранены") : reply.error, reply.ok);
-				});
-				return;
-			}
-			// Experimental field: not documented in the public API. Preserve the
-			// complete existing snippet and log both the payload and raw response.
-			snippet.insert(QStringLiteral("gameTitle"), game);
-			const QJsonObject testBody{{QStringLiteral("id"), broadcastId},
-				{QStringLiteral("snippet"), snippet}};
-			writeDiagnostic(QStringLiteral("youtube-gameTitle-request"),
-				QStringLiteral("PUT %1 body=%2").arg(endpoint,
-				QString::fromUtf8(QJsonDocument(testBody).toJson(QJsonDocument::Compact))), -1);
-			jsonApi(id, endpoint, QByteArray("PUT"), testBody,
-				[this, id, endpoint, safeBody](const HttpResult &reply) {
-					writeDiagnostic(QStringLiteral("youtube-gameTitle-response"),
-						QStringLiteral("HTTP %1 body=%2 transport=%3").arg(reply.status)
-							.arg(QString::fromUtf8(reply.rawBody), reply.error), -1);
-					if (reply.ok) {
-						emit broadcastResult(id, QStringLiteral("YouTube: запрос с gameTitle принят (наличие игры проверь в Studio)"), true);
-						return;
-					}
-					if (reply.status != 400 && reply.status != 422) {
-						emit broadcastResult(id, QStringLiteral("YouTube: тест gameTitle не выполнен: ") + reply.error, false);
-						return;
-					}
-					// Do not lose the title/description/category if the test field is rejected.
-					jsonApi(id, endpoint, QByteArray("PUT"), safeBody,
-						[this, id](const HttpResult &fallback) {
-							writeDiagnostic(QStringLiteral("youtube-gameTitle-fallback"),
-								QStringLiteral("HTTP %1 body=%2 transport=%3").arg(fallback.status)
-									.arg(QString::fromUtf8(fallback.rawBody), fallback.error), -1);
-							emit broadcastResult(id, fallback.ok
-								? QStringLiteral("YouTube: gameTitle отклонён; остальные параметры сохранены")
-								: QStringLiteral("YouTube: тест gameTitle и повторное сохранение не прошли: ") + fallback.error,
-								fallback.ok);
-						});
-				});
+			jsonApi(id, endpoint, QByteArray("PUT"), body, [this, id](const HttpResult &reply) {
+				emit broadcastResult(id, reply.ok ? QStringLiteral("YouTube: параметры эфира сохранены") : reply.error, reply.ok);
+				emit youtubeMetadataUpdated(id, reply.ok);
+			});
 		});
 		return;
 	} else return;

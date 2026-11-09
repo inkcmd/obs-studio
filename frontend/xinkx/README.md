@@ -1,10 +1,26 @@
-# XINKX Studio — Stage 17 (0.15-dev)
+# XINKX Studio — Stage 18 (0.15-dev)
 
-## Stage 17 changes — unified broadcast draft and YouTube API experiment
+## Stage 18 — YouTube Studio browser bridge (Windows runtime verification pending)
+
+- The native broadcast editor now searches a unified game name on Twitch, Kick and (when the separate Studio session is connected) the unofficial YouTube Studio `gaming/game_title` endpoint. The picker stores YouTube's `mid` alongside the game name locally. Picking a YouTube result maps the regular video category to 20 (`Gaming`). Typeahead search starts after 700 ms without replacing the title/description/game draft.
+- **Подключить YouTube Studio** launches the installed Chrome/Edge with an isolated XINKX-managed profile and **without debugging flags** for normal first-time Google login. Close all its windows after login and click **Проверить сессию**. This reopens the same isolated profile with a loopback-only Chrome DevTools Protocol port and checks Studio's current channel ID against the existing YouTube OAuth account. The session is reopened automatically on subsequent app starts. The regular Chrome/Edge profile and its cookies are never read.
+- Search HTTP requests execute inside the authenticated Studio tab and compute authorization from its live state; cookies, hashes and dynamic ytcfg context never leave the browser renderer or enter the XINKX diagnostic log. If the private search endpoint stops accepting these requests, search explicitly fails without touching other accounts.
+- The common Save button updates YouTube title, description and category with the official OAuth API first. Only after that succeeds and only with a verified Studio session and explicitly selected `mid`, the browser bridge navigates to the selected video's edit screen, selects its game from the Studio autocomplete and clicks the Studio Save button. It then reloads the editor and compares the selected game label. This uses YouTube's own evolving internal metadata request/attestation instead of constructing an unreliable hardcoded `metadata_update` payload. Name verification does not independently prove an internal `mid` when multiple games share the same exact name; ambiguous suggestions are rejected.
+- The Studio browser operation remains optional, asynchronous and independent of OAuth, Twitch, Kick and libobs outputs. An expired session/channel mismatch/failure is visible in the Studio status. It never edits a test or live broadcast automatically: only the common user Save button may modify one. Browser-side selectors/internal endpoints are unofficial and may change; the implementation has **not** yet been validated with an authenticated Windows Studio session or a live test video.
+
+Smoke test (Windows):
+
+1. Build with `cmake --build --preset windows-x64 --parallel 12`.
+2. Open **Эфир**, click **Подключить YouTube Studio**, sign into the *same channel* as OAuth, close the dedicated browser window, click **Проверить сессию**; ensure the displayed channel ID matches.
+3. Select a **test broadcast**, enter `Active Matter` in the shared game field, choose the YouTube suggestion `/g/11y8746zzr`, and verify video category 20. No real broadcast is modified just by searching.
+4. Click **Сохранить на Twitch / YouTube / Kick** only if this test video may be changed. Confirm `YouTube: игра … подтверждена` and reload YouTube Studio manually to verify the actual selected game. Inspect `config/xinkx-studio/diagnostics.log` for **status messages only**, without cookies or tokens.
+5. Check ordinary Twitch/Kick updates, OAuth connection, scene switching and multi-output OBS independently. Only mark actual Studio game updating as verified after a successful test on the selected video.
+
+## Stage 17 history — unified broadcast draft and YouTube API experiment
 
 - **Эфир** now has one persistent local title, description and game field, no platform switcher. Background refresh keeps the draft intact. A read-only comparison shows remote title/description/category mismatches for each connected account; Kick's unavailable title is explicitly shown as unknown rather than overwriting the draft. Saving updates all connected providers, with provider-specific category IDs selected below the common fields.
 - Twitch/Kick game searches keep their selected IDs. The YouTube category selector loads the complete public list of categories available for the requested region and preserves the saved category, without the old «Не изменять» placeholder or filtering the catalog by game name. Profile files can store a common game label.
-- A one-time YouTube checkbox (preselected and switchable off) sends experimental `snippet.gameTitle` on `liveBroadcasts.update`, preserves all existing snippet fields and logs the exact JSON payload plus the raw HTTP status/body to `diagnostics.log`. If the undocumented property is rejected, the editor retries without it so the standard title/description/category update is not lost. An HTTP success does **not** prove YouTube Studio applied the game: confirm in Studio.
+- The Stage 17 one-time `gameTitle` experiment on the official API was removed in Stage 18. It returned HTTP success without proving a change of game.
 
 ## Stage 16 changes — native sources and broadcast reliability
 

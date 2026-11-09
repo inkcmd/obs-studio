@@ -30,8 +30,10 @@ NativeWebSocket::NativeWebSocket(QObject *receiver, const QUrl &url, MessageHand
 			result = QStringLiteral("%1: WinHTTP %2").arg(where).arg(GetLastError());
 		};
 		do {
-			if (url.scheme() != QStringLiteral("wss") || url.host().isEmpty()) {
-				result = QStringLiteral("Разрешён только защищённый WSS");
+			const bool localCdp = url.scheme() == QStringLiteral("ws") &&
+				(url.host() == QStringLiteral("127.0.0.1") || url.host() == QStringLiteral("localhost"));
+			if ((!localCdp && url.scheme() != QStringLiteral("wss")) || url.host().isEmpty()) {
+				result = QStringLiteral("Разрешён WSS либо локальный CDP WebSocket");
 				break;
 			}
 			session = WinHttpOpen(L"XINKX Studio/0.15", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
@@ -40,7 +42,7 @@ NativeWebSocket::NativeWebSocket(QObject *receiver, const QUrl &url, MessageHand
 			WinHttpSetTimeouts(session, 5000, 5000, 5000, 65000);
 			const std::wstring host = url.host().toStdWString();
 			connection = WinHttpConnect(session, host.c_str(),
-						      url.port(443), 0);
+						      url.port(localCdp ? 80 : 443), 0);
 			if (!connection) { failure(QStringLiteral("WinHttpConnect")); break; }
 			QString path = url.path(QUrl::FullyEncoded);
 			if (path.isEmpty()) path = QStringLiteral("/");
@@ -48,7 +50,8 @@ NativeWebSocket::NativeWebSocket(QObject *receiver, const QUrl &url, MessageHand
 			if (!query.isEmpty()) path += QStringLiteral("?") + query;
 			const std::wstring object = path.toStdWString();
 			request = WinHttpOpenRequest(connection, L"GET", object.c_str(), nullptr,
-						 WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+						 WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+						 localCdp ? 0 : WINHTTP_FLAG_SECURE);
 			if (!request) { failure(QStringLiteral("WinHttpOpenRequest")); break; }
 			if (!origin.isEmpty()) {
 				const std::wstring header = (QStringLiteral("Origin: ") + QString::fromLatin1(origin) +
@@ -91,7 +94,7 @@ NativeWebSocket::NativeWebSocket(QObject *receiver, const QUrl &url, MessageHand
 					message.clear();
 					continue;
 				}
-				if (message.size() + static_cast<int>(read) > 524288) {
+				if (message.size() + static_cast<int>(read) > 2 * 1024 * 1024) {
 					result = QStringLiteral("Слишком большой WSS-пакет");
 					break;
 				}
@@ -121,7 +124,7 @@ NativeWebSocket::NativeWebSocket(QObject *receiver, const QUrl &url, MessageHand
 bool NativeWebSocket::send(const QByteArray &message)
 {
 #ifdef _WIN32
-	if (message.isEmpty() || message.size() > 8192 || state->stopping.load()) return false;
+	if (message.isEmpty() || message.size() > 65536 || state->stopping.load()) return false;
 	const auto handle = state->socket.load();
 	if (!handle) return false;
 	return WinHttpWebSocketSend(static_cast<HINTERNET>(handle),
