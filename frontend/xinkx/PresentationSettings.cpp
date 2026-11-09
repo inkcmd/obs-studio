@@ -7,7 +7,6 @@
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
-#include <QPair>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSet>
@@ -129,13 +128,16 @@ bool PresentationSettings::validate(const QJsonObject &value, QString *error)
 				       QStringLiteral("maxMessages"), QStringLiteral("messageDurationMs"), QStringLiteral("gap"),
 				       QStringLiteral("padding"), QStringLiteral("radius"),
 				       QStringLiteral("opacity"), QStringLiteral("widthPercent")}) {
-			const auto limits = key == QStringLiteral("fontSize") ? QPair(10, 90)
-				: key == QStringLiteral("fontWeight") ? QPair(100, 900)
-				: key == QStringLiteral("maxMessages") ? QPair(1, 20)
-				: key == QStringLiteral("messageDurationMs") ? QPair(0, 300000)
-				: key == QStringLiteral("opacity") || key == QStringLiteral("widthPercent") ? QPair(10, 100)
-				: QPair(0, 64);
-			if (!within(chat, key, limits.first, limits.second)) return invalid(surface + QStringLiteral("/chat/") + key);
+			int minimum = 0;
+			int maximum = 64;
+			if (key == QStringLiteral("fontSize")) { minimum = 10; maximum = 90; }
+			else if (key == QStringLiteral("fontWeight")) { minimum = 100; maximum = 900; }
+			else if (key == QStringLiteral("maxMessages")) { minimum = 1; maximum = 20; }
+			else if (key == QStringLiteral("messageDurationMs")) maximum = 300000;
+			else if (key == QStringLiteral("opacity") || key == QStringLiteral("widthPercent")) {
+				minimum = 10; maximum = 100;
+			}
+			if (!within(chat, key, minimum, maximum)) return invalid(surface + QStringLiteral("/chat/") + key);
 		}
 		if (!chat.value(QStringLiteral("font")).isString() ||
 		    chat.value(QStringLiteral("font")).toString().size() > 80 ||
