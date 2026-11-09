@@ -562,6 +562,7 @@ void OBSBasicStatusBar::StreamStopped()
 
 void OBSBasicStatusBar::ManagedStreamingChanged(bool streaming)
 {
+	managedStreamingActive = streaming;
 	if (streaming) {
 		Activate();
 	} else {
@@ -616,8 +617,9 @@ void OBSBasicStatusBar::UpdateIcons()
 	recordingInactivePixmap = GetPixmap("recording-inactive.svg");
 	recordingPauseInactivePixmap = GetPixmap("recording-pause-inactive.svg");
 
-	const auto *manager = OBSBasic::Get()->findChild<xinkx::MultiStreamManager *>();
-	bool streaming = obs_frontend_streaming_active() || (manager && manager->anythingActive());
+	// UpdateIcons is called inside this status bar's constructor, before the
+	// OBSBasic main window has been fully initialized. Never query it here.
+	bool streaming = obs_frontend_streaming_active() || managedStreamingActive;
 
 	if (!streaming) {
 		statusWidget->ui->streamIcon->setPixmap(streamingInactivePixmap);

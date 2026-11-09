@@ -19,6 +19,7 @@ private:
 	std::vector<OBSSignal> streamSigs;
 	OBSWeakOutputAutoRelease recordOutput;
 	bool active = false;
+	bool managedStreamingActive = false;
 	bool overloadedNotify = true;
 	bool streamPauseIconToggle = false;
 	bool disconnected = false;
