@@ -1,0 +1,47 @@
+#pragma once
+
+#include <QString>
+#include <QVector>
+
+#include <obs.hpp>
+
+class QWidget;
+
+namespace xinkx {
+
+// A separate libobs video mix and scene. Sources are shared with the main scene,
+// but every portrait scene item has its own independent transform and bounds.
+class PortraitCanvas final {
+public:
+	static PortraitCanvas &instance();
+	video_t *video();
+	void sync();
+	void edit(QWidget *parent);
+	void shutdown();
+
+private:
+	PortraitCanvas() = default;
+	~PortraitCanvas() = default;
+	PortraitCanvas(const PortraitCanvas &) = delete;
+	PortraitCanvas &operator=(const PortraitCanvas &) = delete;
+
+	struct Layer {
+		QString key;
+		QString name;
+		obs_sceneitem_t *item = nullptr; // Owned by scene; never persisted across sync().
+	};
+
+	obs_canvas_t *canvas = nullptr;
+	obs_scene_t *scene = nullptr;
+	QString sceneName;
+	QString signature;
+	bool editing = false;
+	QVector<Layer> layers;
+
+	bool ensure();
+	void rebuild(obs_scene_t *mainScene, const QString &name, const QString &newSignature);
+	void updateLayer(const QString &key, float x, float y, float width, float height, bool fill);
+	void save();
+};
+
+} // namespace xinkx

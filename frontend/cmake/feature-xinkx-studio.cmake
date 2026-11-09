@@ -10,6 +10,8 @@ target_sources(
     xinkx/StudioAutomation.hpp
     xinkx/MultiStreamManager.cpp
     xinkx/MultiStreamManager.hpp
+    xinkx/PortraitCanvas.cpp
+    xinkx/PortraitCanvas.hpp
     xinkx/MultiStreamWorkspace.cpp
     xinkx/MultiStreamWorkspace.hpp
     xinkx/StreamAccounts.cpp

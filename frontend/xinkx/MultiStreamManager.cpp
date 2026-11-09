@@ -1,4 +1,6 @@
 #include "MultiStreamManager.hpp"
+#include "PortraitCanvas.hpp"
+#include "StudioDiagnostics.hpp"
 
 #include <QMenu>
 #include <QIcon>
@@ -34,7 +36,7 @@ OBSServiceAutoRelease createStreamService(const StreamDestination &destination, 
 	return obs_service_create("rtmp_custom", name, settings, nullptr);
 }
 
-OBSEncoderAutoRelease createStreamEncoder(const StreamDestination &destination, const char *name)
+OBSEncoderAutoRelease createStreamEncoder(const StreamDestination &destination, const char *name, video_t *video)
 {
 	const auto nvenc = [] {
 		if (obs_get_encoder_codec("obs_nvenc_h264_tex")) {
@@ -54,9 +56,10 @@ OBSEncoderAutoRelease createStreamEncoder(const StreamDestination &destination, 
 	obs_data_set_string(settings, "rate_control", "CBR");
 	obs_data_set_int(settings, "bitrate", destination.bitrate);
 	obs_data_set_int(settings, "keyint_sec", 2);
+	obs_data_set_int(settings, "bf", 0);
 	OBSEncoderAutoRelease encoder = obs_video_encoder_create(encoderId, name, settings, nullptr);
 	if (encoder) {
-		obs_encoder_set_video(encoder, obs_get_video());
+		obs_encoder_set_video(encoder, video ? video : obs_get_video());
 		obs_encoder_set_scaled_size(encoder, destination.width, destination.height);
 		if (obs_encoder_get_caps(encoder) & OBS_ENCODER_CAP_PASS_TEXTURE) {
 			// NVENC's CPU fallback can encode at the global resolution instead.
@@ -96,6 +99,7 @@ int MultiStreamManager::startConfigured()
 		return activeCount();
 	}
 	configured = loadStreamAccounts();
+	for (auto &entry : sessions) entry->stopped.Disconnect();
 	sessions.clear();
 	liveMode = false;
 	for (const auto &account : configured) {
@@ -116,9 +120,28 @@ void MultiStreamManager::start(const StreamAccount &account)
 	session.manager = this;
 	session.serial = ++nextSerial;
 	session.account = account;
+	// Two RTMP connections with the same ingest key race for the same YouTube
+	// livestream. A healthy bitrate on the client does not prove YouTube has
+	// decoded the intended stream. Require an independent key for each output.
+	const auto &dst = account.destination;
+	for (const auto &existing : sessions) {
+		if (existing.get() == &session || !existing->running) continue;
+		const auto &other = existing->account.destination;
+		const QString endpoint = dst.serviceName.isEmpty() ? dst.ingestUrl : dst.serviceServer;
+		const QString otherEndpoint = other.serviceName.isEmpty() ? other.ingestUrl : other.serviceServer;
+		if (endpoint == otherEndpoint && !dst.streamKey.isEmpty() && dst.streamKey == other.streamKey) {
+			session.failed = true;
+			session.errorDescription = u"Одинаковый RTMP-ключ у двух выходов"_s;
+			writeDiagnostic(QStringLiteral("rtmp"), QStringLiteral("Duplicate ingest destination blocked: %1")
+				.arg(account.platform));
+			return;
+		}
+	}
 	const auto name = QByteArray("xinkx_extra_") + QByteArray::number(sessions.size() - 1);
 	session.service = createStreamService(account.destination, (name + "_service").constData());
-	const auto video = createStreamEncoder(account.destination, (name + "_video").constData());
+	video_t *videoMix = account.destination.portrait ? PortraitCanvas::instance().video() : obs_get_video();
+	const auto video = videoMix ? createStreamEncoder(account.destination, (name + "_video").constData(), videoMix)
+		: OBSEncoderAutoRelease{};
 	OBSDataAutoRelease audioSettings = obs_data_create();
 	obs_data_set_int(audioSettings, "bitrate", 160);
 	OBSEncoderAutoRelease audio =
@@ -128,6 +151,8 @@ void MultiStreamManager::start(const StreamAccount &account)
 	session.output = obs_output_create("rtmp_output", (name + "_output").constData(), outputSettings, nullptr);
 	if (!session.service || !video || !audio || !session.output) {
 		session.failed = true;
+		writeDiagnostic(QStringLiteral("rtmp"), QStringLiteral("Output setup failed: %1, portrait=%2")
+			.arg(account.platform).arg(int(account.destination.portrait)));
 		return;
 	}
 	obs_encoder_set_audio(audio, obs_get_audio());
@@ -139,12 +164,15 @@ void MultiStreamManager::start(const StreamAccount &account)
 	session.stats.sampleTime = clock.elapsed();
 	session.running = obs_output_start(session.output);
 	session.failed = !session.running;
+	writeDiagnostic(QStringLiteral("rtmp"), QStringLiteral("Start %1: accepted=%2, portrait=%3, %4x%5")
+		.arg(account.platform).arg(int(session.running)).arg(int(account.destination.portrait))
+		.arg(account.destination.width).arg(account.destination.height));
 }
 
 void MultiStreamManager::restart(Session &session)
 {
-	if (session.stopping) {
-		session.restartRequested = true;
+	if (session.stopping || (session.output && obs_output_active(session.output))) {
+		requestRestart(session);
 		return;
 	}
 	if (session.running) return;
@@ -161,6 +189,41 @@ void MultiStreamManager::restart(Session &session)
 	session.running = obs_output_start(session.output);
 	session.failed = !session.running;
 	if (session.running) session.stats.bytes = obs_output_get_total_bytes(session.output);
+	writeDiagnostic(QStringLiteral("rtmp"), QStringLiteral("Restart %1: accepted=%2")
+		.arg(session.account.platform).arg(int(session.running)));
+}
+
+void MultiStreamManager::requestRestart(Session &session)
+{
+	session.restartRequested = true;
+	if (session.restartPending) return;
+	session.restartPending = true;
+	const quint64 serial = session.serial;
+	// RTMP output stop is asynchronous. Never call obs_output_start from a stop
+	// callback or while libobs still reports this output as active.
+	QTimer::singleShot(500, this, [this, serial] {
+		for (auto &entry : sessions) {
+			if (entry->serial != serial) continue;
+			entry->restartPending = false;
+			if (!entry->restartRequested || !liveMode || !enabled(entry->account)) return;
+			if (entry->stopping || (entry->output && obs_output_active(entry->output))) {
+				if (++entry->restartAttempts <= 20) requestRestart(*entry);
+				else {
+					entry->restartRequested = false;
+					entry->failed = true;
+					writeDiagnostic(QStringLiteral("rtmp"), QStringLiteral("Restart timeout: %1")
+						.arg(entry->account.platform));
+					updateStatus();
+				}
+				return;
+			}
+			entry->restartAttempts = 0;
+			entry->running = false;
+			restart(*entry);
+			updateStatus();
+			return;
+		}
+	});
 }
 
 void MultiStreamManager::outputStopped(void *data, calldata_t *params)
@@ -172,11 +235,15 @@ void MultiStreamManager::outputStopped(void *data, calldata_t *params)
 	QMetaObject::invokeMethod(manager, [manager, serial, code] {
 		for (auto &entry : manager->sessions) {
 			if (entry->serial == serial) {
+				const int frames = entry->output ? obs_output_get_total_frames(entry->output) : 0;
+				writeDiagnostic(QStringLiteral("rtmp"), QStringLiteral("Stopped %1: code=%2, frames=%3, restarting=%4")
+					.arg(entry->account.platform).arg(code).arg(frames).arg(int(entry->restartRequested)));
+				entry->lastStopCode = code;
 				entry->running = false;
 				entry->failed = !entry->stopping && code != OBS_OUTPUT_SUCCESS;
 				entry->stopping = false;
 				if (entry->restartRequested && manager->liveMode && manager->enabled(entry->account))
-					manager->restart(*entry);
+					manager->requestRestart(*entry);
 				else entry->restartRequested = false;
 				manager->updateStatus();
 				break;
@@ -203,6 +270,7 @@ void MultiStreamManager::stopAll(bool force)
 	liveMode = false;
 	for (auto &session : sessions) {
 		session->restartRequested = false;
+		session->restartAttempts = 0;
 		stop(*session, force);
 	}
 	updateStatus();
@@ -211,7 +279,9 @@ void MultiStreamManager::stopAll(bool force)
 void MultiStreamManager::shutdown()
 {
 	stopAll(true);
+	for (auto &entry : sessions) entry->stopped.Disconnect();
 	sessions.clear();
+	PortraitCanvas::instance().shutdown();
 }
 
 bool MultiStreamManager::anythingActive() const
@@ -292,7 +362,9 @@ int MultiStreamManager::totalVideoFrames() const
 QString MultiStreamManager::Session::description() const
 {
 	if (failed) {
-		return account.destination.ready() ? u"Ошибка выхода"_s : u"Нужны параметры RTMP(S)"_s;
+		if (!errorDescription.isEmpty()) return errorDescription;
+		return account.destination.ready() ? u"Ошибка выхода (OBS code %1)"_s.arg(lastStopCode)
+			: u"Нужны параметры RTMP(S)"_s;
 	}
 	if (!running) {
 		return u"Остановлен"_s;
@@ -312,9 +384,12 @@ QString MultiStreamManager::OutputStats::liveDescription(obs_output_t *output) c
 		return u"Подключение"_s;
 	}
 	const auto seconds = timer.elapsed() / 1000;
-	return u"LIVE · %1 кбит/с · %2:%3:%4 · пропущено: %5"_s
+	if (seconds >= 8 && kbps > 500 && videoFrames == 0)
+		return u"Поток передаёт данные, но видеокадры не подтверждены"_s;
+	return u"LIVE · %1 кбит/с · %2:%3:%4 · кадров: %5 · пропущено: %6"_s
 		.arg(kbps).arg(seconds / 3600, 2, 10, QLatin1Char('0'))
 		.arg(seconds / 60 % 60, 2, 10, QLatin1Char('0')).arg(seconds % 60, 2, 10, QLatin1Char('0'))
+		.arg(videoFrames)
 		.arg(obs_output_get_frames_dropped(output));
 }
 
@@ -343,6 +418,8 @@ QVector<MultiStreamManager::OutputSnapshot> MultiStreamManager::outputSnapshots(
 			state.reconnecting = session->running && session->output && obs_output_reconnecting(session->output);
 			state.kbps = state.live ? session->stats.kbps : 0;
 			state.dropped = session->output ? obs_output_get_frames_dropped(session->output) : 0;
+			state.videoFrames = session->stats.videoFrames;
+			state.state = session->description();
 			break;
 		}
 		rows.push_back(state);
@@ -376,7 +453,16 @@ void MultiStreamManager::populateMenu(QMenu *menu)
 				for (const auto &entry : sessions)
 					if (entry->account.id == account.id) { current = entry.get(); break; }
 				if (checked) {
-					if (current) restart(*current);
+					if (current && (!current->output || !current->service)) {
+						// Retry an account whose previous setup was refused or failed.
+						for (auto it = sessions.begin(); it != sessions.end(); ++it) {
+							if (it->get() != current) continue;
+							current->stopped.Disconnect();
+							sessions.erase(it);
+							break;
+						}
+						start(account);
+					} else if (current) requestRestart(*current);
 					else start(account);
 				} else if (current) {
 					current->restartRequested = false;
@@ -400,6 +486,7 @@ void MultiStreamManager::OutputStats::sample(obs_output_t *output, qint64 now)
 	const auto elapsed = now - sampleTime;
 	if (elapsed >= 250) {
 		kbps = totalBytes >= bytes ? 8 * (totalBytes - bytes) / elapsed : 0;
+		videoFrames = obs_output_get_total_frames(output);
 		bytes = totalBytes;
 		sampleTime = now;
 	}
@@ -408,6 +495,9 @@ void MultiStreamManager::OutputStats::sample(obs_output_t *output, qint64 now)
 void MultiStreamManager::updateStatus()
 {
 	const auto now = clock.elapsed();
+	if (std::any_of(sessions.cbegin(), sessions.cend(), [](const auto &item) {
+		return item->account.destination.portrait && item->running;
+	})) PortraitCanvas::instance().sync();
 	for (auto &session : sessions) {
 		if (session->running) {
 			session->stats.sample(session->output, now);

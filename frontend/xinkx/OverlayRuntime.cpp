@@ -198,7 +198,7 @@ QPixmap catalogPreview(const SourcePreset &item)
 	gradient.setColorAt(1, QColor(QStringLiteral("#121828")));
 	painter.fillRect(image.rect(), gradient);
 	painter.setPen(QColor(QStringLiteral("#5b6b87")));
-	painter.drawText(QRect(20, 14, 600, 25), Qt::AlignLeft, QStringLiteral("ПРЕДПРОСМОТР ИСТОЧНИКА · 16:9"));
+	painter.drawText(QRect(20, 14, 600, 25), Qt::AlignLeft, QStringLiteral("МАКЕТ ОФОРМЛЕНИЯ · 16:9"));
 	const QColor accent = item.appearance == QStringLiteral("gold") ? QColor(QStringLiteral("#f8d17a")) :
 		item.appearance == QStringLiteral("neon") ? QColor(QStringLiteral("#bf8bff")) : QColor(QStringLiteral("#69dffa"));
 	if (item.layer == QStringLiteral("chat")) {
@@ -688,6 +688,14 @@ void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *p
 	auto *name = new QLineEdit(&dialog);
 	name->setMaxLength(100);
 	form->addRow(QStringLiteral("Название источника"), name);
+	auto *width = new QSpinBox(&dialog);
+	width->setRange(80, 3840);
+	width->setSuffix(QStringLiteral(" px"));
+	auto *height = new QSpinBox(&dialog);
+	height->setRange(50, 2160);
+	height->setSuffix(QStringLiteral(" px"));
+	form->addRow(QStringLiteral("Ширина области"), width);
+	form->addRow(QStringLiteral("Высота области"), height);
 	auto *placement = new QComboBox(&dialog);
 	placement->addItem(QStringLiteral("Слева сверху"), QStringLiteral("top-left"));
 	placement->addItem(QStringLiteral("Справа сверху"), QStringLiteral("top-right"));
@@ -724,6 +732,9 @@ void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *p
 	auto *removePreset = new QPushButton(QStringLiteral("Удалить мой"), &dialog);
 	buttons->addWidget(removePreset);
 	detail->addLayout(buttons);
+	auto *updateSelected = new QPushButton(QStringLiteral("Применить к выделенному источнику"), &dialog);
+	updateSelected->setToolTip(QStringLiteral("Обновить оформление выделенного источника XINKX на сцене без удаления и повторного добавления."));
+	detail->addWidget(updateSelected);
 	auto *add = new QPushButton(QStringLiteral("Добавить на сцену"), &dialog);
 	add->setDefault(true);
 	detail->addWidget(add);
@@ -749,6 +760,12 @@ void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *p
 			Qt::SmoothTransformation));
 		description->setText(entry.description);
 		name->setText(entry.title);
+		width->setValue(entry.settings.value(QStringLiteral("width")).toInt(entry.layer == QStringLiteral("chat") ? 720 :
+			entry.layer == QStringLiteral("frame") ? 800 : entry.layer == QStringLiteral("timer") ? 480 :
+			entry.layer == QStringLiteral("viewers") ? 520 : 1920));
+		height->setValue(entry.settings.value(QStringLiteral("height")).toInt(entry.layer == QStringLiteral("chat") ? 560 :
+			entry.layer == QStringLiteral("frame") ? 450 : entry.layer == QStringLiteral("timer") ? 180 :
+			entry.layer == QStringLiteral("viewers") ? 100 : 1080));
 		caption->setVisible(entry.layer == QStringLiteral("effects"));
 		captionLabel->setVisible(entry.layer == QStringLiteral("effects"));
 		caption->setText(entry.settings.value(QStringLiteral("customText")).toString());
@@ -787,6 +804,29 @@ void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *p
 	QObject::connect(caption, &QLineEdit::textChanged, &dialog, refreshPreview);
 	QObject::connect(messageAlpha, &QSpinBox::valueChanged, &dialog, refreshPreview);
 	QObject::connect(panelAlpha, &QSpinBox::valueChanged, &dialog, refreshPreview);
+	const auto configurationFor = [&](const SourcePreset &entry, const QString &originalReaction = QString{}) {
+		QJsonObject configuration = entry.settings;
+		configuration.insert(QStringLiteral("width"), width->value());
+		configuration.insert(QStringLiteral("height"), height->value());
+		configuration.insert(QStringLiteral("customize"), true);
+		if (entry.layer == QStringLiteral("chat")) {
+			for (const auto &row : {std::pair{QStringLiteral("messageColor"), messageAlpha->value()},
+					std::pair{QStringLiteral("panelColor"), panelAlpha->value()}}) {
+				const uint32_t before = static_cast<uint32_t>(configuration.value(row.first).toDouble());
+				configuration.insert(row.first, static_cast<qint64>((before & 0x00ffffffu) |
+					(static_cast<uint32_t>(row.second * 255 / 100) << 24)));
+			}
+		}
+		if (entry.layer == QStringLiteral("effects")) {
+			configuration.insert(QStringLiteral("customText"), caption->text().trimmed());
+			if (configuration.value(QStringLiteral("reaction")).toString() == QStringLiteral("custom")) {
+				configuration.insert(QStringLiteral("reaction"), originalReaction.startsWith(QStringLiteral("custom-"))
+					? originalReaction : QStringLiteral("custom-") +
+					QUuid::createUuid().toString(QUuid::WithoutBraces).left(8));
+			}
+		}
+		return configuration;
+	};
 	const auto customEntries = [&] {
 		const QString path = catalogPath();
 		if (path.isEmpty()) return QJsonArray{};
@@ -846,6 +886,46 @@ void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *p
 		entries.removeAt(index);
 		if (writeCustom(entries)) rebuild();
 	});
+	QObject::connect(updateSelected, &QPushButton::clicked, &dialog, [&] {
+		const int index = items->currentRow();
+		if (index < 0 || index >= catalog.size()) return;
+		OBSScene scene = mainWindow->GetCurrentScene();
+		if (!scene) return;
+		struct Selected { obs_sceneitem_t *item = nullptr; } selected;
+		obs_scene_enum_items(scene, [](obs_scene_t *, obs_sceneitem_t *item, void *data) {
+			if (!obs_sceneitem_selected(item)) return true;
+			static_cast<Selected *>(data)->item = item;
+			return false;
+		}, &selected);
+		if (!selected.item) {
+			QMessageBox::information(&dialog, QStringLiteral("Источник XINKX"),
+				QStringLiteral("Выдели источник на сцене или в списке OBS."));
+			return;
+		}
+		obs_source_t *source = obs_sceneitem_get_source(selected.item);
+		const QString id = QString::fromUtf8(obs_source_get_id(source));
+		const QString expected = QStringLiteral("xinkx_") + (catalog.at(index).layer == QStringLiteral("effects")
+			? QStringLiteral("reactions") : catalog.at(index).layer);
+		if (id != expected) {
+			QMessageBox::warning(&dialog, QStringLiteral("Источник XINKX"),
+				QStringLiteral("Выбранное оформление не соответствует типу выделенного источника."));
+			return;
+		}
+		OBSDataAutoRelease beforeSettings = obs_source_get_settings(source);
+		const QString oldReaction = QString::fromUtf8(obs_data_get_string(beforeSettings, "reaction"));
+		const QByteArray json = QJsonDocument(configurationFor(catalog.at(index), oldReaction))
+			.toJson(QJsonDocument::Compact);
+		OBSDataAutoRelease changes = obs_data_create_from_json(json.constData());
+		OBSDataAutoRelease applied = obs_data_create();
+		obs_data_apply(applied, beforeSettings);
+		obs_data_apply(applied, changes);
+		OBSData before = OBSBasic::BackupScene(scene);
+		obs_source_update(source, applied);
+		OBSData after = OBSBasic::BackupScene(scene);
+		mainWindow->CreateSceneUndoRedoAction(QStringLiteral("XINKX: изменить оформление источника"), before, after);
+		mainWindow->statusBar()->showMessage(QStringLiteral("Оформление источника обновлено"), 5000);
+		dialog.accept();
+	});
 	QObject::connect(add, &QPushButton::clicked, &dialog, [&] {
 		const int index = items->currentRow();
 		if (index < 0 || index >= catalog.size()) return;
@@ -860,23 +940,7 @@ void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *p
 			obs_source_release(existing);
 			unique = QStringLiteral("%1 (%2)").arg(desired).arg(suffix);
 		}
-		QJsonObject configuration = entry.settings;
-		if (entry.layer == QStringLiteral("chat")) {
-			for (const auto &row : {std::pair{QStringLiteral("messageColor"), messageAlpha->value()},
-					std::pair{QStringLiteral("panelColor"), panelAlpha->value()}}) {
-				const uint32_t before = static_cast<uint32_t>(configuration.value(row.first).toDouble());
-				const uint32_t combined = (before & 0x00ffffffu) |
-					(static_cast<uint32_t>(row.second * 255 / 100) << 24);
-				configuration.insert(row.first, static_cast<qint64>(combined));
-			}
-		}
-		if (entry.layer == QStringLiteral("effects")) {
-			configuration.insert(QStringLiteral("customText"), caption->text().trimmed());
-			if (configuration.value(QStringLiteral("reaction")).toString() == QStringLiteral("custom")) {
-				const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces).left(8);
-				configuration.insert(QStringLiteral("reaction"), QStringLiteral("custom-") + id);
-			}
-		}
+		QJsonObject configuration = configurationFor(entry);
 		QString message;
 		if (runtime->addToScene(mainWindow, &message, entry.layer, unique, configuration,
 				placement->currentData().toString())) {

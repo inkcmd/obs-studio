@@ -25,6 +25,8 @@ struct StreamDestination {
 	int bitrate = 6000;
 	int width = 1920;
 	int height = 1080;
+	// Routes this destination to an independent 1080x1920 libobs canvas.
+	bool portrait = false;
 	bool fromOAuth = false;
 	bool ready() const;
 };

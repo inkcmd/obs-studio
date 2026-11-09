@@ -1,4 +1,19 @@
-# XINKX Studio — Stage 20 (0.15-dev)
+# XINKX Studio — Stages 21–23 (0.15-dev; Windows runtime verification pending)
+
+## Stages 21–23 — RTMP reliability, source catalog editing and native portrait canvas
+
+- **21 / RTMP:** An individual output's restart is scheduled only after its asynchronous stop finishes and `obs_output_active()` becomes false. Rapid off/on requests coalesce; after 10 seconds without reaching an idle state, the request fails visibly rather than starting a second encoder on a stopping output. Global Stop cancels queued restarts. The menu reports the output's encoded video frame count and stop code. `diagnostics.log` records redacted state transitions, not keys, cookies or authorization headers. Two simultaneously enabled outputs pointing to exactly the same RTMP server+key are refused: they cannot safely act as separate horizontal/vertical YouTube feeds. This does not diagnose YouTube's remote transcoder or Live Control Room state; only a real server-side preview/live-state check can confirm that the picture reached viewers.
+- **22 / sources:** The native preset catalog now edits the **existing selected** XINKX source as well as adding a new one. Chat layer dimensions and its two independent background alpha values can be set in the catalog; existing reaction IDs are preserved when updating an existing custom reaction. User presets continue to persist locally. The catalog thumbnails are **style mockups**, while the OBS scene preview is the actual browser/native source output; thumbnail live-rendering is not yet implemented.
+- **23 / portrait:** Each account in **Настройки → Трансляция → Изменить** can choose **Видеокомпозиция → Вертикальная композиция 1080×1920**, with a 9:16 encoder resolution (1080×1920 or 720×1280). **Редактировать вертикальную композицию** opens the independent libobs portrait scene's live preview and source list, with per-source X/Y/width/height, fit/fill, visibility and dragging. It reuses source objects from the current OBS program scene but gives them **independent transforms**; no horizontal framebuffer is passed through a 9:16 stretch. Source layouts persist per scene in local `studio.ini`, are restored when switching scenes and change without a streaming restart. The portrait mix is independent, but its source set still follows the current horizontal program scene; an entirely separate scene switcher/collection for portrait is not implemented.
+
+Windows validation before claiming success:
+
+1. Apply this patch on top of the previous source-catalog patch, run `cmake --build --preset windows-x64 --parallel 12` and inspect errors. No Windows MSVC/Qt6 build was available when producing this patch; Node source-contract tests are **not** a compilation substitute.
+2. Start Twitch and YouTube with **different ingest keys**. Stop/restart only YouTube several times, including a rapid off/on; verify Twitch never stops and the menu shows increasing video frames. Stop all and confirm no delayed reconnection. Check the exact YouTube event/stream binding and actual video preview; do not use bitrate alone as proof.
+3. Select a disposable 9:16 output (preferably an unlisted YouTube test event with its own stream key), configure its vertical canvas and place the game, camera and chat independently. Change the horizontal scene, verify portrait switches and its saved layer layout restores. Confirm OBS renders both mixes and that YouTube decodes the 1080×1920 picture.
+4. In the source catalog, select an installed XINKX chat source in OBS, choose another style and alpha/dimensions, click **Применить к выделенному источнику**; restart the app and verify persistence. Repeat for a reaction with a custom ID.
+
+No automatic YouTube broadcast creation, start or modification is performed by the portrait editor. The account's ordinary OAuth and the other providers are not changed by selecting 9:16 output. An authenticated Windows live test and main-project build remain required for these stages.
 
 ## Stage 20 — independent RTMP output toggles (Windows runtime verification pending)
 

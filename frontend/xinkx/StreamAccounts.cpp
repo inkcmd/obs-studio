@@ -184,6 +184,7 @@ QVector<StreamAccount> loadStreamAccounts(bool withSecrets)
 		account.destination.bitrate = settings.value(QStringLiteral("bitrate"), 6000).toInt();
 		account.destination.width = settings.value(QStringLiteral("width"), 1920).toInt();
 		account.destination.height = settings.value(QStringLiteral("height"), 1080).toInt();
+		account.destination.portrait = settings.value(QStringLiteral("portrait"), false).toBool();
 		account.destination.fromOAuth = settings.value(QStringLiteral("ingestFromOAuth"),
 								       !account.oauth.accessToken.isEmpty()).toBool();
 		accounts.push_back(account);
@@ -240,6 +241,7 @@ bool saveStreamAccounts(const QVector<StreamAccount> &accounts)
 		settings.setValue(QStringLiteral("bitrate"), a.destination.bitrate);
 		settings.setValue(QStringLiteral("width"), a.destination.width);
 		settings.setValue(QStringLiteral("height"), a.destination.height);
+		settings.setValue(QStringLiteral("portrait"), a.destination.portrait);
 	}
 	settings.endArray();
 	settings.sync();

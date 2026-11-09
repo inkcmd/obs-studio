@@ -3,6 +3,7 @@
 #include "ChatGateway.hpp"
 #include "OAuthLogin.hpp"
 #include "PlatformApi.hpp"
+#include "PortraitCanvas.hpp"
 #include "StreamAccounts.hpp"
 
 #include <QCheckBox>
@@ -393,6 +394,30 @@ bool editAccount(QWidget *parent, StreamAccount &account, bool creating)
 	form->addRow(QStringLiteral("Битрейт"), bitrate);
 	auto *width = spin(&dialog, 320, 7680, account.destination.width);
 	auto *height = spin(&dialog, 240, 4320, account.destination.height);
+	auto *composition = new QComboBox(&dialog);
+	composition->addItem(QStringLiteral("Основной холст OBS"), false);
+	composition->addItem(QStringLiteral("Вертикальная композиция 1080×1920"), true);
+	composition->setCurrentIndex(account.destination.portrait ? 1 : 0);
+	form->addRow(QStringLiteral("Видеокомпозиция"), composition);
+	auto *editPortrait = new QPushButton(QStringLiteral("Редактировать вертикальную композицию"), &dialog);
+	editPortrait->setToolTip(QStringLiteral("Отдельные позиции и размеры источников для вертикального потока."));
+	form->addRow(editPortrait);
+	QObject::connect(editPortrait, &QPushButton::clicked, &dialog, [&dialog] {
+		PortraitCanvas::instance().edit(&dialog);
+	});
+	QObject::connect(composition, &QComboBox::currentIndexChanged, &dialog,
+		[=] {
+			const bool portrait = composition->currentData().toBool();
+			editPortrait->setEnabled(portrait);
+			if (portrait && width->value() > height->value()) {
+				width->setValue(1080);
+				height->setValue(1920);
+			} else if (!portrait && width->value() < height->value()) {
+				width->setValue(1920);
+				height->setValue(1080);
+			}
+		});
+	editPortrait->setEnabled(account.destination.portrait);
 	form->addRow(QStringLiteral("Ширина"), width);
 	form->addRow(QStringLiteral("Высота"), height);
 	auto *encoder = new QComboBox(&dialog);
@@ -422,9 +447,10 @@ bool editAccount(QWidget *parent, StreamAccount &account, bool creating)
 		const bool namedService = platform->currentData().toString() == QStringLiteral("obs_service");
 		if ((namedService && (service->currentData().toString().isEmpty() || server->currentData().toString().isEmpty())) ||
 		    (!namedService && !url->text().trimmed().isEmpty() && !validIngestUrl(url->text().trimmed())) ||
-		    width->value() % 2 || height->value() % 2) {
+		    width->value() % 2 || height->value() % 2 ||
+		    (composition->currentData().toBool() && width->value() * 16 != height->value() * 9)) {
 			QMessageBox::warning(&dialog, dialog.windowTitle(),
-					     QStringLiteral("Выбери RTMP-сервис и сервер либо проверь URL и чётность размеров кадра"));
+					     QStringLiteral("Проверь RTMP, размеры кадра и пропорции 9:16 для вертикального выхода"));
 			return;
 		}
 		dialog.accept();
@@ -471,6 +497,7 @@ bool editAccount(QWidget *parent, StreamAccount &account, bool creating)
 	account.destination.bitrate = bitrate->value();
 	account.destination.width = width->value();
 	account.destination.height = height->value();
+	account.destination.portrait = composition->currentData().toBool();
 	account.destination.encoder = encoder->currentData().toString();
 	if (creating) {
 		account.id = QUuid::createUuid().toString(QUuid::WithoutBraces);

@@ -16,7 +16,8 @@ class QMenu;
 namespace xinkx {
 
 OBSServiceAutoRelease createStreamService(const StreamDestination &destination, const char *name);
-OBSEncoderAutoRelease createStreamEncoder(const StreamDestination &destination, const char *name);
+OBSEncoderAutoRelease createStreamEncoder(const StreamDestination &destination, const char *name,
+					 video_t *video = nullptr);
 
 class MultiStreamManager final : public QObject {
 	Q_OBJECT
@@ -30,6 +31,8 @@ public:
 		bool reconnecting = false;
 		uint64_t kbps = 0;
 		int dropped = 0;
+		int videoFrames = 0;
+		QString state;
 	};
 	explicit MultiStreamManager(QObject *parent = nullptr);
 	~MultiStreamManager() override;
@@ -60,6 +63,7 @@ private:
 		uint64_t bytes = 0;
 		qint64 sampleTime = 0;
 		uint64_t kbps = 0;
+		int videoFrames = 0;
 		void sample(obs_output_t *output, qint64 now);
 		QString liveDescription(obs_output_t *output) const;
 	};
@@ -76,6 +80,10 @@ private:
 		bool stopping = false;
 		bool failed = false;
 		bool restartRequested = false;
+		bool restartPending = false;
+		int restartAttempts = 0;
+		int lastStopCode = 0;
+		QString errorDescription;
 		QString description() const;
 	};
 
@@ -89,6 +97,7 @@ private:
 	bool enabled(const StreamAccount &account) const;
 	void start(const StreamAccount &account);
 	void restart(Session &session);
+	void requestRestart(Session &session);
 	void stop(Session &session, bool force);
 	void updateStatus();
 	static void outputStopped(void *data, calldata_t *params);
