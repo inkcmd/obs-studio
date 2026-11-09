@@ -1,4 +1,16 @@
-# XINKX Studio — Stage 14 (0.15-dev)
+# XINKX Studio — Stage 16 (0.15-dev)
+
+## Stage 16 changes — native sources and broadcast reliability
+
+- Fixed registration of the six `xinkx_*` OBS input types. They were rejected by libobs because a video-only source was incorrectly flagged as `OBS_SOURCE_COMPOSITE` without an audio-render callback. Each XINKX type is now selectable from the standard Sources `+` dialog and manages an active private browser child.
+- The broadcast editor now reloads metadata for all connected accounts with one button; one save action can update all accounts. YouTube's general Gaming category is kept when searching for a specific game. Each platform retains its own category ID. Kick uses `channel_description` when returned and displays a placeholder if Kick omits `stream_title`.
+- Game profiles now store the scene UUID as well as its display name; renaming an OBS scene refreshes the dropdown without breaking UUID-backed profiles. Legacy name-only profiles migrate on save. If the collection has exactly one scene, a renamed legacy binding can resolve unambiguously.
+- Chat send confirmations and provider warnings are recorded to `diagnostics.log` instead of being mixed into the chat history. Settings now have a Diagnostics page. XINKX settings icons are tinted for the dark theme, and the chat appearance editors include a sample message preview.
+- The streamer overlay has two independent controls: show/hide and mouse placement mode. In placement mode only the chat area accepts drag input; offsets are saved in `presentation.json`. With placement disabled the full overlay passes clicks to the game again. The streamer display uses platform symbols and animates reaction particles/fades while effects are active.
+
+**Not implemented in this patch:** generic user-supplied effect assets/timelines, arbitrary payment-provider and bank connectors, server-side OAuth for new donation sites, automatic LLM model connection. Native source types still render HTML internally through OBS browser, not via a separately authored GPU shader. Kick may omit title/description fields in its public channels response; the UI cannot restore data that the provider does not return.
+
+Windows MSVC build and end-to-end Kick/YouTube/OAuth runtime checks remain necessary.
 
 ## Stage 14 changes — native editor (Windows build/runtime verification pending)
 

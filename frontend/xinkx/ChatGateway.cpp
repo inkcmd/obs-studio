@@ -447,11 +447,19 @@ void ChatGateway::inspectBroadcast(const QString &id, const QString &youtubeBroa
 				const auto data = result.json.value(QStringLiteral("data")).toArray();
 				if (data.isEmpty()) { emit broadcastResult(id, QStringLiteral("Канал Kick не найден"), false); return; }
 				const auto item = data.first().toObject();
+				const auto live = item.value(QStringLiteral("stream")).toObject();
+				QString title = item.value(QStringLiteral("stream_title")).toString();
+				if (title.isEmpty()) title = live.value(QStringLiteral("title")).toString();
+				if (title.isEmpty()) title = item.value(QStringLiteral("title")).toString();
+				const auto category = item.value(QStringLiteral("category")).toObject().isEmpty()
+					? live.value(QStringLiteral("category")).toObject()
+					: item.value(QStringLiteral("category")).toObject();
 				emit broadcastInfo(id, {{QStringLiteral("platform"), QStringLiteral("kick")},
-					{QStringLiteral("title"), item.value(QStringLiteral("stream_title"))},
-					{QStringLiteral("description"), item.value(QStringLiteral("description"))},
-					{QStringLiteral("categoryId"), item.value(QStringLiteral("category")).toObject().value(QStringLiteral("id"))},
-					{QStringLiteral("categoryName"), item.value(QStringLiteral("category")).toObject().value(QStringLiteral("name"))}});
+					{QStringLiteral("title"), title},
+					{QStringLiteral("description"), item.value(QStringLiteral("channel_description")).toString(
+						item.value(QStringLiteral("description")).toString())},
+					{QStringLiteral("categoryId"), category.value(QStringLiteral("id"))},
+					{QStringLiteral("categoryName"), category.value(QStringLiteral("name"))}});
 			});
 	} else if (account.platform == QStringLiteral("youtube")) {
 		const auto url = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts"),
@@ -525,7 +533,12 @@ void ChatGateway::searchCategories(const QString &id, const QString &query)
 			const auto label = account.platform == QStringLiteral("youtube") ?
 				obj.value(QStringLiteral("snippet")).toObject().value(QStringLiteral("title")).toString()
 				: obj.value(QStringLiteral("name")).toString();
-			if (account.platform == QStringLiteral("youtube") && !label.contains(name, Qt::CaseInsensitive)) continue;
+			// YouTube offers broad video categories, not game titles. Always keep
+			// "Gaming" available even when the searched game has another name.
+			if (account.platform == QStringLiteral("youtube") && !label.contains(name, Qt::CaseInsensitive) &&
+			    !label.contains(QStringLiteral("Gaming"), Qt::CaseInsensitive) &&
+			    !label.contains(QStringLiteral("Видеоигр"), Qt::CaseInsensitive) &&
+			    obj.value(QStringLiteral("id")).toString() != QStringLiteral("20")) continue;
 			const auto value = obj.value(QStringLiteral("id")).toVariant().toString();
 			if (!value.isEmpty() && !label.isEmpty()) categories.append(QJsonObject{
 				{QStringLiteral("id"), value}, {QStringLiteral("name"), label}});

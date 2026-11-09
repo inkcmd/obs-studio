@@ -1,4 +1,5 @@
 #include "ChatGateway.hpp"
+#include "StudioDiagnostics.hpp"
 #include "StudioWorkspace.hpp"
 
 #include <widgets/OBSBasic.hpp>
@@ -147,11 +148,14 @@ void installChatWorkspace(OBSBasic *mainWindow)
 			return;
 		}
 		gateway->sendMessage(entry->text(), selected);
+		if (!entry->text().trimmed().isEmpty()) entry->clear();
 	};
 	QObject::connect(send, &QPushButton::clicked, dock, sendCurrent);
 	QObject::connect(entry, &QLineEdit::returnPressed, dock, sendCurrent);
 	QObject::connect(gateway, &ChatGateway::providerStatus, dock,
 		[=](const QString &id, const QString &message) {
+			if (view->statusCache.value(id) != message)
+				writeDiagnostic(QStringLiteral("provider:%1").arg(id), message);
 			view->statusCache[id] = message;
 			if (view->statuses.contains(id)) {
 				view->statuses.value(id)->setText(message);
@@ -161,10 +165,7 @@ void installChatWorkspace(OBSBasic *mainWindow)
 		});
 	QObject::connect(gateway, &ChatGateway::providerWarning, dock,
 		[=](const QString &id, const QString &message) {
-			Q_UNUSED(id);
-			auto *item = new QListWidgetItem(QStringLiteral("⚠ ") + message, feed);
-			item->setForeground(QColor(QStringLiteral("#d8ac65")));
-			while (feed->count() > 300) delete feed->takeItem(0);
+			writeDiagnostic(QStringLiteral("provider:%1").arg(id), message);
 		});
 	QObject::connect(gateway, &ChatGateway::viewersReceived, dock, [view](const QString &id, int count) {
 		if (auto *label = view->viewers.value(id)) label->setText(count < 0
@@ -186,16 +187,8 @@ void installChatWorkspace(OBSBasic *mainWindow)
 	});
 	QObject::connect(gateway, &ChatGateway::sendStatus, dock,
 		[=](const QString &id, const QString &result, bool success) {
-			QString platform;
-			for (const auto &account : gateway->accounts()) {
-				if (account.id == id) { platform = platformTitle(account.platform); break; }
-			}
-			auto *item = new QListWidgetItem((success ? QStringLiteral("✓ ") : QStringLiteral("! ")) +
-				platform + QStringLiteral(": ") + result, feed);
-			item->setForeground(QColor(success ? QStringLiteral("#74d9b5") : QStringLiteral("#e9ae67")));
-			if (success) entry->clear();
-			while (feed->count() > 300) delete feed->takeItem(0);
-			feed->scrollToBottom();
+			writeDiagnostic(QStringLiteral("chat:%1:%2").arg(id, success ? QStringLiteral("ok") : QStringLiteral("warning")),
+				result);
 		});
 	gateway->reloadAccounts();
 	studioTabs(mainWindow)->addTab(panel, QStringLiteral("Чат"));

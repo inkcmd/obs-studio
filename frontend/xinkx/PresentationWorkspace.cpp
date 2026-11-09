@@ -13,6 +13,7 @@
 #include <QDateTime>
 #include <QDialog>
 #include <QDockWidget>
+#include <QDynamicPropertyChangeEvent>
 #include <QFontDialog>
 #include <QFontMetrics>
 #include <QFormLayout>
@@ -24,10 +25,12 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRandomGenerator>
+#include <QRegion>
 #include <QScrollArea>
 #include <QScreen>
 #include <QSpinBox>
@@ -36,7 +39,9 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <functional>
 #include <memory>
+#include <utility>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -57,6 +62,7 @@ public:
 	struct Effect {
 		QString text;
 		QPointF location;
+		qint64 born = 0;
 		qint64 until = 0;
 		int particleCount = 0;
 		quint32 seed = 0;
@@ -71,7 +77,7 @@ public:
 		setAttribute(Qt::WA_TransparentForMouseEvents);
 		setFocusPolicy(Qt::NoFocus);
 		auto *timer = new QTimer(this);
-		timer->setInterval(200);
+		timer->setInterval(50);
 		connect(timer, &QTimer::timeout, this, [this] {
 			const qint64 now = QDateTime::currentMSecsSinceEpoch();
 			const int before = events.size();
@@ -83,7 +89,7 @@ public:
 			events.erase(std::remove_if(events.begin(), events.end(), [now](const Effect &event) {
 				return event.until > 0 && event.until < now;
 			}), events.end());
-			if (before != events.size() || previousMessages != messages.size()) update();
+			if (before != events.size() || previousMessages != messages.size() || !events.isEmpty()) update();
 		});
 		timer->start();
 	}
@@ -93,17 +99,43 @@ public:
 		if (!enabled) { hide(); return; }
 		if (auto *screen = QGuiApplication::primaryScreen()) setGeometry(screen->geometry());
 		show();
+		syncMouseMode();
+	}
+
+	void setOffsetWriter(std::function<void(int, int)> writer) { saveOffset = std::move(writer); }
+
+	void setEditing(bool value)
+	{
+		if (editing == value) return;
+		const bool wasVisible = isVisible();
+		editing = value;
+		setWindowFlag(Qt::WindowTransparentForInput, !editing);
+		setAttribute(Qt::WA_TransparentForMouseEvents, !editing);
+		if (wasVisible) show();
+		syncMouseMode();
+		update();
+	}
+
+	void syncMouseMode()
+	{
 #ifdef _WIN32
 		const auto handle = reinterpret_cast<HWND>(winId());
 		const LONG_PTR flags = GetWindowLongPtrW(handle, GWL_EXSTYLE);
-		SetWindowLongPtrW(handle, GWL_EXSTYLE, flags | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE);
-		SetWindowPos(handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
+		LONG_PTR next = flags | WS_EX_LAYERED | WS_EX_NOACTIVATE;
+		if (editing) next &= ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT);
+		else next |= WS_EX_TRANSPARENT;
+		SetWindowLongPtrW(handle, GWL_EXSTYLE, next);
+		SetWindowPos(handle, HWND_TOPMOST, 0, 0, 0, 0,
+			SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 #endif
+		if (editing) setMask(QRegion(chatBounds().adjusted(-12, -12, 12, 12)));
+		else clearMask();
 	}
 
 	void configure(const QJsonObject &document)
 	{
 		profile = document.value(QStringLiteral("streamer")).toObject();
+		if (editing) setMask(QRegion(chatBounds().adjusted(-12, -12, 12, 12)));
 		update();
 	}
 
@@ -114,6 +146,7 @@ public:
 			QDateTime::currentMSecsSinceEpoch()});
 		const int limit = profile.value(QStringLiteral("chat")).toObject().value(QStringLiteral("maxMessages")).toInt(8);
 		while (messages.size() > limit) messages.removeFirst();
+		if (editing) setMask(QRegion(chatBounds().adjusted(-12, -12, 12, 12)));
 		update();
 	}
 
@@ -141,7 +174,8 @@ public:
 		const int maxParticles = std::max(min, params.value(QStringLiteral("particleMax")).toInt(30));
 		const int count = (kind == QStringLiteral("GG") || kind == QStringLiteral("CONFETTI"))
 			? min + QRandomGenerator::global()->bounded(maxParticles - min + 1) : 0;
-		events.push_back({text, point, duration == 0 ? 0 : QDateTime::currentMSecsSinceEpoch() + duration,
+		const qint64 now = QDateTime::currentMSecsSinceEpoch();
+		events.push_back({text, point, now, duration == 0 ? 0 : now + duration,
 			count, QRandomGenerator::global()->generate()});
 		update();
 	}
@@ -155,19 +189,88 @@ public:
 	}
 
 protected:
+	bool event(QEvent *event) override
+	{
+		if (event->type() == QEvent::DynamicPropertyChange) {
+			auto *changed = static_cast<QDynamicPropertyChangeEvent *>(event);
+			if (changed->propertyName() == QByteArray("xinkxEditChat")) setEditing(property("xinkxEditChat").toBool());
+		}
+		return QWidget::event(event);
+	}
+
+	void mousePressEvent(QMouseEvent *event) override
+	{
+		if (editing && event->button() == Qt::LeftButton) {
+			dragging = true;
+			press = event->globalPosition().toPoint();
+			const auto chat = profile.value(QStringLiteral("chat")).toObject();
+			origin = QPoint(chat.value(QStringLiteral("offsetX")).toInt(), chat.value(QStringLiteral("offsetY")).toInt());
+			event->accept();
+		}
+	}
+
+	void mouseMoveEvent(QMouseEvent *event) override
+	{
+		if (!dragging) return;
+		const QPoint delta = event->globalPosition().toPoint() - press;
+		auto chat = profile.value(QStringLiteral("chat")).toObject();
+		chat.insert(QStringLiteral("offsetX"), qBound(-3840, origin.x() + delta.x(), 3840));
+		chat.insert(QStringLiteral("offsetY"), qBound(-2160, origin.y() + delta.y(), 2160));
+		profile.insert(QStringLiteral("chat"), chat);
+		setMask(QRegion(chatBounds().adjusted(-12, -12, 12, 12)));
+		update();
+	}
+
+	void mouseReleaseEvent(QMouseEvent *event) override
+	{
+		if (!dragging || event->button() != Qt::LeftButton) return;
+		dragging = false;
+		const auto chat = profile.value(QStringLiteral("chat")).toObject();
+		if (saveOffset) saveOffset(chat.value(QStringLiteral("offsetX")).toInt(),
+			chat.value(QStringLiteral("offsetY")).toInt());
+	}
+
+	QRect chatBounds() const
+	{
+		const auto chat = profile.value(QStringLiteral("chat")).toObject();
+		QFont font(chat.value(QStringLiteral("font")).toString(QStringLiteral("Segoe UI")));
+		font.setPixelSize(chat.value(QStringLiteral("fontSize")).toInt(20));
+		const int padding = chat.value(QStringLiteral("padding")).toInt(10);
+		const int gap = chat.value(QStringLiteral("gap")).toInt(7);
+		const int width = std::max(150, this->width() * chat.value(QStringLiteral("widthPercent")).toInt(60) / 100);
+		const int height = std::max(120, messages.size() * (QFontMetrics(font).height() * 2 + padding * 2 + 4 + gap));
+		const QString vertical = chat.value(QStringLiteral("vertical")).toString();
+		const QString horizontal = chat.value(QStringLiteral("horizontal")).toString();
+		const int x = (horizontal == QStringLiteral("right") ? this->width() - width - 36 :
+			horizontal == QStringLiteral("center") ? (this->width() - width) / 2 : 36) +
+			chat.value(QStringLiteral("offsetX")).toInt();
+		const int y = (vertical == QStringLiteral("top") ? 36 :
+			vertical == QStringLiteral("center") ? (this->height() - height) / 2 : this->height() - height - 36) +
+			chat.value(QStringLiteral("offsetY")).toInt();
+		return QRect(x, y, width, height);
+	}
+
 	void paintEvent(QPaintEvent *) override
 	{
 		QPainter painter(this);
 		painter.setRenderHint(QPainter::Antialiasing);
 		const auto chat = profile.value(QStringLiteral("chat")).toObject();
 		if (chat.value(QStringLiteral("showViewers")).toBool()) {
-			QStringList values;
-			for (auto it = viewers.cbegin(); it != viewers.cend(); ++it)
-				values.append(it.key().toUpper() + QStringLiteral(": ") + QString::number(it.value()));
 			QFont viewerFont(QStringLiteral("Segoe UI"), 13, QFont::DemiBold);
 			painter.setFont(viewerFont);
 			painter.setPen(QColor(QStringLiteral("#6be4ef")));
-			painter.drawText(QRect(20, 12, width() - 40, 40), Qt::AlignRight, values.join(QStringLiteral("   ")));
+			int x = width() - 22;
+			for (const QString &platform : {QStringLiteral("kick"), QStringLiteral("youtube"), QStringLiteral("twitch")}) {
+				if (!viewers.contains(platform)) continue;
+				const QString value = QString::number(viewers.value(platform));
+				const int textWidth = QFontMetrics(viewerFont).horizontalAdvance(value) + 5;
+				x -= textWidth;
+				painter.drawText(QRect(x, 14, textWidth, 25), Qt::AlignVCenter, value);
+				x -= 21;
+				const QPixmap icon(QStringLiteral(":/xinkx/%1.svg").arg(platform));
+				if (!icon.isNull()) painter.drawPixmap(x, 17, 18, 18, icon);
+				x -= 15;
+			}
 		}
 		QFont font(chat.value(QStringLiteral("font")).toString(QStringLiteral("Segoe UI")));
 		font.setPixelSize(chat.value(QStringLiteral("fontSize")).toInt(20));
@@ -178,17 +281,21 @@ protected:
 		const int gap = chat.value(QStringLiteral("gap")).toInt(7);
 		const int width = std::max(150, this->width() * chat.value(QStringLiteral("widthPercent")).toInt(60) / 100);
 		const int rowHeight = metric.height() * 2 + padding * 2 + 4;
-		const int totalHeight = messages.size() * (rowHeight + gap);
-		const QString vertical = chat.value(QStringLiteral("vertical")).toString();
-		const QString horizontal = chat.value(QStringLiteral("horizontal")).toString();
-		int y = vertical == QStringLiteral("top") ? 36 : vertical == QStringLiteral("center")
-			? (height() - totalHeight) / 2 : height() - totalHeight - 36;
-		const int x = horizontal == QStringLiteral("right") ? this->width() - width - 36
-			: horizontal == QStringLiteral("center") ? (this->width() - width) / 2 : 36;
+		const QRect bounds = chatBounds();
+		int y = bounds.y();
+		const int x = bounds.x();
 		QColor bg(chat.value(QStringLiteral("backgroundColor")).toString(QStringLiteral("#09152c")));
 		bg.setAlphaF(chat.value(QStringLiteral("opacity")).toDouble(88) / 100.0);
 		const QColor nameColor(chat.value(QStringLiteral("nameColor")).toString(QStringLiteral("#8de9fb")));
 		const QColor textColor(chat.value(QStringLiteral("textColor")).toString(QStringLiteral("#f6faff")));
+		if (editing) {
+			painter.setPen(QPen(QColor(QStringLiteral("#69d8ea")), 2, Qt::DashLine));
+			painter.setBrush(QColor(30, 43, 66, 110));
+			painter.drawRoundedRect(bounds, 7, 7);
+			painter.setPen(Qt::white);
+			painter.drawText(bounds.adjusted(14, 10, -14, -10), Qt::AlignTop,
+				QStringLiteral("Перетащи чат мышью · отключи режим в настройках"));
+		}
 		for (const auto &row : messages) {
 			const QRect rect(x, y, width, rowHeight);
 			painter.setPen(Qt::NoPen);
@@ -196,12 +303,17 @@ protected:
 			painter.drawRoundedRect(rect, chat.value(QStringLiteral("radius")).toInt(6),
 				chat.value(QStringLiteral("radius")).toInt(6));
 			painter.setPen(nameColor);
-			const QString label = (chat.value(QStringLiteral("showPlatform")).toBool()
-				? row.platform.toUpper() + QStringLiteral(" · ") : QString{}) + row.name +
+			const QString label = row.name +
 				(chat.value(QStringLiteral("showTime")).toBool()
 				? QStringLiteral(" · ") + QDateTime::fromMSecsSinceEpoch(row.at).toString(QStringLiteral("HH:mm")) : QString{});
-			painter.drawText(QRect(x + padding, y + padding, width - padding * 2, metric.height()),
-				Qt::AlignVCenter, metric.elidedText(label, Qt::ElideRight, width - padding * 2));
+			int labelX = x + padding;
+			if (chat.value(QStringLiteral("showPlatform")).toBool()) {
+				const QPixmap icon(QStringLiteral(":/xinkx/%1.svg").arg(row.platform));
+				if (!icon.isNull()) painter.drawPixmap(labelX, y + padding + (metric.height() - 18) / 2, 18, 18, icon);
+				labelX += 23;
+			}
+			painter.drawText(QRect(labelX, y + padding, width - (labelX - x) - padding, metric.height()),
+				Qt::AlignVCenter, metric.elidedText(label, Qt::ElideRight, width - (labelX - x) - padding));
 			painter.setPen(textColor);
 			painter.drawText(QRect(x + padding, y + padding + metric.height(), width - padding * 2, metric.height()),
 				Qt::AlignVCenter, metric.elidedText(row.text, Qt::ElideRight, width - padding * 2));
@@ -213,7 +325,12 @@ protected:
 		effectFont.setPixelSize(100 * effects.value(QStringLiteral("scalePercent")).toInt(70) / 100);
 		painter.setFont(effectFont);
 		painter.setPen(QColor(QStringLiteral("#6be4ef")));
+		const qint64 now = QDateTime::currentMSecsSinceEpoch();
 		for (const auto &event : events) {
+			const double progress = event.until > event.born
+				? qBound(0.0, double(now - event.born) / double(event.until - event.born), 1.0) : 0.35;
+			painter.save();
+			painter.setOpacity(std::min({1.0, progress * 7.0 + 0.1, (1.0 - progress) * 5.0}));
 			if (event.particleCount > 0) {
 				QFont particleFont = effectFont;
 				particleFont.setPixelSize(34 * effects.value(QStringLiteral("scalePercent")).toInt(70) / 100);
@@ -221,15 +338,18 @@ protected:
 				for (int i = 0; i < event.particleCount; ++i) {
 					const quint32 seed = event.seed + static_cast<quint32>(i * 0x9e3779b9u);
 					const int px = (seed % static_cast<quint32>(std::max(1, this->width())));
-					const int py = ((seed >> 9) % static_cast<quint32>(std::max(1, height())));
+					const int py = ((seed >> 9) % static_cast<quint32>(std::max(1, height()))) -
+						static_cast<int>(progress * 160);
 					painter.drawText(QRect(px - 55, py - 20, 110, 40), Qt::AlignCenter,
 						event.text == QStringLiteral("GG") ? QStringLiteral("GG") : QStringLiteral("✦"));
 				}
 				painter.setFont(effectFont);
 			} else {
 				const QPoint point(event.location.x() * this->width(), event.location.y() * height());
-				painter.drawText(QRect(point.x() - 400, point.y() - 100, 800, 200), Qt::AlignCenter, event.text);
+				painter.drawText(QRect(point.x() - 400, point.y() - 100 - static_cast<int>(progress * 45),
+					800, 200), Qt::AlignCenter, event.text);
 			}
+			painter.restore();
 		}
 	}
 
@@ -238,6 +358,11 @@ private:
 	QVector<Chat> messages;
 	QVector<Effect> events;
 	QHash<QString, int> viewers;
+	std::function<void(int, int)> saveOffset;
+	bool editing = false;
+	bool dragging = false;
+	QPoint press;
+	QPoint origin;
 };
 
 QSpinBox *numeric(QWidget *parent, int min, int max, const QString &suffix = {})
@@ -260,6 +385,17 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 	auto *streamer = new StreamerOverlay(mainWindow);
 	streamer->setObjectName(QStringLiteral("xinkxStreamerOverlay"));
 	streamer->configure(settings->snapshot());
+	streamer->setOffsetWriter([settings](int x, int y) {
+		QJsonObject document = settings->snapshot();
+		auto profile = document.value(QStringLiteral("streamer")).toObject();
+		auto chat = profile.value(QStringLiteral("chat")).toObject();
+		chat.insert(QStringLiteral("offsetX"), x);
+		chat.insert(QStringLiteral("offsetY"), y);
+		profile.insert(QStringLiteral("chat"), chat);
+		document.insert(QStringLiteral("streamer"), profile);
+		QString error;
+		settings->save(document, &error);
+	});
 	if (runtime) {
 		runtime->setPresentation(settings->snapshot());
 		QObject::connect(settings, &PresentationSettings::changed, runtime, &OverlayRuntime::setPresentation);

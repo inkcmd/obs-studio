@@ -1,4 +1,5 @@
 #include "OverlayRuntime.hpp"
+#include "StudioDiagnostics.hpp"
 #include "PresentationSettings.hpp"
 #include "StudioWorkspace.hpp"
 #include "StudioAutomation.hpp"
@@ -583,15 +584,8 @@ void installOverlayWorkspace(OBSBasic *mainWindow, QDockWidget *sourceInspector)
 	auto *paused = new QCheckBox(QStringLiteral("Отключить эффекты (аварийно)"), content);
 	layout->addWidget(paused);
 	QObject::connect(paused, &QCheckBox::toggled, dock, [=](bool value) { runtime->setPaused(value); });
-	auto *history = new QListWidget(content);
-	history->setMaximumHeight(100);
-	layout->addWidget(history);
-	QObject::connect(runtime, &OverlayRuntime::eventDispatched, dock, [=](const QString &label) {
-		history->insertItem(0, QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")) +
-						  QStringLiteral(" · ") + label);
-		while (history->count() > 20) {
-			delete history->takeItem(history->count() - 1);
-		}
+	QObject::connect(runtime, &OverlayRuntime::eventDispatched, dock, [](const QString &label) {
+		writeDiagnostic(QStringLiteral("effect"), label);
 	});
 	layout->addStretch(1);
 	studioTabs(mainWindow)->addTab(content, QStringLiteral("Эффекты"));

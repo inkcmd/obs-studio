@@ -1,5 +1,6 @@
 #include "ChatGateway.hpp"
 #include "StudioWorkspace.hpp"
+#include "StudioDiagnostics.hpp"
 
 #include <widgets/OBSBasic.hpp>
 
@@ -16,6 +17,7 @@
 #include <QLineEdit>
 #include <QSizePolicy>
 #include <QPlainTextEdit>
+#include <QPixmap>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSignalBlocker>
@@ -73,9 +75,21 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 	youtubeCategory->setObjectName(QStringLiteral("xinkxBroadcastYouTubeGame"));
 	for (auto *choice : {twitchCategory, kickCategory, youtubeCategory})
 		choice->addItem(QStringLiteral("Не изменять"), QString{});
-	categoryFields->addRow(QStringLiteral("Twitch"), twitchCategory);
-	categoryFields->addRow(QStringLiteral("Kick"), kickCategory);
-	categoryFields->addRow(QStringLiteral("YouTube · категория"), youtubeCategory);
+	const auto platformLabel = [panel](const QString &platform, const QString &title) {
+		auto *row = new QWidget(panel);
+		auto *line = new QHBoxLayout(row);
+		line->setContentsMargins(0, 0, 4, 0);
+		line->setSpacing(5);
+		auto *icon = new QLabel(row);
+		const QPixmap image(QStringLiteral(":/xinkx/%1.svg").arg(platform));
+		if (!image.isNull()) icon->setPixmap(image.scaled(17, 17, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+		line->addWidget(icon);
+		line->addWidget(new QLabel(title, row));
+		return row;
+	};
+	categoryFields->addRow(platformLabel(QStringLiteral("twitch"), QStringLiteral("Twitch")), twitchCategory);
+	categoryFields->addRow(platformLabel(QStringLiteral("kick"), QStringLiteral("Kick")), kickCategory);
+	categoryFields->addRow(platformLabel(QStringLiteral("youtube"), QStringLiteral("YouTube")), youtubeCategory);
 	layout->addLayout(categoryFields);
 	auto *youtubeLink = new QPushButton(QStringLiteral("Настроить игру YouTube в Studio ↗"), panel);
 	layout->addWidget(youtubeLink);
@@ -98,12 +112,12 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 	ytActions->addWidget(create);
 	ytActions->addWidget(bind);
 	layout->addLayout(ytActions);
-	auto *all = new QCheckBox(QStringLiteral("Обновить название и найденные категории на всех площадках"), panel);
+	auto *all = new QCheckBox(QStringLiteral("Применить изменения ко всем подключённым площадкам"), panel);
 	all->setChecked(true);
 	layout->addWidget(all);
 	auto *actions = new QVBoxLayout();
-	auto *read = new QPushButton(QStringLiteral("Загрузить текущие данные"), panel);
-	auto *apply = new QPushButton(QStringLiteral("Сохранить на площадке"), panel);
+	auto *read = new QPushButton(QStringLiteral("Обновить данные всех площадок"), panel);
+	auto *apply = new QPushButton(QStringLiteral("Сохранить изменения"), panel);
 	actions->addWidget(read);
 	actions->addWidget(apply);
 	layout->addLayout(actions);
@@ -162,8 +176,8 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 	changePlatform();
 	QObject::connect(read, &QPushButton::clicked, dock, [=] {
 		gateway->reloadAccounts();
-		gateway->inspectBroadcast(selected());
-		status->setText(QStringLiteral("Запрашиваем данные платформы…"));
+		for (const auto &entry : gateway->accounts()) gateway->inspectBroadcast(entry.id);
+		status->setText(QStringLiteral("Обновляем данные Twitch, YouTube и Kick…"));
 	});
 	QObject::connect(search, &QPushButton::clicked, dock, [=] {
 		if (query->text().trimmed().size() < 2) return;
@@ -187,6 +201,7 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 	QObject::connect(gateway, &ChatGateway::categoryResults, dock, [=](const QString &id, const QJsonArray &entries) {
 		auto *results = choices->value(id);
 		if (!results) return;
+		const QString oldCategory = results->currentData().toString();
 		const QSignalBlocker blocker(results);
 		results->clear();
 		results->addItem(QStringLiteral("Не изменять"), QString{});
@@ -196,11 +211,13 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 			const QString label = item.value(QStringLiteral("name")).toString();
 			results->addItem(label, item.value(QStringLiteral("id")).toVariant().toString());
 			if (label.compare(query->text().trimmed(), Qt::CaseInsensitive) == 0) best = results->count() - 1;
+			if (item.value(QStringLiteral("id")).toVariant().toString() == oldCategory) best = results->count() - 1;
 		}
 		if (!best && entries.size() == 1) best = 1;
 		if (!best && results == youtubeCategory) {
 			for (int i = 1; i < results->count(); ++i)
-				if (results->itemText(i).contains(QStringLiteral("Gaming"), Qt::CaseInsensitive) ||
+				if (results->itemData(i).toString() == QStringLiteral("20") ||
+				    results->itemText(i).contains(QStringLiteral("Gaming"), Qt::CaseInsensitive) ||
 				    results->itemText(i).contains(QStringLiteral("Видеоигр"), Qt::CaseInsensitive)) { best = i; break; }
 		}
 		results->setCurrentIndex(best);
@@ -213,19 +230,31 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 			.arg(entries.size()));
 	});
 	QObject::connect(gateway, &ChatGateway::broadcastInfo, dock, [=](const QString &id, const QJsonObject &info) {
+		// Cache categories for every platform, even when another account is selected.
+		if (auto *choice = choices->value(id)) {
+			const QString storedId = info.value(QStringLiteral("categoryId")).toVariant().toString();
+			QString label = info.value(QStringLiteral("categoryName")).toString();
+			if (label.isEmpty() && storedId == QStringLiteral("20")) label = QStringLiteral("Видеоигры");
+			if (label.isEmpty() && !storedId.isEmpty()) label = QStringLiteral("Категория %1").arg(storedId);
+			if (!storedId.isEmpty()) {
+				const QSignalBlocker blocked(choice);
+				int found = choice->findData(storedId);
+				if (found < 0) { choice->addItem(label, storedId); found = choice->count() - 1; }
+				choice->setCurrentIndex(found);
+			}
+		}
 		if (id != selected()) return;
 		title->setText(info.value(QStringLiteral("title")).toString());
+		title->setPlaceholderText(info.value(QStringLiteral("platform")).toString() == QStringLiteral("kick")
+			? QStringLiteral("Kick не вернул название эфира") : QStringLiteral("Название эфира"));
 		{
 			const QSignalBlocker blocked(description);
 			description->setPlainText(info.value(QStringLiteral("description")).toString());
 		}
 		*descriptionEdited = false;
 		category->setText(info.value(QStringLiteral("categoryId")).toVariant().toString());
-		categoryName->setText(info.value(QStringLiteral("categoryName")).toString(QStringLiteral("Не выбрана")));
-		if (auto *choice = choices->value(id); choice && choice->count() <= 1 && !category->text().isEmpty()) {
-			choice->addItem(categoryName->text(), category->text());
-			choice->setCurrentIndex(choice->count() - 1);
-		}
+		const auto *choice = choices->value(id);
+		categoryName->setText(choice && !category->text().isEmpty() ? choice->currentText() : QStringLiteral("Не выбрана"));
 		const auto broadcasts = info.value(QStringLiteral("broadcasts")).toArray();
 		if (!info.value(QStringLiteral("id")).toString().isEmpty())
 			(*youtubeIds)[id] = info.value(QStringLiteral("id")).toString();
@@ -252,9 +281,10 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 			if (const int index = stream->findData(before); index >= 0) stream->setCurrentIndex(index);
 		}
 		status->setText(QStringLiteral("Получены данные %1 · категория %2")
-			.arg(info.value(QStringLiteral("platform")).toString(), info.value(QStringLiteral("categoryName")).toString()));
+			.arg(platformTitle(info.value(QStringLiteral("platform")).toString()), categoryName->text()));
 	});
 	QObject::connect(gateway, &ChatGateway::broadcastResult, dock, [=](const QString &id, const QString &message, bool success) {
+		writeDiagnostic(QStringLiteral("broadcast:%1:%2").arg(id, success ? QStringLiteral("ok") : QStringLiteral("error")), message);
 		if (id != selected() && !all->isChecked()) return;
 		status->setText(message);
 		status->setStyleSheet(success ? QStringLiteral("color: #70d9b2") : QStringLiteral("color: #ecb16d"));

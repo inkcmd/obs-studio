@@ -41,9 +41,27 @@ QString currentScene()
 	return name;
 }
 
-bool useScene(const QString &name)
+QString currentSceneId()
 {
-	obs_source_t *source = obs_get_source_by_name(name.toUtf8().constData());
+	obs_source_t *source = obs_frontend_get_current_scene();
+	if (!source) return {};
+	const QString id = QString::fromUtf8(obs_source_get_uuid(source));
+	obs_source_release(source);
+	return id;
+}
+
+bool useScene(const QString &uuid, const QString &legacyName)
+{
+	obs_source_t *source = uuid.isEmpty() ? nullptr : obs_get_source_by_uuid(uuid.toUtf8().constData());
+	if (!source && !legacyName.isEmpty()) source = obs_get_source_by_name(legacyName.toUtf8().constData());
+	if (!source && uuid.isEmpty()) {
+		// Migration of old name-only profiles after a rename: unambiguous only
+		// when the collection contains one scene.
+		obs_frontend_source_list scenes{};
+		obs_frontend_get_scenes(&scenes);
+		if (scenes.sources.num == 1) source = obs_source_get_ref(scenes.sources.array[0]);
+		obs_frontend_source_list_free(&scenes);
+	}
 	if (!source) return false;
 	const bool valid = obs_source_get_type(source) == OBS_SOURCE_TYPE_SCENE;
 	if (valid) obs_frontend_set_current_scene(source);
@@ -54,17 +72,30 @@ bool useScene(const QString &name)
 void refreshScenes(QComboBox *select)
 {
 	const QString before = select->currentData().toString();
+	obs_frontend_source_list scenes{};
+	obs_frontend_get_scenes(&scenes);
+	bool unchanged = select->count() == static_cast<int>(scenes.sources.num) + 1;
+	if (unchanged) for (size_t i = 0; i < scenes.sources.num; ++i) {
+		obs_source_t *source = scenes.sources.array[i];
+		if (select->itemText(static_cast<int>(i) + 1) != QString::fromUtf8(obs_source_get_name(source)) ||
+		    select->itemData(static_cast<int>(i) + 1).toString() != QString::fromUtf8(obs_source_get_uuid(source))) {
+			unchanged = false;
+			break;
+		}
+	}
+	if (unchanged) { obs_frontend_source_list_free(&scenes); return; }
 	const QSignalBlocker blocked(select);
 	select->clear();
 	select->addItem(QStringLiteral("Сцена не привязана"), QString{});
-	obs_frontend_source_list scenes{};
-	obs_frontend_get_scenes(&scenes);
 	for (size_t i = 0; i < scenes.sources.num; ++i) {
-		const QString name = QString::fromUtf8(obs_source_get_name(scenes.sources.array[i]));
-		select->addItem(name, name);
+		obs_source_t *source = scenes.sources.array[i];
+		select->addItem(QString::fromUtf8(obs_source_get_name(source)),
+			QString::fromUtf8(obs_source_get_uuid(source)));
 	}
 	obs_frontend_source_list_free(&scenes);
-	if (const int index = select->findData(before); index >= 0) select->setCurrentIndex(index);
+	int index = select->findData(before);
+	if (index < 0) index = select->findText(before); // Old name-based selections.
+	if (index >= 0) select->setCurrentIndex(index);
 }
 
 QString filePath()
@@ -91,6 +122,8 @@ bool validProfiles(const QJsonObject &root)
 			const auto value = profile.value(QString::fromLatin1(key));
 			if (!value.isUndefined() && (!value.isString() || value.toString().size() > 200)) return false;
 		}
+		const auto sceneUuid = profile.value(QStringLiteral("sceneUuid"));
+		if (!sceneUuid.isUndefined() && (!sceneUuid.isString() || sceneUuid.toString().size() > 100)) return false;
 	}
 	return true;
 }
@@ -190,13 +223,18 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 		if (index < 0 || index >= list.size()) {
 			name->clear();
 			refreshScenes(scene);
-			if (const int current = scene->findData(currentScene()); current >= 0) scene->setCurrentIndex(current);
+			if (const int current = scene->findData(currentSceneId()); current >= 0) scene->setCurrentIndex(current);
 			return;
 		}
 		const auto profile = list.at(index).toObject();
 		name->setText(profile.value(QStringLiteral("name")).toString());
 		refreshScenes(scene);
-		if (const int s = scene->findData(profile.value(QStringLiteral("scene")).toString()); s >= 0)
+		const QString storedUuid = profile.value(QStringLiteral("sceneUuid")).toString();
+		int s = storedUuid.isEmpty() ? -1 : scene->findData(storedUuid);
+		if (s < 0) s = scene->findText(profile.value(QStringLiteral("scene")).toString());
+		if (profile.value(QStringLiteral("scene")).toString().isEmpty() && storedUuid.isEmpty()) s = 0;
+		if (s < 0 && scene->count() == 2) s = 1;
+		if (s >= 0)
 			scene->setCurrentIndex(s);
 		title->setText(profile.value(QStringLiteral("title")).toString());
 		description->setPlainText(profile.value(QStringLiteral("description")).toString());
@@ -216,13 +254,14 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 		profiles->setCurrentIndex(0);
 		name->clear();
 		refreshScenes(scene);
-		if (const int current = scene->findData(currentScene()); current >= 0) scene->setCurrentIndex(current);
+		if (const int current = scene->findData(currentSceneId()); current >= 0) scene->setCurrentIndex(current);
 	});
 	QObject::connect(saveProfile, &QPushButton::clicked, group, [=] {
 		if (name->text().trimmed().isEmpty()) { note->setText(QStringLiteral("Укажи название профиля")); return; }
 		QJsonArray list = root->value(QStringLiteral("profiles")).toArray();
 		const QJsonObject profile{{QStringLiteral("name"), name->text().trimmed()},
-			{QStringLiteral("scene"), scene->currentData().toString()},
+			{QStringLiteral("scene"), scene->currentData().toString().isEmpty() ? QString{} : scene->currentText()},
+			{QStringLiteral("sceneUuid"), scene->currentData().toString()},
 			{QStringLiteral("title"), title->text()},
 			{QStringLiteral("description"), description->toPlainText().left(5000)},
 			{QStringLiteral("twitchCategory"), twitch->currentData().toString()},
@@ -254,7 +293,8 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 	});
 	const auto apply = [=](const QJsonObject &profile) {
 		const QString target = profile.value(QStringLiteral("scene")).toString();
-		if (!target.isEmpty() && !useScene(target)) {
+		const QString uuid = profile.value(QStringLiteral("sceneUuid")).toString();
+		if ((!target.isEmpty() || !uuid.isEmpty()) && !useScene(uuid, target)) {
 			note->setText(QStringLiteral("Не найдена сцена: ") + target);
 			return;
 		}
@@ -279,17 +319,21 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 		root->insert(QStringLiteral("automatic"), checked);
 		if (!storeProfiles(*root)) note->setText(QStringLiteral("Не удалось сохранить автоматизацию"));
 	});
-	auto sceneWatch = std::make_shared<QString>(currentScene());
+	auto sceneWatch = std::make_shared<QString>(currentSceneId());
 	auto *timer = new QTimer(group);
 	timer->setInterval(850);
 	QObject::connect(timer, &QTimer::timeout, group, [=] {
-		const QString current = currentScene();
+		// Refresh the display names even when OBS renames a scene in place.
+		refreshScenes(scene);
+		const QString current = currentSceneId();
 		if (current == *sceneWatch) return;
 		*sceneWatch = current;
 		if (!root->value(QStringLiteral("automatic")).toBool() || current.isEmpty()) return;
 		for (const auto &entry : root->value(QStringLiteral("profiles")).toArray()) {
 			const QJsonObject profile = entry.toObject();
-			if (profile.value(QStringLiteral("scene")).toString() == current) { apply(profile); break; }
+			if (profile.value(QStringLiteral("sceneUuid")).toString() == current ||
+			    (profile.value(QStringLiteral("sceneUuid")).toString().isEmpty() &&
+			     profile.value(QStringLiteral("scene")).toString() == currentScene())) { apply(profile); break; }
 		}
 	});
 	timer->start();

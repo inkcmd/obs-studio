@@ -3,6 +3,7 @@
 #include "DonationGateway.hpp"
 #include "PresentationSettings.hpp"
 #include "StudioAutomation.hpp"
+#include "StudioDiagnostics.hpp"
 
 #include <widgets/OBSBasic.hpp>
 
@@ -11,6 +12,9 @@
 #include <QColorDialog>
 #include <QComboBox>
 #include <QDialog>
+#include <QDesktopServices>
+#include <QFile>
+#include <QFont>
 #include <QFrame>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -20,6 +24,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QPainter>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
@@ -27,6 +32,7 @@
 #include <QStackedWidget>
 #include <QUuid>
 #include <QVBoxLayout>
+#include <QUrl>
 
 namespace xinkx {
 namespace {
@@ -64,25 +70,34 @@ bool commit(PresentationSettings *settings, const QJsonObject &doc, QWidget *par
 	return false;
 }
 
-QWidget *chatPage(QWidget *parent, PresentationSettings *settings, const QString &surface)
+QWidget *chatPage(QWidget *parent, PresentationSettings *settings, const QString &surface,
+	OBSBasic *mainWindow)
 {
 	QVBoxLayout *layout;
 	const bool streamer = surface == QStringLiteral("streamer");
 	auto *page = section(parent, streamer ? QStringLiteral("Чат для меня") : QStringLiteral("Чат для зрителей"),
-		streamer ? QStringLiteral("Оверлей поверх игры. Не захватывает мышь и не влияет на источник чата OBS.") :
+		streamer ? QStringLiteral("Локальный чат поверх игры. Отдельная настройка показа и режима перетаскивания мышью.") :
 		QStringLiteral("Оформление XINKX-чата в источнике OBS. Расположение и размер меняются на холсте."), &layout);
 	const auto source = settings->snapshot().value(surface).toObject();
 	const auto chat = source.value(QStringLiteral("chat")).toObject();
 	auto *form = new QFormLayout();
 	if (streamer) {
-		auto *overlayEnabled = new QCheckBox(QStringLiteral("Показывать поверх игры · без взаимодействия с мышью"), page);
-		if (auto *original = parent->window()->parentWidget()) {
-			if (auto *toggle = original->findChild<QCheckBox *>(QStringLiteral("xinkxStreamerOverlayEnabled"))) {
-				overlayEnabled->setChecked(toggle->isChecked());
-				QObject::connect(overlayEnabled, &QCheckBox::toggled, toggle, &QCheckBox::setChecked);
-			}
+		auto *overlayEnabled = new QCheckBox(QStringLiteral("Показывать поверх игры"), page);
+		if (auto *toggle = mainWindow->findChild<QCheckBox *>(QStringLiteral("xinkxStreamerOverlayEnabled"))) {
+			overlayEnabled->setChecked(toggle->isChecked());
+			QObject::connect(overlayEnabled, &QCheckBox::toggled, toggle, &QCheckBox::setChecked);
 		}
 		form->addRow(overlayEnabled);
+		auto *dragMode = new QCheckBox(QStringLiteral("Режим размещения · перетаскивать чат мышью"), page);
+		dragMode->setToolTip(QStringLiteral("В этом режиме мышь захватывается только областью чата. "
+			"Отключи режим после перемещения, чтобы клики проходили в игру."));
+		if (auto *overlay = mainWindow->findChild<QWidget *>(QStringLiteral("xinkxStreamerOverlay"))) {
+			dragMode->setChecked(overlay->property("xinkxEditChat").toBool());
+			QObject::connect(dragMode, &QCheckBox::toggled, overlay, [overlay](bool enabled) {
+				overlay->setProperty("xinkxEditChat", enabled);
+			});
+		}
+		form->addRow(dragMode);
 	}
 	auto *font = new QLineEdit(chat.value(QStringLiteral("font")).toString(), page);
 	form->addRow(QStringLiteral("Шрифт"), font);
@@ -139,6 +154,43 @@ QWidget *chatPage(QWidget *parent, PresentationSettings *settings, const QString
 	auto *nameColor = colorRow(QStringLiteral("nameColor"), QStringLiteral("Имя"));
 	auto *background = colorRow(QStringLiteral("backgroundColor"), QStringLiteral("Фон сообщения"));
 	layout->addLayout(form);
+	auto *preview = new QFrame(page);
+	preview->setObjectName(QStringLiteral("xinkxChatPreview"));
+	auto *previewLayout = new QVBoxLayout(preview);
+	previewLayout->setContentsMargins(14, 12, 14, 12);
+	previewLayout->setSpacing(5);
+	auto *previewTitle = new QLabel(QStringLiteral("Предпросмотр сообщения"), page);
+	layout->addWidget(previewTitle);
+	auto *previewName = new QLabel(QStringLiteral("Twitch · x_ink_x"), preview);
+	auto *previewText = new QLabel(QStringLiteral("Привет! Так сообщение будет выглядеть в эфире."), preview);
+	previewText->setWordWrap(true);
+	previewLayout->addWidget(previewName);
+	previewLayout->addWidget(previewText);
+	layout->addWidget(preview);
+	const auto updatePreview = [=] {
+		const auto valid = [](const QString &color, const QString &fallback) {
+			const QColor value(color);
+			return value.isValid() ? value.name() : fallback;
+		};
+		const QString bg = valid(background->text(), QStringLiteral("#09152c"));
+		preview->setStyleSheet(QStringLiteral("QFrame#xinkxChatPreview {background-color:%1; "
+			"border-radius:%2px;} QFrame#xinkxChatPreview QLabel {background:transparent;}")
+			.arg(bg).arg(radius->value()));
+		QFont chatFont(font->text());
+		chatFont.setPixelSize(fontSize->value());
+		chatFont.setWeight(static_cast<QFont::Weight>(weight->value()));
+		previewName->setFont(chatFont);
+		previewText->setFont(chatFont);
+		previewName->setStyleSheet(QStringLiteral("color:%1;").arg(valid(nameColor->text(), QStringLiteral("#8de9fb"))));
+		previewText->setStyleSheet(QStringLiteral("color:%1;").arg(valid(textColor->text(), QStringLiteral("#f6faff"))));
+		preview->setMaximumWidth(qMax(240, width->value() * 6));
+	};
+	QObject::connect(font, &QLineEdit::textChanged, page, updatePreview);
+	for (auto *field : {fontSize, weight, radius, width})
+		QObject::connect(field, QOverload<int>::of(&QSpinBox::valueChanged), page, updatePreview);
+	for (auto *button : {textColor, nameColor, background})
+		QObject::connect(button, &QPushButton::clicked, page, updatePreview);
+	updatePreview();
 	auto *save = new QPushButton(QStringLiteral("Сохранить оформление"), page);
 	layout->addWidget(save);
 	layout->addStretch();
@@ -390,6 +442,42 @@ QWidget *automationPage(QWidget *parent, OBSBasic *mainWindow)
 	return page;
 }
 
+QWidget *diagnosticsPage(QWidget *parent)
+{
+	QVBoxLayout *layout;
+	auto *page = section(parent, QStringLiteral("Диагностика XINKX"),
+		QStringLiteral("Состояние OAuth, ошибки площадок и подтверждения отправки сообщений сохраняются "
+			"в отдельный файл и не засоряют чат."), &layout);
+	auto *path = new QLabel(diagnosticsPath(), page);
+	path->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	path->setWordWrap(true);
+	layout->addWidget(path);
+	auto *log = new QPlainTextEdit(page);
+	log->setReadOnly(true);
+	layout->addWidget(log, 1);
+	auto *actions = new QHBoxLayout();
+	auto *refresh = new QPushButton(QStringLiteral("Обновить журнал"), page);
+	auto *open = new QPushButton(QStringLiteral("Открыть файл"), page);
+	actions->addWidget(refresh);
+	actions->addWidget(open);
+	layout->addLayout(actions);
+	const auto load = [=] {
+		QFile file(diagnosticsPath());
+		if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+			log->setPlainText(QStringLiteral("Записей пока нет"));
+			return;
+		}
+		if (file.size() > 256000) file.seek(file.size() - 256000);
+		log->setPlainText(QString::fromUtf8(file.readAll()));
+	};
+	QObject::connect(refresh, &QPushButton::clicked, page, load);
+	QObject::connect(open, &QPushButton::clicked, page, [] {
+		QDesktopServices::openUrl(QUrl::fromLocalFile(diagnosticsPath()));
+	});
+	load();
+	return page;
+}
+
 } // namespace
 
 void installStudioSettingsPages(QWidget *settingsDialog)
@@ -406,18 +494,26 @@ void installStudioSettingsPages(QWidget *settingsDialog)
 		scroll->setWidgetResizable(true);
 		scroll->setWidget(page);
 		stack->addWidget(scroll);
-		auto *item = new QListWidgetItem(QIcon(icon), name, nav);
+		QPixmap glyph = QIcon(icon).pixmap(20, 20);
+		if (!glyph.isNull()) {
+			QPainter painter(&glyph);
+			painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+			painter.fillRect(glyph.rect(), QColor(QStringLiteral("#dce8fb")));
+		}
+		auto *item = new QListWidgetItem(QIcon(glyph), name, nav);
 		item->setToolTip(name);
 	};
 	add(QStringLiteral("Донаты"), createDonationsSettingsPage(mainWindow, stack),
 		QStringLiteral(":/settings/images/settings/stream.svg"));
-	add(QStringLiteral("Чат для зрителей"), chatPage(stack, presentation, QStringLiteral("viewer")),
+	add(QStringLiteral("Чат для зрителей"), chatPage(stack, presentation, QStringLiteral("viewer"), mainWindow),
 		QStringLiteral(":/settings/images/settings/appearance.svg"));
-	add(QStringLiteral("Чат для меня"), chatPage(stack, presentation, QStringLiteral("streamer")),
+	add(QStringLiteral("Чат для меня"), chatPage(stack, presentation, QStringLiteral("streamer"), mainWindow),
 		QStringLiteral(":/settings/images/settings/appearance.svg"));
 	add(QStringLiteral("Реакции и боты"), reactionsPage(stack, presentation),
 		QStringLiteral(":/settings/images/settings/hotkeys.svg"));
-	add(QStringLiteral("Автоматизация / LLM"), automationPage(stack, mainWindow),
+	add(QStringLiteral("Автоматизация"), automationPage(stack, mainWindow),
+		QStringLiteral(":/settings/images/settings/advanced.svg"));
+	add(QStringLiteral("Диагностика"), diagnosticsPage(stack),
 		QStringLiteral(":/settings/images/settings/advanced.svg"));
 }
 

@@ -100,6 +100,7 @@ void *create(obs_data_t *settings, obs_source_t *parent)
 		delete source;
 		return nullptr;
 	}
+	obs_source_add_active_child(parent, source->browser);
 	update(source, settings);
 	return source;
 }
@@ -109,7 +110,10 @@ void destroy(void *data)
 	auto *source = static_cast<NativeSource *>(data);
 	if (!source)
 		return;
-	obs_source_release(source->browser);
+	if (source->browser) {
+		obs_source_remove_active_child(source->parent, source->browser);
+		obs_source_release(source->browser);
+	}
 	delete source;
 }
 
@@ -181,7 +185,9 @@ void registerNativeSources()
 		obs_source_info info{};
 		info.id = type.id;
 		info.type = OBS_SOURCE_TYPE_INPUT;
-		info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_COMPOSITE;
+		// Video-only input. OBS rejects COMPOSITE sources without an audio_render
+		// callback, so none of the XINKX source types appeared in Sources -> +.
+		info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW;
 		info.get_name = [](void *type_data) -> const char * {
 			return static_cast<const LayerType *>(type_data)->title;
 		};
@@ -199,6 +205,8 @@ void registerNativeSources()
 		info.get_dark_icon = [](void *) -> const char * { return bstrdup(":/xinkx/xinkx-source.svg"); };
 		info.get_light_icon = [](void *) -> const char * { return bstrdup(":/xinkx/xinkx-source.svg"); };
 		obs_register_source(&info);
+		if (!obs_get_latest_input_type_id(type.id))
+			blog(LOG_ERROR, "XINKX: source type %s was not registered", type.id);
 	}
 }
 
