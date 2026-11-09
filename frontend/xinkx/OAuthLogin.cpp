@@ -72,7 +72,10 @@ QString OAuthLogin::Response::error(const QString &operation) const
 						      ? u"сетевое соединение не удалось"_s
 						      : transportError);
 	}
-	const auto providerError = json.value(u"error"_s).toString();
+	const auto errorValue = json.value(u"error"_s);
+	const auto providerError = errorValue.isObject()
+					   ? errorValue.toObject().value(u"message"_s).toString()
+					   : errorValue.toString();
 	const auto providerMessage = json.value(u"message"_s).toString();
 	const auto detail = !providerError.isEmpty() ? providerError : providerMessage;
 	return detail.isEmpty() ? u"%1: HTTP %2"_s.arg(operation).arg(status)
@@ -196,13 +199,17 @@ void OAuthLogin::receiveCallback()
 	}
 }
 
-void OAuthLogin::request(const QUrl &url, const QUrlQuery *form, bool authorized, const Done &done)
+void OAuthLogin::request(const QUrl &url, const QUrlQuery *form, bool authorized, const Done &done,
+			 const QByteArray *jsonBody)
 {
 	// OBS already ships a working libcurl HTTP/TLS stack. QtNetwork's optional
 	// TLS backend is not reliably deployed in all portable Windows builds.
 	// Run all provider REST calls off the UI thread and keep tokens out of logs.
 	const auto address = url.toString(QUrl::FullyEncoded).toStdString();
-	const std::string body = form ? encodeForm(*form).toStdString() : std::string{};
+	const std::string body = jsonBody ? jsonBody->toStdString()
+					 : form ? encodeForm(*form).toStdString() : std::string{};
+	const bool post = form || jsonBody;
+	const char *const contentType = jsonBody ? "application/json" : "application/x-www-form-urlencoded";
 	std::vector<std::string> headers{ "Accept: application/json" };
 	if (authorized) {
 		headers.push_back("Authorization: Bearer " + current.oauth.accessToken.toStdString());
@@ -218,9 +225,9 @@ void OAuthLogin::request(const QUrl &url, const QUrlQuery *form, bool authorized
 	};
 	const auto transfer = std::make_shared<Transfer>();
 	const auto thisAttempt = attempt;
-	auto *worker = QThread::create([transfer, address, body, headers = std::move(headers), post = form != nullptr] {
+	auto *worker = QThread::create([transfer, address, body, headers = std::move(headers), post, contentType] {
 		transfer->sent = GetRemoteFile(address.c_str(), transfer->body, transfer->error, &transfer->status,
-					      post ? "application/x-www-form-urlencoded" : nullptr,
+					      post ? contentType : nullptr,
 					      post ? "POST" : "GET", post ? body.c_str() : nullptr, headers,
 					      nullptr, 25, false, static_cast<int>(body.size()));
 	});
@@ -311,6 +318,107 @@ void OAuthLogin::getJson(const QUrl &url, const Done &done)
 			return;
 		}
 		done(response);
+	});
+}
+
+void OAuthLogin::postJson(const QUrl &url, const QJsonObject &body, const Done &done)
+{
+	const auto bytes = QJsonDocument(body).toJson(QJsonDocument::Compact);
+	request(url, nullptr, true, [this, url, body, done](const Response &response) {
+		if (response.status == 401) {
+			if (!refreshed) {
+				refresh([this, url, body, done] { postJson(url, body, done); });
+			} else {
+				current.clearAuthorization();
+				complete(u"Токен отклонён. Подключи аккаунт заново"_s, false);
+			}
+			return;
+		}
+		done(response);
+	}, &bytes);
+}
+
+void OAuthLogin::beginYouTubeApi(const StreamAccount &account, const std::function<void()> &operation)
+{
+	if (busy || account.platform != u"youtube"_s) {
+		emit failed(account.id, u"Другая OAuth-операция уже выполняется или выбран не YouTube"_s);
+		return;
+	}
+	current = account;
+	++attempt;
+	busy = true;
+	refreshed = false;
+	if (current.oauth.accessToken.isEmpty() && current.oauth.refreshToken.isEmpty()) {
+		fail(u"Сначала подключи OAuth YouTube"_s);
+	} else if (current.oauth.requiresAuthorization()) {
+		refresh(operation);
+	} else {
+		operation();
+	}
+}
+
+void OAuthLogin::listYouTubeStreams(const StreamAccount &account)
+{
+	beginYouTubeApi(account, [this] { fetchYouTubeStreams({}); });
+}
+
+void OAuthLogin::fetchYouTubeStreams(QJsonArray collected, const QString &pageToken)
+{
+	QUrl url(u"https://www.googleapis.com/youtube/v3/liveStreams"_s);
+	QUrlQuery query;
+	query.addQueryItem(u"part"_s, u"id,snippet,cdn,status"_s);
+	query.addQueryItem(u"mine"_s, u"true"_s);
+	query.addQueryItem(u"maxResults"_s, u"50"_s);
+	if (!pageToken.isEmpty()) {
+		query.addQueryItem(u"pageToken"_s, pageToken);
+	}
+	url.setQuery(query);
+	getJson(url, [this, collected = std::move(collected)](const Response &response) mutable {
+		if (!response.ok) {
+			fail(response.error(u"Список видеопотоков YouTube"_s));
+			return;
+		}
+		for (const auto &entry : response.json.value(u"items"_s).toArray()) {
+			collected.append(entry);
+		}
+		const auto next = response.json.value(u"nextPageToken"_s).toString();
+		if (!next.isEmpty() && collected.size() < 500) {
+			fetchYouTubeStreams(std::move(collected), next);
+			return;
+		}
+		busy = false;
+		emit youtubeStreamsLoaded(current, collected);
+	});
+}
+
+void OAuthLogin::createYouTubeStream(const StreamAccount &account, const QString &title,
+				     const QString &resolution, const QString &frameRate)
+{
+	if (title.trimmed().isEmpty() || title.size() > 128) {
+		emit failed(account.id, u"Название видеопотока должно содержать от 1 до 128 символов"_s);
+		return;
+	}
+	beginYouTubeApi(account, [this, title, resolution, frameRate] {
+		QUrl url(u"https://www.googleapis.com/youtube/v3/liveStreams"_s);
+		QUrlQuery query;
+		query.addQueryItem(u"part"_s, u"snippet,cdn"_s);
+		url.setQuery(query);
+		QJsonObject body{
+			{u"snippet"_s, QJsonObject{{u"title"_s, title.trimmed()}}},
+			{u"cdn"_s, QJsonObject{{u"frameRate"_s, frameRate}, {u"ingestionType"_s, u"rtmp"_s},
+						{u"resolution"_s, resolution}}},
+		};
+		postJson(url, body, [this](const Response &response) {
+			if (!response.ok || response.json.value(u"id"_s).toString().isEmpty()) {
+				fail(response.status == 403
+					     ? u"YouTube отказал в создании (HTTP 403). Переподключи OAuth с правами управления каналом и проверь доступ к Live"_s
+					     : response.ok ? u"YouTube не вернул ID нового видеопотока"_s
+						   : response.error(u"Создание видеопотока YouTube"_s));
+				return;
+			}
+			busy = false;
+			emit youtubeStreamCreated(current, response.json);
+		});
 	});
 }
 

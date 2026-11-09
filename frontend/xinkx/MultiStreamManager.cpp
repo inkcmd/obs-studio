@@ -284,7 +284,8 @@ QString MultiStreamManager::sessionDetails() const
 {
 	QStringList details;
 	for (const auto &session : sessions) {
-		details.push_back(session->account.displayName() + u": "_s + session->description());
+		details.push_back(platformTitle(session->account.platform) + u" · "_s +
+				  session->account.displayName() + u": "_s + session->description());
 	}
 	return details.join(QLatin1Char('\n'));
 }
@@ -295,7 +296,8 @@ void MultiStreamManager::populateMenu(QMenu *menu)
 	if (anythingActive()) {
 		for (const auto &session : sessions) {
 			const auto id = session->account.id;
-			auto *action = menu->addAction(u"%1: %2"_s.arg(session->account.displayName(), session->description()));
+			auto *action = menu->addAction(u"%1 · %2: %3"_s.arg(
+				platformTitle(session->account.platform), session->account.displayName(), session->description()));
 			action->setEnabled(session->running && !session->stopping);
 			action->setToolTip(u"Остановить только этот выход"_s);
 			connect(action, &QAction::triggered, this, [this, id] {
@@ -312,7 +314,7 @@ void MultiStreamManager::populateMenu(QMenu *menu)
 	}
 
 	for (const auto &account : loadStreamAccounts()) {
-		auto *action = menu->addAction(account.displayName());
+		auto *action = menu->addAction(u"%1 · %2"_s.arg(platformTitle(account.platform), account.displayName()));
 		action->setCheckable(true);
 		action->setChecked(enabled(account));
 		connect(action, &QAction::toggled, this, [this, id = account.id](bool checked) {

@@ -3,6 +3,7 @@
 #include "qt-wrappers.hpp"
 
 #include <QKeySequence>
+#include <QSizePolicy>
 #include <QToolButton>
 
 #include "moc_OBSBasicControls.cpp"
@@ -15,6 +16,8 @@ OBSBasicControls::OBSBasicControls(OBSBasic *main) : QFrame(nullptr), ui(new Ui:
 	auto *accounts = new QToolButton(this);
 	accounts->setObjectName(QStringLiteral("xinkxStreamSelection"));
 	accounts->setText(QStringLiteral("▾"));
+	accounts->setMinimumSize(32, 28);
+	accounts->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 	accounts->setAccessibleName(QStringLiteral("Аккаунты трансляции"));
 	const QKeySequence accountsShortcut(QStringLiteral("Ctrl+Alt+S"));
 	accounts->setShortcut(accountsShortcut);

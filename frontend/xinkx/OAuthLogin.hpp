@@ -2,6 +2,8 @@
 
 #include "StreamAccounts.hpp"
 
+#include <QByteArray>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QObject>
 #include <QTcpServer>
@@ -19,6 +21,9 @@ public:
 	explicit OAuthLogin(QObject *parent = nullptr);
 	bool begin(const StreamAccount &account, QString *error);
 	void retrieveIngest(const StreamAccount &account);
+	void listYouTubeStreams(const StreamAccount &account);
+	void createYouTubeStream(const StreamAccount &account, const QString &title,
+				 const QString &resolution, const QString &frameRate);
 	void revoke(const StreamAccount &account);
 	void cancel();
 	bool isBusy() const { return busy; }
@@ -29,6 +34,8 @@ signals:
 	void finished(const StreamAccount &account, const QString &notice, bool success);
 	void failed(const QString &accountId, const QString &message);
 	void cancelled(const QString &accountId);
+	void youtubeStreamsLoaded(const StreamAccount &account, const QJsonArray &streams);
+	void youtubeStreamCreated(const StreamAccount &account, const QJsonObject &stream);
 
 private:
 	struct Response {
@@ -50,11 +57,15 @@ private:
 	bool refreshed = false;
 
 	void receiveCallback();
-	void request(const QUrl &url, const QUrlQuery *form, bool authorized, const Done &done);
+	void request(const QUrl &url, const QUrlQuery *form, bool authorized, const Done &done,
+		     const QByteArray *jsonBody = nullptr);
 	void exchangeCode(const QString &code);
 	void refresh(const std::function<void()> &done);
 	void requestToken(QUrlQuery form, bool replacing, const std::function<void()> &done);
 	void getJson(const QUrl &url, const Done &done);
+	void postJson(const QUrl &url, const QJsonObject &body, const Done &done);
+	void beginYouTubeApi(const StreamAccount &account, const std::function<void()> &operation);
+	void fetchYouTubeStreams(QJsonArray collected, const QString &pageToken = {});
 	void identify();
 	void fetchIngest();
 	void finishWithIngest(const QString &url, const QString &key, const QString &notice);

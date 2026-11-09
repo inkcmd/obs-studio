@@ -114,7 +114,16 @@ bool OAuthSession::requiresAuthorization() const
 
 QString StreamAccount::displayName() const
 {
-	return providerName.isEmpty() || providerName == label ? label : label + QStringLiteral(" · ") + providerName;
+	const QString alias = label.trimmed();
+	const QString channel = providerName.trimmed();
+	// "Twitch · x_ink_x" belongs to the destination list; the account name
+	// itself should not contain the provider name or repeat the channel handle.
+	if (alias.isEmpty() || alias.compare(platformTitle(platform), Qt::CaseInsensitive) == 0) {
+		return channel.isEmpty() ? platformTitle(platform) : channel;
+	}
+	return channel.isEmpty() || channel.compare(alias, Qt::CaseInsensitive) == 0
+		       ? alias
+		       : alias + QStringLiteral(" · ") + channel;
 }
 
 void StreamAccount::clearAuthorization()
