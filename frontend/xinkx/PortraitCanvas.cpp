@@ -8,6 +8,7 @@
 
 #include <obs-frontend-api.h>
 #include <obs.h>
+#include <graphics/graphics.h>
 
 #include <QCheckBox>
 #include <QCryptographicHash>
@@ -129,9 +130,13 @@ private:
 		GetScaleAndCenterPos(portraitWidth, portraitHeight, cx, cy, x, y, scale);
 		const int w = int(scale * portraitWidth);
 		const int h = int(scale * portraitHeight);
-		startRegion(x, y, w, h, 0.f, float(portraitWidth), 0.f, float(portraitHeight));
+		gs_projection_push();
+		gs_viewport_push();
+		gs_set_viewport(x, y, w, h);
+		gs_ortho(0.f, float(portraitWidth), 0.f, float(portraitHeight), -100.f, 100.f);
 		obs_source_video_render(self->sceneSource);
-		endRegion();
+		gs_viewport_pop();
+		gs_projection_pop();
 	}
 };
 
@@ -348,17 +353,17 @@ void PortraitCanvas::edit(QWidget *parent)
 		obs_sceneitem_set_visible(layer.item, visible->isChecked());
 		save();
 	};
-	connect(list, &QListWidget::currentRowChanged, &dialog, loadCurrent);
+	QObject::connect(list, &QListWidget::currentRowChanged, &dialog, loadCurrent);
 	for (auto *spin : {x, y, w, h})
-		connect(spin, &QDoubleSpinBox::valueChanged, &dialog, apply);
-	connect(fill, &QCheckBox::toggled, &dialog, apply);
-	connect(visible, &QCheckBox::toggled, &dialog, apply);
+		QObject::connect(spin, &QDoubleSpinBox::valueChanged, &dialog, apply);
+	QObject::connect(fill, &QCheckBox::toggled, &dialog, apply);
+	QObject::connect(visible, &QCheckBox::toggled, &dialog, apply);
 	preview->moved = [&](float dx, float dy) {
 		if (list->currentRow() < 0) return;
 		x->setValue(std::clamp(x->value() + dx, 0., 4320.));
 		y->setValue(std::clamp(y->value() + dy, 0., 4320.));
 	};
-	connect(close, &QDialogButtonBox::rejected, &dialog, &QDialog::accept);
+	QObject::connect(close, &QDialogButtonBox::rejected, &dialog, &QDialog::accept);
 	if (!layers.isEmpty()) list->setCurrentRow(0);
 	dialog.exec();
 	editing = false;
