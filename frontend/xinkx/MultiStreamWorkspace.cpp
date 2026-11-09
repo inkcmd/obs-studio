@@ -26,8 +26,10 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStringList>
+#include <QTimer>
 #include <QTreeWidget>
 #include <QUrl>
 #include <QUuid>
@@ -123,151 +125,6 @@ RtmpCatalog loadRtmpCatalog()
 	return result;
 }
 
-bool chooseYouTubeStream(QWidget *parent, StreamAccount &account, QString *selectedId, QString *selectedResolution)
-{
-	QDialog dialog(parent);
-	dialog.setWindowTitle(QStringLiteral("Видеопотоки YouTube"));
-	dialog.resize(565, 340);
-	auto *layout = new QVBoxLayout(&dialog);
-	auto *description = new QLabel(QStringLiteral(
-		"Выбери видеопоток канала или создай новый. Видеопоток — это RTMP-вход, "
-		"а не событие трансляции: его нужно привязать к эфиру в YouTube Studio."), &dialog);
-	description->setWordWrap(true);
-	layout->addWidget(description);
-	auto *streams = new QComboBox(&dialog);
-	streams->setObjectName(QStringLiteral("xinkxYouTubeStreams"));
-	layout->addWidget(streams);
-	auto streamResolutions = std::make_shared<QHash<QString, QString>>();
-	auto *refresh = new QPushButton(QStringLiteral("Обновить список"), &dialog);
-	layout->addWidget(refresh);
-
-	auto *newStream = new QGroupBox(QStringLiteral("Новый видеопоток"), &dialog);
-	auto *newStreamForm = new QFormLayout(newStream);
-	auto *title = new QLineEdit(QStringLiteral("XINKX Studio"), newStream);
-	title->setMaxLength(128);
-	newStreamForm->addRow(QStringLiteral("Название"), title);
-	auto *resolution = new QComboBox(newStream);
-	for (const auto &value : {"720p", "1080p", "1440p", "2160p"}) {
-		resolution->addItem(QString::fromLatin1(value), QString::fromLatin1(value));
-	}
-	const QString preferredResolution = QString::number(account.destination.height) + QLatin1Char('p');
-	const int resolutionIndex = resolution->findData(preferredResolution);
-	resolution->setCurrentIndex(resolutionIndex < 0 ? 1 : resolutionIndex);
-	newStreamForm->addRow(QStringLiteral("Разрешение"), resolution);
-	auto *frameRate = new QComboBox(newStream);
-	frameRate->addItem(QStringLiteral("60 FPS"), QStringLiteral("60fps"));
-	frameRate->addItem(QStringLiteral("30 FPS"), QStringLiteral("30fps"));
-	newStreamForm->addRow(QStringLiteral("Частота кадров"), frameRate);
-	auto *create = new QPushButton(QStringLiteral("Создать видеопоток"), newStream);
-	newStreamForm->addRow(create);
-	layout->addWidget(newStream);
-
-	auto *status = new QLabel(QStringLiteral("Загрузка списка…"), &dialog);
-	status->setWordWrap(true);
-	status->setTextFormat(Qt::PlainText);
-	layout->addWidget(status);
-	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-	auto *choose = buttons->button(QDialogButtonBox::Ok);
-	choose->setText(QStringLiteral("Выбрать"));
-	choose->setEnabled(false);
-	layout->addWidget(buttons);
-	QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-	QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
-		if (!streams->currentData().toString().isEmpty()) {
-			dialog.accept();
-		}
-	});
-
-	OAuthLogin auth(&dialog);
-	const auto setBusy = [=](bool busy) {
-		refresh->setEnabled(!busy);
-		create->setEnabled(!busy);
-		choose->setEnabled(!busy && !streams->currentData().toString().isEmpty());
-	};
-	QObject::connect(streams, &QComboBox::currentIndexChanged, &dialog, [=, &auth] {
-		choose->setEnabled(!auth.isBusy() && !streams->currentData().toString().isEmpty());
-	});
-	QObject::connect(&auth, &OAuthLogin::youtubeStreamsLoaded, &dialog,
-			 [&](const StreamAccount &updated, const QJsonArray &items) {
-				 account.oauth = updated.oauth;
-				 const QString previouslySelected = streams->currentData().toString().isEmpty()
-										  ? account.youtubeStreamId : streams->currentData().toString();
-				 streams->clear();
-				 for (const auto &value : items) {
-					 const auto stream = value.toObject();
-					 const auto id = stream.value(QStringLiteral("id")).toString();
-					 if (id.isEmpty()) {
-						 continue;
-					 }
-					 streamResolutions->insert(id, stream.value(QStringLiteral("cdn")).toObject()
-						.value(QStringLiteral("resolution")).toString());
-					 auto title = stream.value(QStringLiteral("snippet")).toObject()
-								 .value(QStringLiteral("title")).toString(id);
-					 const auto state = stream.value(QStringLiteral("status")).toObject()
-								 .value(QStringLiteral("streamStatus")).toString();
-					 if (!state.isEmpty()) {
-						 title += QStringLiteral(" · ") + state;
-					 }
-					 streams->addItem(title, id);
-				 }
-				 const int index = streams->findData(previouslySelected);
-				 if (index >= 0) {
-					 streams->setCurrentIndex(index);
-				 }
-				 status->setText(items.isEmpty()
-							 ? QStringLiteral("Видеопотоков нет. Создай первый.")
-							 : QStringLiteral("Выбери видеопоток, затем примени настройки и обнови данные аккаунта."));
-				 setBusy(false);
-			 });
-	QObject::connect(&auth, &OAuthLogin::youtubeStreamCreated, &dialog,
-			 [&](const StreamAccount &updated, const QJsonObject &stream) {
-				 account.oauth = updated.oauth;
-				 const QString id = stream.value(QStringLiteral("id")).toString();
-				 streamResolutions->insert(id, stream.value(QStringLiteral("cdn")).toObject()
-					.value(QStringLiteral("resolution")).toString());
-				 const QString name = stream.value(QStringLiteral("snippet")).toObject()
-								 .value(QStringLiteral("title")).toString(id);
-				 streams->addItem(name, id);
-				 streams->setCurrentIndex(streams->count() - 1);
-				 status->setText(QStringLiteral("Создан видеопоток. Выбери его и привяжи к эфиру в YouTube Studio."));
-				 setBusy(false);
-			 });
-	QObject::connect(&auth, &OAuthLogin::failed, &dialog, [=](const QString &, const QString &message) {
-		status->setText(message);
-		setBusy(false);
-	});
-	QObject::connect(&auth, &OAuthLogin::finished, &dialog,
-			 [=](const StreamAccount &, const QString &message, bool success) {
-				 if (!success) {
-					 status->setText(message);
-					 setBusy(false);
-				 }
-			 });
-	QObject::connect(refresh, &QPushButton::clicked, &dialog, [&] {
-		setBusy(true);
-		status->setText(QStringLiteral("Загрузка списка…"));
-		auth.listYouTubeStreams(account);
-	});
-	QObject::connect(create, &QPushButton::clicked, &dialog, [&] {
-		if (title->text().trimmed().isEmpty()) {
-			status->setText(QStringLiteral("Укажи название нового видеопотока."));
-			return;
-		}
-		setBusy(true);
-		status->setText(QStringLiteral("Создание видеопотока…"));
-		auth.createYouTubeStream(account, title->text(), resolution->currentData().toString(),
-					 frameRate->currentData().toString());
-	});
-	setBusy(true);
-	auth.listYouTubeStreams(account);
-	if (dialog.exec() != QDialog::Accepted) {
-		return false;
-	}
-	*selectedId = streams->currentData().toString();
-	if (selectedResolution) *selectedResolution = streamResolutions->value(*selectedId);
-	return !selectedId->isEmpty();
-}
-
 bool editAccount(QWidget *parent, StreamAccount &account, bool creating, const QVector<StreamAccount> &available)
 {
 	QDialog dialog(parent);
@@ -349,18 +206,29 @@ bool editAccount(QWidget *parent, StreamAccount &account, bool creating, const Q
 	auto *callback = new QLabel(OAuthLogin::redirectUri(account.platform), &dialog);
 	callback->setTextInteractionFlags(Qt::TextSelectableByMouse);
 	form->addRow(QStringLiteral("OAuth callback"), callback);
-	auto *youtubeId = new QLineEdit(account.youtubeStreamId, &dialog);
-	youtubeId->setReadOnly(true);
-	youtubeId->setPlaceholderText(QStringLiteral("Видеопоток не выбран"));
+	auto *youtubeId = new QComboBox(&dialog);
+	youtubeId->setObjectName(QStringLiteral("xinkxInlineYouTubeStreams"));
+	youtubeId->setMinimumContentsLength(18);
+	youtubeId->addItem(QStringLiteral("Выберите видеопоток"), QString{});
+	if (!account.youtubeStreamId.isEmpty()) {
+		youtubeId->addItem(QStringLiteral("Сохранённый · %1").arg(account.youtubeStreamId), account.youtubeStreamId);
+		youtubeId->setCurrentIndex(1);
+	}
 	OAuthSession selectedOAuth = account.oauth;
 	auto *youtubeStreamRow = new QWidget(&dialog);
 	auto *youtubeStreamLayout = new QHBoxLayout(youtubeStreamRow);
 	youtubeStreamLayout->setContentsMargins(0, 0, 0, 0);
 	youtubeStreamLayout->addWidget(youtubeId);
-	auto *selectYoutubeStream = new QPushButton(QStringLiteral("Выбрать…"), youtubeStreamRow);
+	auto *selectYoutubeStream = new QPushButton(QStringLiteral("Обновить"), youtubeStreamRow);
 	selectYoutubeStream->setObjectName(QStringLiteral("xinkxYouTubeStreamPicker"));
 	youtubeStreamLayout->addWidget(selectYoutubeStream);
+	auto *createYoutubeStream = new QPushButton(QStringLiteral("Создать"), youtubeStreamRow);
+	createYoutubeStream->setObjectName(QStringLiteral("xinkxYouTubeStreamCreate"));
+	youtubeStreamLayout->addWidget(createYoutubeStream);
 	form->addRow(QStringLiteral("Видеопоток YouTube"), youtubeStreamRow);
+	auto *youtubeStreamStatus = new QLabel(&dialog);
+	youtubeStreamStatus->setWordWrap(true);
+	form->addRow(youtubeStreamStatus);
 	const auto updateOAuthFields = [=] {
 		const auto provider = platform->currentData().toString();
 		callback->setText(OAuthLogin::redirectUri(provider));
@@ -372,6 +240,7 @@ bool editAccount(QWidget *parent, StreamAccount &account, bool creating, const Q
 		}
 		form->setRowVisible(authorization, provider == QStringLiteral("youtube") && authorization->count() > 1);
 		form->setRowVisible(youtubeStreamRow, provider == QStringLiteral("youtube"));
+		form->setRowVisible(youtubeStreamStatus, provider == QStringLiteral("youtube"));
 		const bool namedService = provider == QStringLiteral("obs_service");
 		form->setRowVisible(service, namedService);
 		form->setRowVisible(server, namedService);
@@ -435,46 +304,151 @@ bool editAccount(QWidget *parent, StreamAccount &account, bool creating, const Q
 		encoder->setCurrentIndex(encoderIndex);
 	}
 	form->addRow(QStringLiteral("Энкодер"), encoder);
-	QObject::connect(selectYoutubeStream, &QPushButton::clicked, &dialog, [&] {
-		StreamAccount pickerAccount = account;
+	// The selected stream is a single field in the account editor. Only
+	// stream creation opens a separate dialog; choosing a stream never does.
+	auto *streamApi = new OAuthLogin(&dialog);
+	auto streamResolutions = std::make_shared<QHash<QString, QString>>();
+	const auto pickerCredentials = [&](StreamAccount *picker) {
+		*picker = account;
 		const QString linked = authorization->currentData().toString();
 		if (!linked.isEmpty()) {
 			const auto origin = std::find_if(available.cbegin(), available.cend(), [&](const StreamAccount &item) {
 				return item.id == linked && item.platform == QStringLiteral("youtube");
 			});
-			if (origin == available.cend()) return;
-			pickerAccount.oauth = origin->oauth;
-			pickerAccount.providerId = origin->providerId;
-			pickerAccount.platform = origin->platform;
+			if (origin == available.cend()) return false;
+			picker->oauth = origin->oauth;
+			picker->providerId = origin->providerId;
+			picker->platform = origin->platform;
 		} else if (creating || account.platform != QStringLiteral("youtube") ||
 			   clientId->text().trimmed() != account.oauth.clientId ||
 			   clientSecret->text().trimmed() != account.oauth.clientSecret) {
-			QMessageBox::information(&dialog, QStringLiteral("YouTube"),
-				QStringLiteral("Сначала подключи OAuth либо выбери существующий аккаунт YouTube."));
-			return;
+			return false;
 		}
-		if (pickerAccount.oauth.accessToken.isEmpty() && pickerAccount.oauth.refreshToken.isEmpty()) {
-			QMessageBox::information(&dialog, QStringLiteral("YouTube"), QStringLiteral("OAuth не подключён."));
-			return;
+		return !picker->oauth.accessToken.isEmpty() || !picker->oauth.refreshToken.isEmpty();
+	};
+	const auto applyStreamResolution = [=] {
+		const QString selected = youtubeId->currentData().toString();
+		if (selected.isEmpty() || selected == account.youtubeStreamId) return;
+		const QString resolution = streamResolutions->value(selected);
+		const int targetHeight = resolution == QStringLiteral("2160p") ? 2160 :
+			resolution == QStringLiteral("1440p") ? 1440 :
+			resolution == QStringLiteral("1080p") ? 1080 :
+			resolution == QStringLiteral("720p") ? 720 : 0;
+		if (targetHeight && !composition->currentData().toBool()) {
+			width->setValue(targetHeight * 16 / 9);
+			height->setValue(targetHeight);
+			bitrate->setValue(targetHeight >= 2160 ? 35000 : targetHeight >= 1440 ? 18000 :
+				targetHeight >= 1080 ? 9000 : 4500);
 		}
-		QString selected;
-		QString resolution;
-		if (chooseYouTubeStream(&dialog, pickerAccount, &selected, &resolution)) {
-			selectedOAuth = pickerAccount.oauth;
-			youtubeId->setText(selected);
-			// YouTube reports stream resolution, not a bitrate. Offer a
-			// reasonable editable starting point for this composition.
-			const int targetHeight = resolution == QStringLiteral("2160p") ? 2160 :
-				resolution == QStringLiteral("1440p") ? 1440 :
-				resolution == QStringLiteral("1080p") ? 1080 :
-				resolution == QStringLiteral("720p") ? 720 : 0;
-			if (targetHeight && !composition->currentData().toBool()) {
-				width->setValue(targetHeight * 16 / 9);
-				height->setValue(targetHeight);
-				bitrate->setValue(targetHeight >= 2160 ? 35000 : targetHeight >= 1440 ? 18000 :
-					targetHeight >= 1080 ? 9000 : 4500);
+	};
+	QObject::connect(youtubeId, &QComboBox::currentIndexChanged, &dialog, applyStreamResolution);
+	QObject::connect(streamApi, &OAuthLogin::youtubeStreamsLoaded, &dialog,
+		[=, &selectedOAuth](const StreamAccount &updated, const QJsonArray &items) {
+			selectedOAuth = updated.oauth;
+			const QString previous = youtubeId->currentData().toString();
+			const QSignalBlocker blocked(youtubeId);
+			youtubeId->clear();
+			youtubeId->addItem(QStringLiteral("Выберите видеопоток"), QString{});
+			streamResolutions->clear();
+			for (const auto &value : items) {
+				const QJsonObject stream = value.toObject();
+				const QString id = stream.value(QStringLiteral("id")).toString();
+				if (id.isEmpty()) continue;
+				const QString resolution = stream.value(QStringLiteral("cdn")).toObject()
+					.value(QStringLiteral("resolution")).toString();
+				streamResolutions->insert(id, resolution);
+				const QString title = stream.value(QStringLiteral("snippet")).toObject()
+					.value(QStringLiteral("title")).toString(id);
+				youtubeId->addItem(resolution.isEmpty() ? title : title + QStringLiteral(" · ") + resolution, id);
 			}
+			const int existing = youtubeId->findData(previous);
+			if (existing >= 0) {
+				youtubeId->setCurrentIndex(existing);
+			} else if (!previous.isEmpty()) {
+				youtubeId->addItem(QStringLiteral("Сохранённый · %1").arg(previous), previous);
+				youtubeId->setCurrentIndex(youtubeId->count() - 1);
+			}
+			selectYoutubeStream->setEnabled(true);
+			createYoutubeStream->setEnabled(true);
+			youtubeStreamStatus->setText(items.isEmpty() ? QStringLiteral("Видеопотоков нет. Создай первый.")
+				: QStringLiteral("Видеопотоков: %1. Выбранный поток сохранится с аккаунтом.").arg(items.size()));
+		});
+	QObject::connect(streamApi, &OAuthLogin::failed, &dialog, [=](const QString &, const QString &message) {
+		selectYoutubeStream->setEnabled(true);
+		createYoutubeStream->setEnabled(true);
+		youtubeStreamStatus->setText(message);
+	});
+	QObject::connect(streamApi, &OAuthLogin::youtubeStreamCreated, &dialog,
+		[=, &selectedOAuth](const StreamAccount &updated, const QJsonObject &stream) {
+			selectedOAuth = updated.oauth;
+			const QString id = stream.value(QStringLiteral("id")).toString();
+			const QString resolution = stream.value(QStringLiteral("cdn")).toObject()
+				.value(QStringLiteral("resolution")).toString();
+			streamResolutions->insert(id, resolution);
+			const QString title = stream.value(QStringLiteral("snippet")).toObject()
+				.value(QStringLiteral("title")).toString(id);
+			if (youtubeId->findData(id) < 0) youtubeId->addItem(title, id);
+			youtubeId->setCurrentIndex(youtubeId->findData(id));
+			selectYoutubeStream->setEnabled(true);
+			createYoutubeStream->setEnabled(true);
+			youtubeStreamStatus->setText(QStringLiteral("Видеопоток создан. Привяжи его к эфиру в YouTube Studio."));
+		});
+	const auto refreshStreams = [=, &pickerCredentials] {
+		if (streamApi->isBusy()) return;
+		StreamAccount picker;
+		if (!pickerCredentials(&picker)) {
+			youtubeStreamStatus->setText(QStringLiteral("Сначала подключи OAuth или выбери существующий YouTube-аккаунт."));
+			return;
 		}
+		selectYoutubeStream->setEnabled(false);
+		createYoutubeStream->setEnabled(false);
+		youtubeStreamStatus->setText(QStringLiteral("Загрузка видеопотоков…"));
+		streamApi->listYouTubeStreams(picker);
+	};
+	QObject::connect(selectYoutubeStream, &QPushButton::clicked, &dialog, refreshStreams);
+	QObject::connect(createYoutubeStream, &QPushButton::clicked, &dialog,
+		[=, &pickerCredentials] {
+			StreamAccount picker;
+			if (!pickerCredentials(&picker)) {
+				youtubeStreamStatus->setText(QStringLiteral("Сначала подключи OAuth YouTube."));
+				return;
+			}
+			QDialog create(&dialog);
+			create.setWindowTitle(QStringLiteral("Новый видеопоток YouTube"));
+			auto *createForm = new QFormLayout(&create);
+			auto *title = new QLineEdit(QStringLiteral("XINKX Studio"), &create);
+			title->setMaxLength(128);
+			createForm->addRow(QStringLiteral("Название"), title);
+			auto *resolution = new QComboBox(&create);
+			for (const auto &choice : {"720p", "1080p", "1440p", "2160p"})
+				resolution->addItem(QString::fromLatin1(choice), QString::fromLatin1(choice));
+			const int preferred = resolution->findData(QString::number(height->value()) + QLatin1Char('p'));
+			resolution->setCurrentIndex(preferred < 0 ? 1 : preferred);
+			createForm->addRow(QStringLiteral("Разрешение"), resolution);
+			auto *fps = new QComboBox(&create);
+			fps->addItem(QStringLiteral("60 FPS"), QStringLiteral("60fps"));
+			fps->addItem(QStringLiteral("30 FPS"), QStringLiteral("30fps"));
+			createForm->addRow(QStringLiteral("Частота кадров"), fps);
+			auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &create);
+			createForm->addRow(buttons);
+			QObject::connect(buttons, &QDialogButtonBox::accepted, &create, &QDialog::accept);
+			QObject::connect(buttons, &QDialogButtonBox::rejected, &create, &QDialog::reject);
+			if (create.exec() != QDialog::Accepted) return;
+			if (title->text().trimmed().isEmpty()) {
+				youtubeStreamStatus->setText(QStringLiteral("Укажи название нового видеопотока."));
+				return;
+			}
+			selectYoutubeStream->setEnabled(false);
+			createYoutubeStream->setEnabled(false);
+			youtubeStreamStatus->setText(QStringLiteral("Создание видеопотока…"));
+			streamApi->createYouTubeStream(picker, title->text().trimmed(), resolution->currentData().toString(),
+				fps->currentData().toString());
+		});
+	QObject::connect(authorization, &QComboBox::currentIndexChanged, &dialog, [=] {
+		if (platform->currentData().toString() == QStringLiteral("youtube")) refreshStreams();
+	});
+	QTimer::singleShot(0, &dialog, [=] {
+		if (platform->currentData().toString() == QStringLiteral("youtube")) refreshStreams();
 	});
 	if (creating) {
 		QObject::connect(platform, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog,
@@ -521,7 +495,7 @@ bool editAccount(QWidget *parent, StreamAccount &account, bool creating, const Q
 				  account.destination.streamKey != key->text().trimmed();
 	const bool changedClient = account.oauth.clientId != clientId->text().trimmed() ||
 				   account.oauth.clientSecret != clientSecret->text().trimmed();
-	const bool changedStream = account.youtubeStreamId != youtubeId->text().trimmed();
+	const bool changedStream = account.youtubeStreamId != youtubeId->currentData().toString();
 	if (changedClient && linked.isEmpty()) {
 		account.clearAuthorization();
 	} else if (linked.isEmpty()) {
@@ -545,7 +519,7 @@ bool editAccount(QWidget *parent, StreamAccount &account, bool creating, const Q
 		account.oauth.clientId = clientId->text().trimmed();
 		account.oauth.clientSecret = clientSecret->text().trimmed();
 	}
-	account.youtubeStreamId = youtubeId->text().trimmed();
+	account.youtubeStreamId = youtubeId->currentData().toString();
 	if (manualIngest) {
 		account.destination.ingestUrl = url->text().trimmed();
 		account.destination.streamKey = key->text().trimmed();

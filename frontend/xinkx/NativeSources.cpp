@@ -1,11 +1,20 @@
 #include "NativeSources.hpp"
 
+#include <OBSApp.hpp>
 #include <obs.hpp>
 #include <util/bmem.h>
 
+#include <QCryptographicHash>
+#include <QInputDialog>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QLineEdit>
+#include <QSettings>
 #include <QUrl>
 #include <QUrlQuery>
 #include <QString>
+#include <QVariant>
 
 #include <array>
 #include <cstring>
@@ -48,6 +57,97 @@ struct NativeSource {
 	uint32_t height = 0;
 };
 
+QString userPresetId(const QJsonObject &entry)
+{
+	return QStringLiteral("xinkx-user-") + QString::fromLatin1(
+		QCryptographicHash::hash(QJsonDocument(entry).toJson(QJsonDocument::Compact),
+			QCryptographicHash::Sha256).toHex().left(16));
+}
+
+QString catalogPath()
+{
+	char path[512]{};
+	const int length = GetAppConfigPath(path, sizeof(path), "xinkx-studio/studio.ini");
+	return length > 0 && static_cast<size_t>(length) < sizeof(path) ? QString::fromUtf8(path) : QString{};
+}
+
+QJsonArray savedPresets()
+{
+	const QString path = catalogPath();
+	if (path.isEmpty()) return {};
+	QSettings storage(path, QSettings::IniFormat);
+	return QJsonDocument::fromJson(storage.value(QStringLiteral("catalog/presets")).toByteArray()).array();
+}
+
+bool presetModified(obs_properties_t *, obs_property_t *, obs_data_t *settings)
+{
+	const QString selected = QString::fromUtf8(obs_data_get_string(settings, "preset"));
+	if (selected == QString::fromUtf8(obs_data_get_string(settings, "xinkxAppliedPreset"))) return false;
+	obs_data_set_string(settings, "xinkxAppliedPreset", selected.toUtf8().constData());
+	if (!selected.startsWith(QStringLiteral("xinkx-user-"))) {
+		obs_data_set_string(settings, "xinkxAppearance", selected.toUtf8().constData());
+		return false;
+	}
+	for (const auto &value : savedPresets()) {
+		const QJsonObject entry = value.toObject();
+		if (userPresetId(entry) != selected) continue;
+		const QJsonObject configuration = entry.value(QStringLiteral("settings")).toObject();
+		// Keep the selected template identity, but materialize its settings so
+		// an OBS source keeps working even if that template is later removed.
+		for (auto it = configuration.begin(); it != configuration.end(); ++it) {
+			const QByteArray property = it.key().toUtf8();
+			if (it.key() == QStringLiteral("preset")) {
+				obs_data_set_string(settings, "xinkxAppearance", it.value().toString().toUtf8().constData());
+			} else if (it.key() == QStringLiteral("customize")) {
+				obs_data_set_bool(settings, "customize", true);
+			} else if (it.key() == QStringLiteral("reaction") || it.key() == QStringLiteral("customText")) {
+				obs_data_set_string(settings, property.constData(), it.value().toString().toUtf8().constData());
+			} else if (it.key() == QStringLiteral("width") || it.key() == QStringLiteral("height") ||
+				   it.key() == QStringLiteral("accent") || it.key() == QStringLiteral("background") ||
+				   it.key() == QStringLiteral("text") || it.key() == QStringLiteral("fontSize") ||
+				   it.key() == QStringLiteral("radius") || it.key() == QStringLiteral("opacity") ||
+				   it.key() == QStringLiteral("scale") || it.key() == QStringLiteral("panelColor") ||
+				   it.key() == QStringLiteral("messageColor")) {
+				obs_data_set_int(settings, property.constData(), it.value().toVariant().toLongLong());
+			}
+		}
+		obs_data_set_bool(settings, "customize", true);
+		return true;
+	}
+	return false;
+}
+
+bool saveNativePreset(obs_properties_t *, obs_property_t *, void *data)
+{
+	auto *source = static_cast<NativeSource *>(data);
+	if (!source || !source->parent || !source->type) return false;
+	const QString path = catalogPath();
+	if (path.isEmpty()) return false;
+	OBSDataAutoRelease settings = obs_source_get_settings(source->parent);
+	const char *json = obs_data_get_json(settings);
+	QJsonObject configuration = QJsonDocument::fromJson(QByteArray(json ? json : "{}")).object();
+	const QString appearance = QString::fromUtf8(obs_data_get_string(settings, "preset"));
+	if (appearance.startsWith(QStringLiteral("xinkx-user-")))
+		configuration.insert(QStringLiteral("preset"), QString::fromUtf8(obs_data_get_string(settings, "xinkxAppearance")));
+	configuration.remove(QStringLiteral("xinkxAppearance"));
+	configuration.remove(QStringLiteral("xinkxAppliedPreset"));
+	configuration.insert(QStringLiteral("customize"), true);
+	bool accepted = false;
+	const QString name = QInputDialog::getText(nullptr, QStringLiteral("XINKX · Сохранить пресет"),
+		QStringLiteral("Имя нового пресета (после применения настроек источника)"),
+		QLineEdit::Normal, QString::fromUtf8(obs_source_get_name(source->parent)), &accepted).trimmed().left(80);
+	if (!accepted || name.isEmpty()) return false;
+	QJsonArray entries = savedPresets();
+	if (entries.size() >= 100) return false;
+	entries.append(QJsonObject{{QStringLiteral("name"), name},
+		{QStringLiteral("layer"), QString::fromLatin1(source->type->layer)},
+		{QStringLiteral("settings"), configuration}});
+	QSettings storage(path, QSettings::IniFormat);
+	storage.setValue(QStringLiteral("catalog/presets"), QJsonDocument(entries).toJson(QJsonDocument::Compact));
+	storage.sync();
+	return storage.status() == QSettings::NoError;
+}
+
 void update(void *data, obs_data_t *settings)
 {
 	auto *source = static_cast<NativeSource *>(data);
@@ -61,7 +161,10 @@ void update(void *data, obs_data_t *settings)
 	QUrl url(QStringLiteral("http://127.0.0.1:8766/overlay"));
 	QUrlQuery query;
 	query.addQueryItem(QStringLiteral("layer"), QString::fromLatin1(source->type->layer));
-	query.addQueryItem(QStringLiteral("preset"), QString::fromUtf8(obs_data_get_string(settings, "preset")));
+	const QString requested = QString::fromUtf8(obs_data_get_string(settings, "preset"));
+	const QString appearance = requested.startsWith(QStringLiteral("xinkx-user-"))
+		? QString::fromUtf8(obs_data_get_string(settings, "xinkxAppearance")) : requested;
+	query.addQueryItem(QStringLiteral("preset"), appearance.isEmpty() ? QStringLiteral("default") : appearance);
 	query.addQueryItem(QStringLiteral("reaction"), QString::fromUtf8(obs_data_get_string(settings, "reaction")));
 	query.addQueryItem(QStringLiteral("customText"), QString::fromUtf8(obs_data_get_string(settings, "customText")));
 	if (obs_data_get_bool(settings, "customize")) {
@@ -177,13 +280,32 @@ obs_properties_t *properties(void *data)
 	obs_properties_add_int(properties, "width", "Ширина элемента (пиксели)", 80, 3840, 1);
 	obs_properties_add_int(properties, "height", "Высота элемента (пиксели)", 50, 2160, 1);
 	obs_properties_add_bool(properties, "customize", "Своё оформление для этого источника (иначе настройки по умолчанию)");
+	// The same local preset library is available directly in OBS Sources -> +
+	// -> Properties. The selected user preset materializes as independent source
+	// settings so editing one instance never changes another.
+	auto *preset = obs_properties_add_list(properties, "preset", "Шаблон оформления",
+		OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	obs_property_list_add_string(preset, "Стандартное", "default");
 	if (layer == QStringLiteral("chat") || layer == QStringLiteral("frame") || layer == QStringLiteral("effects")) {
-		auto *preset = obs_properties_add_list(properties, "preset", "Оформление",
-			OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
-		for (const auto &entry : {std::pair{"default", "Стандартное"}, {"compact", "Компактное"},
-			{"glass", "Стекло"}, {"neon", "Неон"}, {"minimal", "Минимализм"},
-			{"gold", "Золотое"}, {"round", "Скруглённое"}})
+		for (const auto &entry : {std::pair{"compact", "Компактное"}, {"glass", "Стекло"},
+			{"neon", "Неон"}, {"minimal", "Минимализм"}, {"gold", "Золотое"},
+			{"round", "Скруглённое"}})
 			obs_property_list_add_string(preset, entry.second, entry.first);
+	}
+	for (const auto &value : savedPresets()) {
+		const auto entry = value.toObject();
+		if (entry.value(QStringLiteral("layer")).toString() != layer) continue;
+		const QByteArray title = (QStringLiteral("Мой · ") + entry.value(QStringLiteral("name")).toString())
+			.toUtf8();
+		const QByteArray id = userPresetId(entry).toUtf8();
+		obs_property_list_add_string(preset, title.constData(), id.constData());
+	}
+	obs_property_set_modified_callback(preset, presetModified);
+	if (source && source->parent) {
+		auto *save = obs_properties_add_button2(properties, "saveXinkxPreset",
+			"Сохранить настроенный источник как мой пресет", saveNativePreset, const_cast<NativeSource *>(source));
+		obs_property_set_long_description(save, "Сначала нажмите «Применить», затем сохраните копию настроек. "
+			"Новый пресет появится при следующем открытии свойств источника.");
 	}
 	if (layer == QStringLiteral("effects")) {
 		auto *reaction = obs_properties_add_list(properties, "reaction", "Показывать реакцию",

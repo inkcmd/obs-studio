@@ -9,6 +9,7 @@
 #include <obs-frontend-api.h>
 #include <obs.h>
 #include <graphics/graphics.h>
+#include <graphics/matrix4.h>
 
 #include <QCheckBox>
 #include <QCryptographicHash>
@@ -96,21 +97,38 @@ public:
 		if (GetDisplay()) obs_display_remove_draw_callback(GetDisplay(), render, this);
 	}
 	std::function<void(float, float)> moved;
+	std::function<void(float, float)> resized;
+	// Returns true if the pointer is on the selected layer's resize handle.
+	std::function<bool(float, float)> pressed;
 
 protected:
 	void mousePressEvent(QMouseEvent *event) override
 	{
-		if (event->button() == Qt::LeftButton) { start = event->position(); dragging = true; }
+		if (event->button() == Qt::LeftButton) {
+			start = event->position();
+			resizing = false;
+			dragging = true;
+			const float scale = std::min(width() / float(portraitWidth), height() / float(portraitHeight));
+			if (scale > 0 && pressed) {
+				const float x = (width() - float(portraitWidth) * scale) / 2.f;
+				const float y = (height() - float(portraitHeight) * scale) / 2.f;
+				resizing = pressed(float((start.x() - x) / scale), float((start.y() - y) / scale));
+			}
+		}
 		OBSQTDisplay::mousePressEvent(event);
 	}
 	void mouseMoveEvent(QMouseEvent *event) override
 	{
-		if (dragging && moved && width() && height()) {
+		if (dragging && width() && height()) {
 			const QPointF delta = event->position() - start;
 			start = event->position();
 			// Preview dimensions preserve 9:16; convert pixels to 1080x1920 coordinates.
 			const float scale = std::min(width() / float(portraitWidth), height() / float(portraitHeight));
-			if (scale > 0) moved(float(delta.x() / scale), float(delta.y() / scale));
+			if (scale > 0) {
+				const float dx = float(delta.x() / scale), dy = float(delta.y() / scale);
+				if (resizing && resized) resized(dx, dy);
+				else if (moved) moved(dx, dy);
+			}
 		}
 		OBSQTDisplay::mouseMoveEvent(event);
 	}
@@ -124,6 +142,7 @@ private:
 	obs_source_t *sceneSource = nullptr;
 	QPointF start;
 	bool dragging = false;
+	bool resizing = false;
 	static void render(void *context, uint32_t cx, uint32_t cy)
 	{
 		auto *self = static_cast<PortraitDisplay *>(context);
@@ -318,13 +337,15 @@ void PortraitCanvas::edit(QWidget *parent)
 	auto *content = new QHBoxLayout(body);
 	content->setContentsMargins(6, 6, 6, 6);
 	auto *list = new QListWidget(body);
-	list->setMinimumWidth(220);
+	list->setMinimumWidth(170);
 	content->addWidget(list, 1);
 	auto *preview = new PortraitDisplay(obs_scene_get_source(scene), body);
 	content->addWidget(preview, 2);
 	auto *properties = new QVBoxLayout();
-	properties->addWidget(new QLabel(QStringLiteral("Раскладка независима от основной сцены.\n"
-		"Перетаскивай выделенный слой на предпросмотре."), body));
+	auto *instructions = new QLabel(QStringLiteral("Нажми слой на вертикальном холсте, перемещай его мышью. "
+		"Потяни за нижний правый угол, чтобы изменить размер."), body);
+	instructions->setWordWrap(true);
+	properties->addWidget(instructions);
 	auto *form = new QFormLayout();
 	auto *x = dimension(body, 4320, QStringLiteral(" px"));
 	auto *y = dimension(body, 4320, QStringLiteral(" px"));
@@ -338,6 +359,14 @@ void PortraitCanvas::edit(QWidget *parent)
 	auto *visible = new QCheckBox(QStringLiteral("Видимый слой"), body);
 	form->addRow(visible);
 	properties->addLayout(form);
+	auto *snap = new QCheckBox(QStringLiteral("Привязка к сетке 10 px"), body);
+	properties->addWidget(snap);
+	auto *alignment = new QHBoxLayout();
+	auto *centerLayer = new QPushButton(QStringLiteral("По центру"), body);
+	auto *fillCanvas = new QPushButton(QStringLiteral("На весь холст"), body);
+	alignment->addWidget(centerLayer);
+	alignment->addWidget(fillCanvas);
+	properties->addLayout(alignment);
 	properties->addStretch(1);
 	auto *close = new QDialogButtonBox(QDialogButtonBox::Close, body);
 	properties->addWidget(close);
@@ -351,6 +380,8 @@ void PortraitCanvas::edit(QWidget *parent)
 		for (auto *field : {static_cast<QWidget *>(x), static_cast<QWidget *>(y),
 			static_cast<QWidget *>(w), static_cast<QWidget *>(h),
 			static_cast<QWidget *>(fill), static_cast<QWidget *>(visible)}) field->setEnabled(good);
+		centerLayer->setEnabled(good);
+		fillCanvas->setEnabled(good);
 		if (!good) return;
 		obs_transform_info info{};
 		obs_sceneitem_get_info2(layers.at(row).item, &info);
@@ -373,11 +404,67 @@ void PortraitCanvas::edit(QWidget *parent)
 		QObject::connect(spin, &QDoubleSpinBox::valueChanged, dock, apply);
 	QObject::connect(fill, &QCheckBox::toggled, dock, apply);
 	QObject::connect(visible, &QCheckBox::toggled, dock, apply);
+	preview->pressed = [=, this](float px, float py) {
+		vec3 position{};
+		vec3_set(&position, px, py, 0.f);
+		for (int row = int(layers.size()) - 1; row >= 0; --row) {
+			const auto *item = layers.at(row).item;
+			if (!obs_sceneitem_visible(item)) continue;
+			matrix4 box{}, inverse{};
+			obs_sceneitem_get_box_transform(item, &box);
+			matrix4_inv(&inverse, &box);
+			vec3 local{};
+			vec3_transform(&local, &position, &inverse);
+			if (local.x < 0.f || local.x > 1.f || local.y < 0.f || local.y > 1.f) continue;
+			list->setCurrentRow(row);
+			vec3 corner{}, unit{};
+			vec3_set(&unit, 1.f, 1.f, 0.f);
+			vec3_transform(&corner, &unit, &box);
+			// A small bottom-right hotspot in actual portrait canvas units.
+			return std::hypot(px - corner.x, py - corner.y) < 55.f;
+		}
+		list->setCurrentRow(-1);
+		return false;
+	};
 	preview->moved = [=](float dx, float dy) {
 		if (list->currentRow() < 0) return;
-		x->setValue(std::clamp(x->value() + dx, 0., 4320.));
-		y->setValue(std::clamp(y->value() + dy, 0., 4320.));
+		const auto coordinate = [=](double value) {
+			const double bounded = std::clamp(value, 0., 4320.);
+			return snap->isChecked() ? std::round(bounded / 10.) * 10. : bounded;
+		};
+		x->setValue(coordinate(x->value() + dx));
+		y->setValue(coordinate(y->value() + dy));
 	};
+	preview->resized = [=](float dx, float dy) {
+		if (list->currentRow() < 0) return;
+		w->setValue(std::clamp(w->value() + dx, 80., 4320.));
+		h->setValue(std::clamp(h->value() + dy, 80., 4320.));
+	};
+	// OBS positions a scene item by its own alignment anchor, not necessarily
+	// by its top-left corner. Respect that anchor for both alignment commands.
+	const auto placeLayer = [=, this](double left, double top) {
+		const int row = list->currentRow();
+		if (row < 0 || row >= layers.size()) return;
+		obs_transform_info info{};
+		obs_sceneitem_get_info2(layers.at(row).item, &info);
+		const double anchorX = info.alignment & OBS_ALIGN_RIGHT ? w->value() :
+			info.alignment & OBS_ALIGN_LEFT ? 0. : w->value() / 2.;
+		const double anchorY = info.alignment & OBS_ALIGN_BOTTOM ? h->value() :
+			info.alignment & OBS_ALIGN_TOP ? 0. : h->value() / 2.;
+		x->setValue(left + anchorX);
+		y->setValue(top + anchorY);
+	};
+	QObject::connect(centerLayer, &QPushButton::clicked, dock, [=] {
+		if (list->currentRow() < 0) return;
+		placeLayer((portraitWidth - w->value()) / 2., (portraitHeight - h->value()) / 2.);
+	});
+	QObject::connect(fillCanvas, &QPushButton::clicked, dock, [=] {
+		if (list->currentRow() < 0) return;
+		w->setValue(portraitWidth);
+		h->setValue(portraitHeight);
+		placeLayer(0, 0);
+		fill->setChecked(true);
+	});
 	QObject::connect(close, &QDialogButtonBox::rejected, dock, &QDockWidget::close);
 	QObject::connect(dock, &QObject::destroyed, mainWindow, [this] { editing = false; });
 	// OBS scenes may change while the dock remains open. Rebuild the independent
