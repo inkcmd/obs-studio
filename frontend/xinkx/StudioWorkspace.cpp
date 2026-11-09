@@ -2,6 +2,7 @@
 
 #include "StudioController.hpp"
 #include "MultiStreamManager.hpp"
+#include "OverlayRuntime.hpp"
 
 #include <OBSApp.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -439,6 +440,7 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 		inspector->setVisible(inspectorVisible);
 		mainWindow->resizeDocks({inspector}, {280}, Qt::Horizontal);
 	});
+	installOverlayWorkspace(mainWindow, inspector);
 }
 
 void shutdownStudioOutputs(OBSBasic *mainWindow)

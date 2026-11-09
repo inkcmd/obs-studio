@@ -16,6 +16,9 @@ target_sources(
     xinkx/PlatformApi.hpp
     xinkx/OAuthLogin.cpp
     xinkx/OAuthLogin.hpp
+    xinkx/OverlayRuntime.cpp
+    xinkx/OverlayRuntime.hpp
+    xinkx/assets/overlay.qrc
 )
 
 target_compile_definitions(obs-studio PRIVATE XINKX_STUDIO=1)

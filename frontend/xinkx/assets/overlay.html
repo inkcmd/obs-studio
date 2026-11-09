@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XINKX Studio · Локальные события</title>
+<style>
+  :root { color-scheme: dark; --cyan: #6be4ef; --indigo: #6f6af8; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent !important; }
+  body { font-family: "Segoe UI", "Inter", sans-serif; color: white; pointer-events: none; }
+  #surface { position: absolute; inset: 0; overflow: hidden; }
+  .effect { position: absolute; left: 50%; top: 26%; transform: translate(-50%, -50%);
+    animation: enter .24s cubic-bezier(.2,1.4,.2,1) both; will-change: transform, opacity; }
+  .effect.leave { animation: exit .35s ease-in both; }
+  @keyframes enter { from { opacity: 0; transform: translate(-50%, -50%) scale(.78); } }
+  @keyframes exit { to { opacity: 0; transform: translate(-50%, -65%) scale(.94); } }
+  body[data-position="top-right"] .effect.alert { left: auto; right: 4%; top: 9%; transform: none; }
+  body[data-position="top-left"] .effect.alert { left: 4%; top: 9%; transform: none; }
+  body[data-position="center"] .effect.alert { left: 50%; top: 40%; }
+  .alert-card { min-width: 300px; max-width: 640px; padding: 22px 30px; border: 1px solid #8be5f68c;
+    border-radius: 16px; background: linear-gradient(125deg,#0a1838ed,#181536eb);
+    box-shadow: 0 14px 55px #0008, 0 0 36px #4ec9ff3a; }
+  .alert-card .kind { color: var(--cyan); letter-spacing: .2em; text-transform: uppercase; font-size: 15px; font-weight: 800; }
+  .alert-card .name { font-size: clamp(26px,3vw,47px); font-weight: 800; margin: 8px 0; word-break: break-word; }
+  .alert-card .detail { font-size: 20px; color: #e0e8ff; overflow-wrap: anywhere; }
+  .impact { text-align: center; font-size: clamp(85px, 12vw, 230px); font-weight: 950; letter-spacing: -.07em;
+    line-height: 1; font-style: italic; text-shadow: 0 4px #09112e, 0 0 25px #53dfff, 0 0 85px #3c5dfb; }
+  .impact.boom { color: #ffd268; text-shadow: 0 4px #8d1720,0 0 18px #ff9d31,0 0 100px #ff4034;
+    animation: shake .13s 8 alternate; }
+  @keyframes shake { from { transform: translateX(-8px) rotate(-4deg); } to { transform: translateX(9px) rotate(4deg); } }
+  .full { inset: 0; transform: none; }
+  .full.leave { animation: fade .35s both; }
+  @keyframes fade { to { opacity: 0; } }
+  .vignette { position: absolute; inset: 0; box-shadow: inset 0 0 190px 70px #ea1534cd;
+    border: 12px solid #ff384daa; animation: pulse 1s infinite alternate; }
+  @keyframes pulse { from { opacity:.35; } to { opacity:1; } }
+  .vignette strong { position: absolute; bottom: 16%; left: 50%; transform: translateX(-50%);
+    font-size: clamp(60px,9vw,165px); font-weight: 950; text-shadow: 0 0 22px #ff2238; }
+  .particles { position:absolute; inset: 0; overflow:hidden; }
+  .particle { position:absolute; top:-12%; width: 12px; height: 21px; border-radius: 3px;
+    animation: fall var(--fall,3s) linear var(--delay,0s) both; transform: rotate(var(--angle,0deg)); }
+  .particle.gg { font-weight: 850; font-size: 27px; width:auto; height:auto; color:var(--cyan);
+    filter:drop-shadow(0 0 8px #35aafc); }
+  @keyframes fall { to { top: 110%; transform: translateX(var(--drift,0px)) rotate(750deg); opacity:.2; } }
+  #timer { position:absolute; top: 5%; left:50%; transform:translateX(-50%); padding: 12px 28px;
+    border:1px solid #a0eeff7a; border-radius:12px; background:#08142fcc;
+    box-shadow:0 10px 36px #0008, 0 0 28px #5a92e53d; color:var(--cyan);
+    font-size:clamp(40px,4.5vw,84px); font-weight:800; font-variant-numeric:tabular-nums; letter-spacing:.04em;
+    transition:opacity .35s,transform .35s; }
+  #timer.hidden { opacity:0; transform:translate(-50%,-30px); }
+  #chat { position:absolute; bottom:5%; left:3%; display:flex; flex-direction:column; align-items:flex-start;
+    gap:8px; width:min(660px,70vw); }
+  .chat-line { max-width:100%; background:#08152bdc; border-left:4px solid var(--cyan);
+    border-radius:6px 12px 12px 6px; padding:9px 14px; font-size:clamp(17px,1.5vw,29px);
+    box-shadow:0 4px 28px #0008; overflow-wrap:anywhere; animation:chatIn .28s both; }
+  .chat-line .who { color:var(--cyan); font-weight:850; margin-right:10px; }
+  .chat-line .badge { color:#97a8c7; font-size:.7em; font-weight:700; margin-right:8px; }
+  .chat-line.leave { animation:chatOut .4s both; }
+  @keyframes chatIn { from { opacity:0; transform:translateX(-28px); } }
+  @keyframes chatOut { to { opacity:0; transform:translateX(-28px); } }
+</style>
+</head>
+<body data-position="top-right">
+<div id="surface"></div>
+<div id="timer" class="hidden" aria-label="Таймер">00:00</div>
+<div id="chat"></div>
+<script>
+(() => {
+  'use strict';
+  const surface = document.getElementById('surface');
+  const timer = document.getElementById('timer');
+  const chat = document.getElementById('chat');
+  const queue = [], active = [];
+  let paused = false, timerVisible = false, deadline = 0, remaining = 0;
+  const palette = ['#66ebfd','#8175ff','#f4e96c','#ff7799','#76f5bb'];
+  const durations = {gg:4700,boom:2700,'low-hp':4000,confetti:5500,follow:5200,sub:5200,donation:6000,raid:6000};
+  const labels = {follow:'НОВЫЙ ФОЛЛОВЕР',sub:'НОВАЯ ПОДПИСКА',donation:'ДОНАТ',raid:'РЕЙД'};
+  function node(tag, cls, value) {
+    const result = document.createElement(tag); result.className = cls || '';
+    if (value !== undefined) result.textContent = String(value).slice(0,240);
+    return result;
+  }
+  function particles(gg) {
+    const root = node('div','particles');
+    for (let i = 0; i < (gg ? 46 : 75); ++i) {
+      const bit = node('span', 'particle'+(gg?' gg':''),gg?'GG':undefined);
+      bit.style.left = (Math.random()*100)+'%';
+      bit.style.setProperty('--fall', (2+Math.random()*3.5)+'s');
+      bit.style.setProperty('--delay', (Math.random()*.8)+'s');
+      bit.style.setProperty('--drift', (Math.random()*200-100)+'px');
+      bit.style.setProperty('--angle', (Math.random()*270)+'deg');
+      if (!gg) bit.style.background = palette[i%palette.length];
+      root.append(bit);
+    }
+    return root;
+  }
+  function render(event) {
+    const type = String(event.type || '');
+    const card = node('div', 'effect' + (event.kind==='alert'?' alert':'') +
+      (type==='low-hp'||type==='gg'||type==='confetti'?' full':''));
+    if (event.kind==='alert' && labels[type]) {
+      const alert = node('div','alert-card');
+      alert.append(node('div','kind',labels[type]));
+      alert.append(node('div','name',event.name||'Зритель'));
+      const line = [event.amount,event.message].filter(Boolean).join(' · ');
+      if (line) alert.append(node('div','detail',line));
+      card.append(alert);
+    } else if (type==='boom') card.append(node('div','impact boom','BOOM!'));
+    else if (type==='low-hp') {
+      const vignette=node('div','vignette'); vignette.append(node('strong','', 'LOW HP'));
+      card.append(vignette);
+    } else if (type==='gg'||type==='confetti') card.append(particles(type==='gg'));
+    else return;
+    surface.append(card);
+    const task = {card,timeout:null}; active.push(task);
+    task.timeout = setTimeout(() => {
+      card.classList.add('leave');
+      setTimeout(() => {card.remove(); const i=active.indexOf(task);if(i>=0)active.splice(i,1);drain();},350);
+    }, Math.min(15000,Math.max(500,durations[type]||4500)));
+  }
+  function drain() {
+    if (paused) return;
+    while (queue.length && active.length<2) render(queue.shift());
+  }
+  function effect(event) {
+    if (!event || paused || !durations[event.type]) return;
+    if (queue.length>=20) queue.shift();
+    queue.push(event); drain();
+  }
+  function showChat(event) {
+    if (!event || paused || !event.message) return;
+    const line=node('div','chat-line');
+    line.append(node('span','badge',String(event.platform||'').toUpperCase()));
+    line.append(node('span','who',event.name||'Зритель'));
+    line.append(node('span','message',event.message));
+    chat.append(line);
+    while (chat.children.length>4) chat.firstChild.remove();
+    setTimeout(() => {line.classList.add('leave');setTimeout(()=>line.remove(),400);},12000);
+  }
+  function clock() {
+    const seconds=Math.max(0,Math.ceil((deadline>0 ? deadline-Date.now() : remaining*1000)/1000));
+    timer.textContent=String(Math.floor(seconds/60)).padStart(2,'0')+':'+String(seconds%60).padStart(2,'0');
+    const visible = timerVisible && seconds>0;
+    timer.classList.toggle('hidden',!visible);
+  }
+  function state(value) {
+    paused=Boolean(value.paused);
+    const where=String(value.position||'top-right');
+    document.body.dataset.position=['top-right','top-left','center'].includes(where)?where:'top-right';
+    if (paused) { queue.length=0;for (const task of active.splice(0)) {clearTimeout(task.timeout);task.card.remove();} }
+    timerVisible=Boolean(value.visible);
+    remaining=Number(value.remaining)||0;
+    deadline=Number(value.deadline)||0;
+    clock();
+  }
+  const source=new EventSource('/events');
+  source.addEventListener('state',e=>{try{state(JSON.parse(e.data));}catch{}});
+  source.addEventListener('effect',e=>{try{effect(JSON.parse(e.data));}catch{}});
+  source.addEventListener('chat',e=>{try{showChat(JSON.parse(e.data));}catch{}});
+  setInterval(clock,250);
+})();
+</script>
+</body>
+</html>

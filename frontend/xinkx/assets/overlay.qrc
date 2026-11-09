@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/xinkx">
+    <file>overlay.html</file>
+  </qresource>
+</RCC>
