@@ -25,8 +25,10 @@ inline void writeDiagnostic(const QString &area, const QString &message, int max
 	QFile file(diagnosticsPath());
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) return;
 	QTextStream stream(&file);
+	QString line = maxChars < 0 ? message : message.left(maxChars);
+	line.replace(QLatin1Char('\n'), QLatin1Char(' '));
 	stream << QDateTime::currentDateTime().toString(Qt::ISODateWithMs) << " [" << area << "] "
-	       << (maxChars < 0 ? message : message.left(maxChars)).replace(QLatin1Char('\n'), QLatin1Char(' ')) << '\n';
+	       << line << '\n';
 }
 
 } // namespace xinkx
