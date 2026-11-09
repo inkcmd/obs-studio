@@ -125,7 +125,7 @@ QWidget *chatPage(QWidget *parent, PresentationSettings *settings, const QString
 	auto *showTime = new QCheckBox(QStringLiteral("Время сообщений"), page);
 	showTime->setChecked(chat.value(QStringLiteral("showTime")).toBool());
 	form->addRow(showTime);
-	auto *colorRow = [=](const QString &key, const QString &label) {
+	auto colorRow = [=](const QString &key, const QString &label) {
 		auto *button = new QPushButton(chat.value(key).toString(), page);
 		form->addRow(label, button);
 		QObject::connect(button, &QPushButton::clicked, page, [=] {
