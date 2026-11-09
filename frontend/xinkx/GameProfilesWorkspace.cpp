@@ -23,6 +23,7 @@
 #include <QPushButton>
 #include <QSaveFile>
 #include <QScrollArea>
+#include <QSettings>
 #include <QSignalBlocker>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -124,6 +125,8 @@ bool validProfiles(const QJsonObject &root)
 		}
 		const auto sceneUuid = profile.value(QStringLiteral("sceneUuid"));
 		if (!sceneUuid.isUndefined() && (!sceneUuid.isString() || sceneUuid.toString().size() > 100)) return false;
+		const auto game = profile.value(QStringLiteral("game"));
+		if (!game.isUndefined() && (!game.isString() || game.toString().size() > 150)) return false;
 	}
 	return true;
 }
@@ -161,11 +164,12 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 	if (!editorLayout) return;
 	auto *title = panel->findChild<QLineEdit *>(QStringLiteral("xinkxBroadcastTitle"));
 	auto *description = panel->findChild<QPlainTextEdit *>(QStringLiteral("xinkxBroadcastDescription"));
+	auto *game = panel->findChild<QLineEdit *>(QStringLiteral("xinkxBroadcastGame"));
 	auto *twitch = panel->findChild<QComboBox *>(QStringLiteral("xinkxBroadcastTwitchGame"));
 	auto *kick = panel->findChild<QComboBox *>(QStringLiteral("xinkxBroadcastKickGame"));
 	auto *youtube = panel->findChild<QComboBox *>(QStringLiteral("xinkxBroadcastYouTubeGame"));
 	auto *youtubeBroadcast = panel->findChild<QComboBox *>(QStringLiteral("xinkxBroadcastYouTubeEvent"));
-	if (!title || !description || !twitch || !kick || !youtube || !youtubeBroadcast) return;
+	if (!title || !description || !game || !twitch || !kick || !youtube || !youtubeBroadcast) return;
 
 	auto root = std::make_shared<QJsonObject>(QJsonObject{{QStringLiteral("version"), 1},
 		{QStringLiteral("automatic"), false}, {QStringLiteral("profiles"), QJsonArray{}}});
@@ -238,12 +242,21 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 			scene->setCurrentIndex(s);
 		title->setText(profile.value(QStringLiteral("title")).toString());
 		description->setPlainText(profile.value(QStringLiteral("description")).toString());
+		if (profile.contains(QStringLiteral("game"))) game->setText(profile.value(QStringLiteral("game")).toString());
 		selectSaved(twitch, profile.value(QStringLiteral("twitchCategory")).toString(),
 			profile.value(QStringLiteral("twitchCategoryName")).toString());
 		selectSaved(kick, profile.value(QStringLiteral("kickCategory")).toString(),
 			profile.value(QStringLiteral("kickCategoryName")).toString());
 		selectSaved(youtube, profile.value(QStringLiteral("youtubeCategory")).toString(),
 			profile.value(QStringLiteral("youtubeCategoryName")).toString());
+		QSettings local(studioSettingsPath(), QSettings::IniFormat);
+		for (const auto &platform : {QStringLiteral("twitch"), QStringLiteral("kick"), QStringLiteral("youtube")}) {
+			const QString prefix = QStringLiteral("broadcast/editor/") + platform;
+			local.setValue(prefix + QStringLiteral("Category"), profile.value(platform + QStringLiteral("Category")).toString());
+			local.setValue(prefix + QStringLiteral("CategoryName"),
+				profile.value(platform + QStringLiteral("CategoryName")).toString());
+		}
+		local.sync();
 		selectSaved(youtubeBroadcast, profile.value(QStringLiteral("youtubeBroadcast")).toString(),
 			profile.value(QStringLiteral("youtubeBroadcastName")).toString());
 	};
@@ -264,6 +277,7 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 			{QStringLiteral("sceneUuid"), scene->currentData().toString()},
 			{QStringLiteral("title"), title->text()},
 			{QStringLiteral("description"), description->toPlainText().left(5000)},
+			{QStringLiteral("game"), game->text().left(150)},
 			{QStringLiteral("twitchCategory"), twitch->currentData().toString()},
 			{QStringLiteral("twitchCategoryName"), twitch->currentText()},
 			{QStringLiteral("kickCategory"), kick->currentData().toString()},

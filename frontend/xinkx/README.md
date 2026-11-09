@@ -1,4 +1,10 @@
-# XINKX Studio — Stage 16 (0.15-dev)
+# XINKX Studio — Stage 17 (0.15-dev)
+
+## Stage 17 changes — unified broadcast draft and YouTube API experiment
+
+- **Эфир** now has one persistent local title, description and game field, no platform switcher. Background refresh keeps the draft intact. A read-only comparison shows remote title/description/category mismatches for each connected account; Kick's unavailable title is explicitly shown as unknown rather than overwriting the draft. Saving updates all connected providers, with provider-specific category IDs selected below the common fields.
+- Twitch/Kick game searches keep their selected IDs. The YouTube category selector loads the complete public list of categories available for the requested region and preserves the saved category, without the old «Не изменять» placeholder or filtering the catalog by game name. Profile files can store a common game label.
+- A one-time YouTube checkbox (preselected and switchable off) sends experimental `snippet.gameTitle` on `liveBroadcasts.update`, preserves all existing snippet fields and logs the exact JSON payload plus the raw HTTP status/body to `diagnostics.log`. If the undocumented property is rejected, the editor retries without it so the standard title/description/category update is not lost. An HTTP success does **not** prove YouTube Studio applied the game: confirm in Studio.
 
 ## Stage 16 changes — native sources and broadcast reliability
 

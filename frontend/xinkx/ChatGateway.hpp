@@ -2,6 +2,7 @@
 
 #include "StreamAccounts.hpp"
 
+#include <QByteArray>
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -45,7 +46,8 @@ public:
 	void inspectBroadcast(const QString &accountId, const QString &youtubeBroadcastId = {});
 	void searchCategories(const QString &accountId, const QString &query);
 	void updateBroadcast(const QString &accountId, const QString &youtubeBroadcastId,
-			     const QString &title, const QString &description, const QString &categoryId);
+			     const QString &title, const QString &description, const QString &categoryId,
+			     const QString &youtubeGameTitle = {});
 	void createYouTubeBroadcast(const QString &accountId, const QString &title,
 				    const QString &description, const QString &categoryId);
 	void bindYouTubeStream(const QString &accountId, const QString &broadcastId, const QString &streamId);
@@ -68,6 +70,7 @@ private:
 		int status = 0;
 		bool ok = false;
 		QString error;
+		QByteArray rawBody;
 	};
 	using RequestDone = std::function<void(const HttpResult &)>;
 	using TokenDone = std::function<void(const QString &)>;
