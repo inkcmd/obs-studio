@@ -3,6 +3,7 @@
 #include "StudioController.hpp"
 #include "MultiStreamManager.hpp"
 #include "OverlayRuntime.hpp"
+#include "ChatGateway.hpp"
 
 #include <OBSApp.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -441,6 +442,7 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 		mainWindow->resizeDocks({inspector}, {280}, Qt::Horizontal);
 	});
 	installOverlayWorkspace(mainWindow, inspector);
+	installChatWorkspace(mainWindow);
 }
 
 void shutdownStudioOutputs(OBSBasic *mainWindow)

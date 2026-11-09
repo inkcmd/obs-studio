@@ -26,6 +26,8 @@ public:
 	void reaction(const QString &type);
 	void testAlert(const QString &type);
 	void publishChat(const QString &platform, const QString &name, const QString &message);
+	void publishAlert(const QString &type, const QString &platform, const QString &name,
+			  const QString &amount, const QString &message);
 	void startTimer(int seconds);
 	void pauseTimer();
 	void resetTimer();

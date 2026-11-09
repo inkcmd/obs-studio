@@ -234,15 +234,19 @@ void OverlayRuntime::reaction(const QString &type)
 
 void OverlayRuntime::testAlert(const QString &type)
 {
+	publishAlert(type, QStringLiteral("test"), QStringLiteral("Тестовый зритель"),
+		     type == QStringLiteral("donation") ? QStringLiteral("100 ₽") : QString{},
+		     QStringLiteral("Проверка XINKX Studio"));
+}
+
+void OverlayRuntime::publishAlert(const QString &type, const QString &platform, const QString &name,
+				  const QString &amount, const QString &message)
+{
 	if (type != QStringLiteral("follow") && type != QStringLiteral("sub") &&
-	    type != QStringLiteral("donation") && type != QStringLiteral("raid")) {
-		return;
-	}
-	dispatch({{QStringLiteral("kind"), QStringLiteral("alert")},
-		  {QStringLiteral("type"), type},
-		  {QStringLiteral("name"), QStringLiteral("Тестовый зритель")},
-		  {QStringLiteral("amount"), type == QStringLiteral("donation") ? QStringLiteral("100 ₽") : QString{}},
-		  {QStringLiteral("message"), QStringLiteral("Проверка XINKX Studio")}});
+	    type != QStringLiteral("donation") && type != QStringLiteral("raid")) return;
+	dispatch({{QStringLiteral("kind"), QStringLiteral("alert")}, {QStringLiteral("type"), type},
+		  {QStringLiteral("platform"), shortText(platform, 24)}, {QStringLiteral("name"), shortText(name, 80)},
+		  {QStringLiteral("amount"), shortText(amount, 60)}, {QStringLiteral("message"), shortText(message)}});
 }
 
 void OverlayRuntime::publishChat(const QString &platform, const QString &name, const QString &message)

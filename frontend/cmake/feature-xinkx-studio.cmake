@@ -18,11 +18,16 @@ target_sources(
     xinkx/OAuthLogin.hpp
     xinkx/OverlayRuntime.cpp
     xinkx/OverlayRuntime.hpp
+    xinkx/ChatGateway.cpp
+    xinkx/ChatGateway.hpp
+    xinkx/ChatWorkspace.cpp
+    xinkx/NativeWebSocket.cpp
+    xinkx/NativeWebSocket.hpp
     xinkx/assets/overlay.qrc
 )
 
 target_compile_definitions(obs-studio PRIVATE XINKX_STUDIO=1)
 
 if(WIN32)
-  target_link_libraries(obs-studio PRIVATE crypt32)
+  target_link_libraries(obs-studio PRIVATE crypt32 winhttp)
 endif()
