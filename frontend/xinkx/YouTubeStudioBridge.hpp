@@ -27,6 +27,7 @@ public:
 	void getSelectedGame(const QString &videoId);
 	void setGame(const QString &videoId, const QString &mid, const QString &title);
 	bool isReadyFor(const QString &channelId) const;
+	bool hasProfile() const;
 
 signals:
 	void status(const QString &message, bool ready);

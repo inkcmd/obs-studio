@@ -50,6 +50,7 @@ public:
 	void createYouTubeBroadcast(const QString &accountId, const QString &title,
 				    const QString &description, const QString &categoryId);
 	void bindYouTubeStream(const QString &accountId, const QString &broadcastId, const QString &streamId);
+	void uploadYouTubeThumbnail(const QString &accountId, const QString &videoId, const QString &filePath);
 	void pollViewers(const QString &accountId);
 	QVector<StreamAccount> accounts() const;
 
@@ -62,6 +63,7 @@ signals:
 	void categoryResults(const QString &accountId, const QJsonArray &categories);
 	void broadcastResult(const QString &accountId, const QString &message, bool success);
 	void youtubeMetadataUpdated(const QString &accountId, bool success);
+	void thumbnailUpdated(const QString &accountId, const QString &message, bool success);
 	void viewersReceived(const QString &accountId, int count);
 
 private:

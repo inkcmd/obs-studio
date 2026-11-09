@@ -5,23 +5,25 @@
 
 #include <widgets/OBSBasic.hpp>
 
-#include <QCheckBox>
 #include <QComboBox>
+#include <QCompleter>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
-#include <QGroupBox>
 #include <QHash>
 #include <QHBoxLayout>
-#include <QIcon>
 #include <QJsonArray>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPair>
 #include <QPlainTextEdit>
 #include <QPixmap>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSettings>
 #include <QSignalBlocker>
-#include <QStringList>
+#include <QStringListModel>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -30,26 +32,18 @@
 namespace xinkx {
 namespace {
 
-QString editorKey(const QString &part)
-{
-	return QStringLiteral("broadcast/editor/") + part;
-}
+QString key(const QString &part) { return QStringLiteral("broadcast/editor/") + part; }
 
-void selectCategory(QComboBox *choice, const QString &id, const QString &name)
+void choose(QComboBox *combo, const QString &id, const QString &caption)
 {
-	if (!choice) return;
-	const QSignalBlocker blocked(choice);
-	int index = choice->findData(id);
+	if (!combo) return;
+	const QSignalBlocker blocked(combo);
+	int index = combo->findData(id);
 	if (index < 0 && !id.isEmpty()) {
-		choice->addItem(name.isEmpty() ? QStringLiteral("Категория %1").arg(id) : name, id);
-		index = choice->count() - 1;
+		combo->addItem(caption.isEmpty() ? QStringLiteral("Сохранённая категория") : caption, id);
+		index = combo->count() - 1;
 	}
-	choice->setCurrentIndex(index >= 0 ? index : 0);
-}
-
-QString brief(const QString &value)
-{
-	return value.simplified().left(90);
+	combo->setCurrentIndex(index >= 0 ? index : 0);
 }
 
 } // namespace
@@ -63,509 +57,446 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 	auto *panel = new QWidget(dock);
 	auto *layout = new QVBoxLayout(panel);
 	layout->setContentsMargins(10, 10, 10, 10);
-	layout->setSpacing(7);
+	layout->setSpacing(8);
 	auto *local = new QSettings(studioSettingsPath(), QSettings::IniFormat, panel);
-	auto *localFlush = new QTimer(panel);
-	localFlush->setSingleShot(true);
-	localFlush->setInterval(500);
-	QObject::connect(localFlush, &QTimer::timeout, panel, [local] { local->sync(); });
-
-	auto *intro = new QLabel(QStringLiteral(
-		"Одно название, описание и игра для Twitch / YouTube / Kick. Поля хранятся на ПК; "
-		"обновление площадок их не сбрасывает."), panel);
-	intro->setWordWrap(true);
-	layout->addWidget(intro);
+	auto *flush = new QTimer(panel);
+	flush->setSingleShot(true);
+	flush->setInterval(500);
+	QObject::connect(flush, &QTimer::timeout, panel, [local] { local->sync(); });
 
 	auto *form = new QFormLayout();
-	form->setVerticalSpacing(6);
-	auto *title = new QLineEdit(panel);
+	form->setSpacing(6);
+	auto *title = new QLineEdit(local->value(key(QStringLiteral("title"))).toString(), panel);
 	title->setObjectName(QStringLiteral("xinkxBroadcastTitle"));
 	title->setMaxLength(100);
-	title->setPlaceholderText(QStringLiteral("Название для всех площадок"));
-	title->setText(local->value(editorKey(QStringLiteral("title"))).toString());
 	form->addRow(QStringLiteral("Название"), title);
 	auto *description = new QPlainTextEdit(panel);
 	description->setObjectName(QStringLiteral("xinkxBroadcastDescription"));
 	description->setMaximumHeight(95);
-	description->setPlaceholderText(QStringLiteral("Описание для YouTube; на Twitch — описание канала. Kick не поддерживает запись описания."));
-	description->setPlainText(local->value(editorKey(QStringLiteral("description"))).toString());
+	description->setPlaceholderText(QStringLiteral("Описание трансляции"));
+	description->setPlainText(local->value(key(QStringLiteral("description"))).toString());
 	form->addRow(QStringLiteral("Описание"), description);
-	auto *game = new QLineEdit(panel);
+	auto *game = new QLineEdit(local->value(key(QStringLiteral("game"))).toString(), panel);
 	game->setObjectName(QStringLiteral("xinkxBroadcastGame"));
-	game->setPlaceholderText(QStringLiteral("Название игры для всех площадок"));
-	game->setText(local->value(editorKey(QStringLiteral("game"))).toString());
+	game->setPlaceholderText(QStringLiteral("Начните вводить название игры…"));
 	form->addRow(QStringLiteral("Игра"), game);
 	layout->addLayout(form);
 
-	auto *searchRow = new QHBoxLayout();
-	auto *search = new QPushButton(QStringLiteral("Найти игру на Twitch / Kick"), panel);
-	search->setText(QStringLiteral("Найти игру на всех площадках"));
-	searchRow->addWidget(search);
-	layout->addLayout(searchRow);
-	auto *matches = new QComboBox(panel);
-	matches->setObjectName(QStringLiteral("xinkxUnifiedGameSuggestions"));
-	matches->addItem(QStringLiteral("Выберите найденную игру"), QString{});
-	matches->setVisible(false);
-	layout->addWidget(matches);
+	// All three catalogs feed one autocomplete. Platform IDs remain separate
+	// hidden state because Twitch game IDs, Kick IDs and YouTube mids differ.
+	auto *model = new QStringListModel(panel);
+	auto *completer = new QCompleter(model, panel);
+	completer->setCaseSensitivity(Qt::CaseInsensitive);
+	completer->setFilterMode(Qt::MatchContains);
+	completer->setCompletionMode(QCompleter::PopupCompletion);
+	game->setCompleter(completer);
+	auto *gameStatus = new QLabel(QStringLiteral("Поиск игр: Twitch / Kick / YouTube Studio"), panel);
+	gameStatus->setWordWrap(true);
+	layout->addWidget(gameStatus);
 
-	auto *categories = new QFormLayout();
-	auto *twitchCategory = new QComboBox(panel);
-	twitchCategory->setObjectName(QStringLiteral("xinkxBroadcastTwitchGame"));
-	auto *kickCategory = new QComboBox(panel);
-	kickCategory->setObjectName(QStringLiteral("xinkxBroadcastKickGame"));
-	auto *youtubeCategory = new QComboBox(panel);
-	youtubeCategory->setObjectName(QStringLiteral("xinkxBroadcastYouTubeGame"));
-	for (auto *choice : {twitchCategory, kickCategory, youtubeCategory})
-		choice->addItem(QStringLiteral("Не выбрана"), QString{});
-	const auto platformLabel = [panel](const QString &platform, const QString &caption) {
-		auto *row = new QWidget(panel);
-		auto *line = new QHBoxLayout(row);
-		line->setContentsMargins(0, 0, 4, 0);
-		line->setSpacing(5);
-		auto *icon = new QLabel(row);
-		const QPixmap image(QStringLiteral(":/xinkx/%1.svg").arg(platform));
-		if (!image.isNull()) icon->setPixmap(image.scaled(17, 17, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-		line->addWidget(icon);
-		line->addWidget(new QLabel(caption, row));
-		return row;
+	auto *previewLayout = new QHBoxLayout();
+	auto *thumbnail = new QLineEdit(local->value(key(QStringLiteral("thumbnail"))).toString(), panel);
+	thumbnail->setObjectName(QStringLiteral("xinkxBroadcastThumbnail"));
+	thumbnail->setReadOnly(true);
+	thumbnail->setPlaceholderText(QStringLiteral("Обложка эфира · PNG/JPG"));
+	auto *pickThumbnail = new QPushButton(QStringLiteral("Выбрать…"), panel);
+	previewLayout->addWidget(thumbnail, 1);
+	previewLayout->addWidget(pickThumbnail);
+	layout->addLayout(previewLayout);
+	auto *thumbnailPreview = new QLabel(panel);
+	thumbnailPreview->setMaximumHeight(105);
+	thumbnailPreview->setAlignment(Qt::AlignCenter);
+	layout->addWidget(thumbnailPreview);
+	const auto showThumbnail = [=] {
+		const QPixmap pixmap(thumbnail->text());
+		thumbnailPreview->setVisible(!pixmap.isNull());
+		if (!pixmap.isNull()) thumbnailPreview->setPixmap(pixmap.scaled(205, 100, Qt::KeepAspectRatio, Qt::SmoothTransformation));
 	};
-	categories->addRow(platformLabel(QStringLiteral("twitch"), QStringLiteral("Twitch")), twitchCategory);
-	categories->addRow(platformLabel(QStringLiteral("kick"), QStringLiteral("Kick")), kickCategory);
-	categories->addRow(platformLabel(QStringLiteral("youtube"), QStringLiteral("YouTube")), youtubeCategory);
-	layout->addLayout(categories);
+	showThumbnail();
+	QObject::connect(thumbnail, &QLineEdit::textChanged, panel, [=](const QString &path) {
+		local->setValue(key(QStringLiteral("thumbnail")), path);
+		flush->start();
+		showThumbnail();
+	});
+	QObject::connect(pickThumbnail, &QPushButton::clicked, panel, [=] {
+		const QString path = QFileDialog::getOpenFileName(panel, QStringLiteral("Обложка эфира"),
+			QFileInfo(thumbnail->text()).absolutePath(), QStringLiteral("Изображения (*.png *.jpg *.jpeg)"));
+		if (path.isEmpty()) return;
+		thumbnail->setText(path);
+		local->setValue(key(QStringLiteral("thumbnail")), path);
+		flush->start();
+		showThumbnail();
+	});
 
-	// Platform IDs are never interchangeable. Cache each selected category locally
-	// so asynchronous HTTP responses cannot reset a user's current choice.
-	const auto categoryChoices = std::make_shared<QHash<QString, QComboBox *>>();
-	categoryChoices->insert(QStringLiteral("twitch"), twitchCategory);
-	categoryChoices->insert(QStringLiteral("kick"), kickCategory);
-	categoryChoices->insert(QStringLiteral("youtube"), youtubeCategory);
-	for (auto it = categoryChoices->cbegin(); it != categoryChoices->cend(); ++it) {
-		const QString platform = it.key();
-		auto *choice = it.value();
-		const QString id = local->value(editorKey(platform + QStringLiteral("Category"))).toString();
-		const QString name = local->value(editorKey(platform + QStringLiteral("CategoryName"))).toString();
-		selectCategory(choice, id, name);
-		QObject::connect(choice, &QComboBox::activated, panel, [=](int) {
-			local->setValue(editorKey(platform + QStringLiteral("Category")), choice->currentData().toString());
-			local->setValue(editorKey(platform + QStringLiteral("CategoryName")), choice->currentText());
-			localFlush->start();
-		});
+	// Kept as non-visual state for legacy scene profiles, never as duplicate
+	// choices alongside the shared game field.
+	const auto categories = std::make_shared<QHash<QString, QComboBox *>>();
+	for (const auto &platform : {QStringLiteral("twitch"), QStringLiteral("kick"), QStringLiteral("youtube")}) {
+		auto *combo = new QComboBox(panel);
+		combo->hide();
+		combo->setObjectName(QStringLiteral("xinkxBroadcast") +
+			(platform == QStringLiteral("youtube") ? QStringLiteral("YouTube") :
+			platform == QStringLiteral("twitch") ? QStringLiteral("Twitch") : QStringLiteral("Kick")) +
+			QStringLiteral("Game"));
+		combo->addItem(QStringLiteral("Не выбрано"), QString{});
+		choose(combo, local->value(key(platform + QStringLiteral("Category"))).toString(),
+			local->value(key(platform + QStringLiteral("CategoryName"))).toString());
+		categories->insert(platform, combo);
 	}
+	auto *youtubeEvent = new QComboBox(panel);
+	youtubeEvent->hide();
+	youtubeEvent->setObjectName(QStringLiteral("xinkxBroadcastYouTubeEvent"));
+	youtubeEvent->addItem(QStringLiteral("Автоматически"), QString{});
 
-	auto *remoteGroup = new QGroupBox(QStringLiteral("Фактические данные площадок"), panel);
-	auto *remoteLayout = new QVBoxLayout(remoteGroup);
-	auto *remoteState = new QLabel(QStringLiteral("Данные ещё не запрошены"), remoteGroup);
-	remoteState->setWordWrap(true);
-	remoteState->setTextInteractionFlags(Qt::TextSelectableByMouse);
-	remoteLayout->addWidget(remoteState);
-	layout->addWidget(remoteGroup);
-
-	const auto accounts = gateway->accounts();
-	auto *youtubeGroup = new QGroupBox(QStringLiteral("YouTube · эфир и RTMP-поток"), panel);
 	auto *studio = new YouTubeStudioBridge(panel);
-	auto *youtubeLayout = new QVBoxLayout(youtubeGroup);
-	auto *youtubeForm = new QFormLayout();
-	auto *youtubeAccount = new QComboBox(youtubeGroup);
-	for (const auto &entry : accounts)
-		if (entry.platform == QStringLiteral("youtube"))
-			youtubeAccount->addItem(entry.displayName(), entry.id);
-	if (youtubeAccount->count() > 1) youtubeForm->addRow(QStringLiteral("Канал"), youtubeAccount);
-	auto *broadcast = new QComboBox(youtubeGroup);
-	broadcast->setObjectName(QStringLiteral("xinkxBroadcastYouTubeEvent"));
-	youtubeForm->addRow(QStringLiteral("Трансляция"), broadcast);
-	auto *stream = new QComboBox(youtubeGroup);
-	youtubeForm->addRow(QStringLiteral("Видеопоток"), stream);
-	youtubeLayout->addLayout(youtubeForm);
-	auto *studioButtons = new QHBoxLayout();
-	auto *studioLogin = new QPushButton(QStringLiteral("Подключить YouTube Studio"), youtubeGroup);
-	auto *studioCheck = new QPushButton(QStringLiteral("Проверить сессию"), youtubeGroup);
-	studioButtons->addWidget(studioLogin);
-	studioButtons->addWidget(studioCheck);
-	youtubeLayout->addLayout(studioButtons);
-	auto *studioState = new QLabel(QStringLiteral("YouTube Studio не подключена; обычный OAuth продолжает работать."), youtubeGroup);
+	studio->setObjectName(QStringLiteral("xinkxYouTubeStudioBridge"));
+	auto *studioRow = new QHBoxLayout();
+	auto *studioState = new QLabel(QStringLiteral("YouTube Studio: сессия не проверена"), panel);
 	studioState->setWordWrap(true);
-	youtubeLayout->addWidget(studioState);
-	auto *create = new QPushButton(QStringLiteral("Создать эфир и поток YouTube"), youtubeGroup);
-	create->setToolTip(QStringLiteral("Создаст эфир с доступом по ссылке и привяжет новый RTMP-поток"));
-	auto *bind = new QPushButton(QStringLiteral("Привязать выбранный поток"), youtubeGroup);
-	youtubeLayout->addWidget(create);
-	youtubeLayout->addWidget(bind);
-	youtubeGroup->setVisible(youtubeAccount->count() > 0);
-	layout->addWidget(youtubeGroup);
+	auto *studioConnect = new QPushButton(QStringLiteral("Подключить Studio"), panel);
+	studioRow->addWidget(studioState, 1);
+	studioRow->addWidget(studioConnect);
+	layout->addLayout(studioRow);
 
-	auto *read = new QPushButton(QStringLiteral("Обновить данные всех площадок"), panel);
-	auto *apply = new QPushButton(QStringLiteral("Сохранить на Twitch / YouTube / Kick"), panel);
-	layout->addWidget(read);
-	layout->addWidget(apply);
-	auto *status = new QLabel(QStringLiteral("Поля сохранены локально. Изменения на площадках — по кнопке сохранения."), panel);
+	auto *save = new QPushButton(QStringLiteral("Сохранить профиль и обновить площадки"), panel);
+	save->setObjectName(QStringLiteral("xinkxBroadcastSave"));
+	layout->addWidget(save);
+	auto *status = new QLabel(QStringLiteral("Изменения отправляются после нажатия «Сохранить»."), panel);
 	status->setWordWrap(true);
+	status->setTextInteractionFlags(Qt::TextSelectableByMouse);
 	layout->addWidget(status);
 	layout->addStretch();
 
-	auto remote = std::make_shared<QHash<QString, QJsonObject>>();
+	game->setProperty("xinkxYoutubeMid", local->value(key(QStringLiteral("youtubeGameMid"))).toString());
+	game->setProperty("xinkxYoutubeGameName", local->value(key(QStringLiteral("youtubeGameName"))).toString());
+	auto catalogs = std::make_shared<QHash<QString, QJsonArray>>();
 	auto youtubeIds = std::make_shared<QHash<QString, QString>>();
-	auto shownYoutube = std::make_shared<QString>();
-	auto studioMid = std::make_shared<QString>(local->value(editorKey(QStringLiteral("youtubeGameMid"))).toString());
-	auto studioName = std::make_shared<QString>(local->value(editorKey(QStringLiteral("youtubeGameName"))).toString());
-	auto pendingStudio = std::make_shared<QHash<QString, QString>>();
-	auto foundGames = std::make_shared<QHash<QString, QJsonArray>>();
-	auto saveResults = std::make_shared<QHash<QString, QString>>();
-	auto initialTitle = std::make_shared<bool>(local->contains(editorKey(QStringLiteral("title"))));
-	auto initialDescription = std::make_shared<bool>(local->contains(editorKey(QStringLiteral("description"))));
-	auto initialGame = std::make_shared<bool>(local->contains(editorKey(QStringLiteral("game"))));
+	auto youtubeGaming = std::make_shared<QHash<QString, QString>>();
+	auto pendingGame = std::make_shared<QHash<QString, QJsonObject>>();
+	auto pendingThumbnail = std::make_shared<QHash<QString, QPair<QString, QString>>>();
+	auto report = std::make_shared<QHash<QString, QString>>();
+	auto warnings = std::make_shared<QHash<QString, QString>>();
+	auto firstTitle = std::make_shared<bool>(local->contains(key(QStringLiteral("title"))));
+	auto firstDescription = std::make_shared<bool>(local->contains(key(QStringLiteral("description"))));
+	auto firstGame = std::make_shared<bool>(local->contains(key(QStringLiteral("game"))));
 
-	const auto renderRemote = [=] {
-		QStringList lines;
-		for (const auto &entry : gateway->accounts()) {
-			const QJsonObject data = remote->value(entry.id);
-			const QString prefix = platformTitle(entry.platform) + QStringLiteral(" · ") + entry.displayName();
-			if (data.isEmpty()) { lines << prefix + QStringLiteral(": данные не загружены"); continue; }
-			const QString actualTitle = data.value(QStringLiteral("title")).toString();
-			QString message = actualTitle.isEmpty()
-				? QStringLiteral("название не вернулось из API")
-				: actualTitle == title->text().trimmed()
-				? QStringLiteral("название совпадает")
-				: QStringLiteral("другое название: «%1»").arg(brief(actualTitle));
-			if (entry.platform != QStringLiteral("kick")) {
-				const QString actualDescription = data.value(QStringLiteral("description")).toString();
-				if (!actualDescription.isEmpty() && actualDescription != description->toPlainText())
-					message += QStringLiteral("; описание отличается");
-			}
-			const auto *choice = categoryChoices->value(entry.platform);
-			const QString actualCategory = data.value(QStringLiteral("categoryId")).toVariant().toString();
-			if (choice && !actualCategory.isEmpty() && actualCategory != QStringLiteral("0") &&
-			    actualCategory != choice->currentData().toString())
-				message += QStringLiteral("; категория на площадке: %1")
-					.arg(data.value(QStringLiteral("categoryName")).toString(actualCategory));
-			lines << prefix + QStringLiteral(": ") + message;
-		}
-		remoteState->setText(lines.join(QLatin1Char('\n')));
+	const auto youtubeAccount = [=] {
+		for (const auto &entry : gateway->accounts())
+			if (entry.platform == QStringLiteral("youtube")) return entry;
+		return StreamAccount{};
 	};
+	const auto resolveVideo = [=](const QString &accountId) {
+		const QString explicitId = youtubeEvent->currentData().toString();
+		if (!explicitId.isEmpty()) return explicitId;
+		return youtubeIds->value(accountId);
+	};
+	const auto useGamingCategory = [=] {
+		const QString label = youtubeGaming->value(youtubeAccount().id);
+		if (game->text().trimmed().isEmpty() || label.isEmpty()) return;
+		choose(categories->value(QStringLiteral("youtube")), QStringLiteral("20"), label);
+		local->setValue(key(QStringLiteral("youtubeCategory")), QStringLiteral("20"));
+		local->setValue(key(QStringLiteral("youtubeCategoryName")), label);
+		flush->start();
+	};
+	const auto clearMappings = [=] {
+		game->setProperty("xinkxYoutubeMid", QString{});
+		game->setProperty("xinkxYoutubeGameName", QString{});
+		local->remove(key(QStringLiteral("youtubeGameMid")));
+		local->remove(key(QStringLiteral("youtubeGameName")));
+		for (const auto &provider : {QStringLiteral("twitch"), QStringLiteral("kick"), QStringLiteral("youtube")}) {
+			choose(categories->value(provider), {}, {});
+			local->remove(key(provider + QStringLiteral("Category")));
+			local->remove(key(provider + QStringLiteral("CategoryName")));
+		}
+	};
+	const auto regenerateSuggestions = [=] {
+		QStringList names;
+		for (const auto &entries : *catalogs)
+			for (const auto &value : entries) {
+				const QJsonObject item = value.toObject();
+				const QString name = item.value(QStringLiteral("title")).toString(
+					item.value(QStringLiteral("name")).toString());
+				if (name.isEmpty()) continue;
+				bool exists = false;
+				for (const auto &other : names)
+					if (other.compare(name, Qt::CaseInsensitive) == 0) { exists = true; break; }
+				if (!exists) names << name;
+			}
+		names.sort(Qt::CaseInsensitive);
+		model->setStringList(names);
+		if (game->hasFocus() && !names.isEmpty()) {
+			completer->setCompletionPrefix(game->text());
+			completer->complete();
+		}
+		QStringList sources;
+		for (const auto &provider : {QStringLiteral("twitch"), QStringLiteral("kick"), QStringLiteral("youtube")})
+			if (!catalogs->value(provider).isEmpty()) sources << platformTitle(provider);
+		QStringList mapped;
+		if (!game->text().trimmed().isEmpty()) {
+			for (const auto &provider : {QStringLiteral("twitch"), QStringLiteral("kick")}) {
+				const auto *combo = categories->value(provider);
+				mapped << platformTitle(provider) + QStringLiteral(": ") +
+					(combo->currentData().toString().isEmpty() ? QStringLiteral("не сопоставлена") : combo->currentText());
+			}
+			mapped << QStringLiteral("YouTube: ") + (game->property("xinkxYoutubeMid").toString().isEmpty()
+				? QStringLiteral("не сопоставлена") : game->property("xinkxYoutubeGameName").toString());
+		}
+		gameStatus->setText((sources.isEmpty()
+			? QStringLiteral("Игр не найдено либо источник недоступен")
+			: QStringLiteral("Найдены игры: ") + sources.join(QStringLiteral(" / "))) +
+			(mapped.isEmpty() ? QString{} : QStringLiteral("\n") + mapped.join(QStringLiteral(" · "))));
+	};
+	const auto matchProvider = [=](const QString &provider, const QString &requested) {
+		const QString name = requested.trimmed();
+		if (name.isEmpty()) return;
+		QString id;
+		QString selectedName;
+		for (const auto &value : catalogs->value(provider)) {
+			const QJsonObject item = value.toObject();
+			const QString label = provider == QStringLiteral("youtube")
+				? item.value(QStringLiteral("title")).toString() : item.value(QStringLiteral("name")).toString();
+			if (label.compare(name, Qt::CaseInsensitive)) continue;
+			const QString found = provider == QStringLiteral("youtube") ? item.value(QStringLiteral("mid")).toString()
+				: item.value(QStringLiteral("id")).toVariant().toString();
+			if (found.isEmpty() || found == QStringLiteral("0")) continue;
+			// Never guess between multiple IDs for the same visible name.
+			if (!id.isEmpty() && id != found) return;
+			id = found;
+			selectedName = label;
+		}
+		if (id.isEmpty()) return;
+		if (provider == QStringLiteral("youtube")) {
+			game->setProperty("xinkxYoutubeMid", id);
+			game->setProperty("xinkxYoutubeGameName", selectedName);
+			local->setValue(key(QStringLiteral("youtubeGameMid")), id);
+			local->setValue(key(QStringLiteral("youtubeGameName")), selectedName);
+			useGamingCategory();
+		} else {
+			choose(categories->value(provider), id, selectedName);
+			local->setValue(key(provider + QStringLiteral("Category")), id);
+			local->setValue(key(provider + QStringLiteral("CategoryName")), selectedName);
+		}
+		flush->start();
+	};
+	const auto assignGame = [=](const QString &value) {
+		const QString name = value.trimmed();
+		if (name.isEmpty()) return;
+		clearMappings();
+		game->setText(name);
+		for (const auto &provider : {QStringLiteral("twitch"), QStringLiteral("kick"), QStringLiteral("youtube")})
+			matchProvider(provider, name);
+		useGamingCategory();
+		regenerateSuggestions();
+	};
+	QObject::connect(completer, qOverload<const QString &>(&QCompleter::activated), panel, assignGame);
+
 	QObject::connect(title, &QLineEdit::textChanged, panel, [=](const QString &value) {
-		*initialTitle = true;
-		local->setValue(editorKey(QStringLiteral("title")), value);
-		localFlush->start();
-		renderRemote();
+		*firstTitle = true;
+		local->setValue(key(QStringLiteral("title")), value);
+		flush->start();
 	});
 	QObject::connect(description, &QPlainTextEdit::textChanged, panel, [=] {
-		*initialDescription = true;
-		local->setValue(editorKey(QStringLiteral("description")), description->toPlainText());
-		localFlush->start();
-		renderRemote();
+		*firstDescription = true;
+		local->setValue(key(QStringLiteral("description")), description->toPlainText());
+		flush->start();
 	});
 	QObject::connect(game, &QLineEdit::textChanged, panel, [=](const QString &value) {
-		*initialGame = true;
-		if (value != *studioName) {
-			studioMid->clear();
-			local->remove(editorKey(QStringLiteral("youtubeGameMid")));
-		}
-		local->setValue(editorKey(QStringLiteral("game")), value);
-		localFlush->start();
+		*firstGame = true;
+		local->setValue(key(QStringLiteral("game")), value);
+		flush->start();
+		QTimer::singleShot(0, panel, regenerateSuggestions);
 	});
-	QObject::connect(game, &QLineEdit::returnPressed, search, &QPushButton::click);
-	auto *searchDebounce = new QTimer(panel);
-	searchDebounce->setSingleShot(true);
-	searchDebounce->setInterval(700);
-	QObject::connect(game, &QLineEdit::textEdited, panel, [=](const QString &value) {
-		if (value.trimmed().size() >= 2) searchDebounce->start();
-		else searchDebounce->stop();
-	});
-	QObject::connect(searchDebounce, &QTimer::timeout, search, &QPushButton::click);
-	QObject::connect(matches, &QComboBox::activated, panel, [=](int index) {
-		if (index <= 0) return;
-		const QString name = matches->itemData(index).toString();
-		QString mid = matches->itemData(index, Qt::UserRole + 1).toString();
-		if (mid.isEmpty()) {
-			for (const auto &candidate : foundGames->value(QStringLiteral("youtube"))) {
-				const auto item = candidate.toObject();
-				if (item.value(QStringLiteral("title")).toString().compare(name, Qt::CaseInsensitive) == 0) {
-					mid = item.value(QStringLiteral("mid")).toString();
-					break;
-				}
-			}
-		}
-		if (name.isEmpty()) return;
-		*studioName = name;
-		*studioMid = mid;
-		game->setText(name);
-		local->setValue(editorKey(QStringLiteral("youtubeGameName")), name);
-		local->setValue(editorKey(QStringLiteral("youtubeGameMid")), mid);
-		for (const auto &platform : {QStringLiteral("twitch"), QStringLiteral("kick")}) {
-			const QJsonArray entries = foundGames->value(platform);
-			bool matched = false;
-			for (const auto &item : entries) {
-				const auto candidate = item.toObject();
-				if (candidate.value(QStringLiteral("name")).toString().compare(name, Qt::CaseInsensitive)) continue;
-				const QString id = candidate.value(QStringLiteral("id")).toVariant().toString();
-				if (id.isEmpty() || id == QStringLiteral("0")) continue;
-				selectCategory(categoryChoices->value(platform), id, name);
-				local->setValue(editorKey(platform + QStringLiteral("Category")), id);
-				local->setValue(editorKey(platform + QStringLiteral("CategoryName")), name);
-				matched = true;
-				break;
-			}
-			if (!matched) {
-				selectCategory(categoryChoices->value(platform), {}, {});
-				local->remove(editorKey(platform + QStringLiteral("Category")));
-				local->remove(editorKey(platform + QStringLiteral("CategoryName")));
-			}
-		}
-		if (!mid.isEmpty()) {
-			selectCategory(youtubeCategory, QStringLiteral("20"), QStringLiteral("Видеоигры"));
-			local->setValue(editorKey(QStringLiteral("youtubeCategory")), QStringLiteral("20"));
-			local->setValue(editorKey(QStringLiteral("youtubeCategoryName")), QStringLiteral("Видеоигры"));
-		}
-		localFlush->start();
-	});
-	QObject::connect(search, &QPushButton::clicked, panel, [=] {
-		const QString name = game->text().trimmed();
-		if (name.size() < 2) return;
-		matches->clear();
-		matches->addItem(QStringLiteral("Выберите найденную игру"), QString{});
-		matches->setVisible(true);
-		foundGames->clear();
-		for (const auto &entry : gateway->accounts())
-			if (entry.platform != QStringLiteral("youtube"))
-				gateway->searchCategories(entry.id, name);
-		QString selectedChannel;
-		for (const auto &entry : gateway->accounts())
-			if (entry.id == youtubeAccount->currentData().toString()) selectedChannel = entry.providerId;
-		if (studio->isReadyFor(selectedChannel)) {
-			const QString eventId = broadcast->currentData().toString();
-			studio->searchGames(eventId, name);
-		}
-		status->setText(QStringLiteral("Ищем «%1» на доступных площадках…").arg(name));
+	QObject::connect(game, &QLineEdit::textEdited, panel, [=] {
+		clearMappings();
+		useGamingCategory();
+		flush->start();
 	});
 
-	const auto chosenYoutube = [youtubeAccount] { return youtubeAccount->currentData().toString(); };
-	const auto youtubeChannel = [=] {
+	const auto search = [=] {
+		const QString query = game->text().trimmed();
+		if (query.size() < 2) return;
+		catalogs->clear();
+		model->setStringList({});
 		for (const auto &account : gateway->accounts())
-			if (account.id == chosenYoutube()) return account.providerId;
-		return QString{};
+			if (account.platform == QStringLiteral("twitch") || account.platform == QStringLiteral("kick"))
+				gateway->searchCategories(account.id, query);
+		const auto account = youtubeAccount();
+		if (studio->isReadyFor(account.providerId)) studio->searchGames(resolveVideo(account.id), query);
+		gameStatus->setText(QStringLiteral("Поиск «%1»…").arg(query));
 	};
-	QObject::connect(studioLogin, &QPushButton::clicked, panel, [studio] { studio->openLogin(); });
-	QObject::connect(studioCheck, &QPushButton::clicked, panel, [=] {
-		studio->connectChannel(youtubeChannel());
+	auto *searchDelay = new QTimer(panel);
+	searchDelay->setSingleShot(true);
+	searchDelay->setInterval(700);
+	QObject::connect(game, &QLineEdit::textEdited, panel, [=](const QString &value) {
+		if (value.trimmed().size() >= 2) searchDelay->start();
+		else searchDelay->stop();
+	});
+	QObject::connect(searchDelay, &QTimer::timeout, panel, search);
+	QObject::connect(game, &QLineEdit::returnPressed, panel, [=] {
+		const QString value = game->text().trimmed();
+		for (const auto &name : model->stringList())
+			if (name.compare(value, Qt::CaseInsensitive) == 0) { assignGame(name); return; }
+		search();
+	});
+
+	QObject::connect(gateway, &ChatGateway::categoryResults, panel, [=](const QString &id, const QJsonArray &items) {
+		QString provider;
+		for (const auto &account : gateway->accounts()) if (account.id == id) provider = account.platform;
+		if (provider == QStringLiteral("youtube")) {
+			for (const auto &value : items) {
+				const auto item = value.toObject();
+				if (item.value(QStringLiteral("id")).toVariant().toString() != QStringLiteral("20")) continue;
+				(*youtubeGaming)[id] = item.value(QStringLiteral("name")).toString();
+				useGamingCategory();
+				break;
+			}
+			return;
+		}
+		if (provider != QStringLiteral("twitch") && provider != QStringLiteral("kick")) return;
+		(*catalogs)[provider] = items;
+		matchProvider(provider, game->text());
+		regenerateSuggestions();
+	});
+	QObject::connect(studio, &YouTubeStudioBridge::gamesFound, panel, [=](const QString &query, const QJsonArray &items) {
+		if (query.compare(game->text().trimmed(), Qt::CaseInsensitive)) return;
+		(*catalogs)[QStringLiteral("youtube")] = items;
+		matchProvider(QStringLiteral("youtube"), game->text());
+		regenerateSuggestions();
 	});
 	QObject::connect(studio, &YouTubeStudioBridge::status, panel, [=](const QString &message, bool ready) {
 		studioState->setText(message);
 		studioState->setStyleSheet(ready ? QStringLiteral("color: #70d9b2") : QStringLiteral("color: #ecb16d"));
-		if (ready && !broadcast->currentData().toString().isEmpty())
-			studio->getSelectedGame(broadcast->currentData().toString());
+		studioConnect->setText(ready ? QStringLiteral("Подключена") : QStringLiteral("Подключить Studio"));
+		if (ready && game->text().trimmed().size() >= 2) searchDelay->start();
 	});
-	QObject::connect(studio, &YouTubeStudioBridge::gamesFound, panel,
-		[=](const QString &query, const QJsonArray &found) {
-			if (query.compare(game->text().trimmed(), Qt::CaseInsensitive)) return;
-			(*foundGames)[QStringLiteral("youtube")] = found;
-			for (const auto &value : found) {
-				const auto item = value.toObject();
-				const QString name = item.value(QStringLiteral("title")).toString();
-				const QString mid = item.value(QStringLiteral("mid")).toString();
-				if (name.isEmpty() || mid.isEmpty()) continue;
-				matches->addItem(QStringLiteral("%1 · YouTube").arg(name), name);
-				matches->setItemData(matches->count() - 1, mid, Qt::UserRole + 1);
-			}
-			studioState->setText(QStringLiteral("Найдено игр YouTube: %1").arg(found.size()));
-		});
-	QObject::connect(studio, &YouTubeStudioBridge::gameRead, panel, [=](const QString &, const QString &name) {
-		if (name.isEmpty()) return;
-		studioState->setText(name.compare(game->text().trimmed(), Qt::CaseInsensitive) == 0
-			? QStringLiteral("YouTube Studio: игра совпадает — %1").arg(name)
-			: QStringLiteral("YouTube Studio: выбрана другая игра — %1").arg(name));
+	QObject::connect(studioConnect, &QPushButton::clicked, panel, [=] {
+		const auto account = youtubeAccount();
+		if (studio->isReadyFor(account.providerId)) return;
+		if (studio->hasProfile()) studio->connectChannel(account.providerId);
+		else studio->openLogin();
 	});
-	QObject::connect(studio, &YouTubeStudioBridge::gameSaved, panel,
-		[=](const QString &, const QString &message, bool success) {
-			studioState->setText(message);
-			studioState->setStyleSheet(success ? QStringLiteral("color: #70d9b2") : QStringLiteral("color: #ecb16d"));
-		});
-	const auto showYoutube = [=] {
-		const QString id = chosenYoutube();
-		if (id.isEmpty()) return;
-		const QJsonObject data = remote->value(id);
-		const QSignalBlocker broadcastBlock(broadcast);
-		const QSignalBlocker streamBlock(stream);
-		QString oldBroadcast = *shownYoutube == id ? broadcast->currentData().toString() : QString{};
-		if (oldBroadcast.isEmpty()) oldBroadcast = youtubeIds->value(id,
-				local->value(editorKey(QStringLiteral("youtubeEvent-")) + id).toString());
-		*shownYoutube = id;
-		const QString oldStream = stream->currentData().toString();
-		broadcast->clear();
-		for (const auto &row : data.value(QStringLiteral("broadcasts")).toArray()) {
-			const auto item = row.toObject();
-			broadcast->addItem(item.value(QStringLiteral("title")).toString(),
-				item.value(QStringLiteral("id")).toString());
-		}
-		QString target = oldBroadcast;
-		if (broadcast->findData(target) < 0) target = data.value(QStringLiteral("id")).toString();
-		if (const int index = broadcast->findData(target); index >= 0) broadcast->setCurrentIndex(index);
-		if (!broadcast->currentData().toString().isEmpty())
-			(*youtubeIds)[id] = broadcast->currentData().toString();
-		stream->clear();
-		for (const auto &row : data.value(QStringLiteral("streams")).toArray()) {
-			const auto item = row.toObject();
-			stream->addItem(item.value(QStringLiteral("title")).toString(),
-				item.value(QStringLiteral("id")).toString());
-		}
-		if (const int index = stream->findData(oldStream); index >= 0) stream->setCurrentIndex(index);
-	};
-	QObject::connect(youtubeAccount, &QComboBox::currentIndexChanged, panel, showYoutube);
-	QObject::connect(broadcast, &QComboBox::activated, panel, [=](int index) {
-		if (index < 0 || chosenYoutube().isEmpty()) return;
-		const QString id = chosenYoutube();
-		const QString eventId = broadcast->itemData(index).toString();
-		(*youtubeIds)[id] = eventId;
-		local->setValue(editorKey(QStringLiteral("youtubeEvent-")) + id, eventId);
-		localFlush->start();
-		gateway->inspectBroadcast(id, eventId);
-		if (studio->isReadyFor(youtubeChannel())) studio->getSelectedGame(eventId);
-	});
-
-	QObject::connect(gateway, &ChatGateway::categoryResults, panel, [=](const QString &id, const QJsonArray &entries) {
-		QString platform;
-		for (const auto &entry : gateway->accounts()) if (entry.id == id) platform = entry.platform;
-		auto *choice = categoryChoices->value(platform);
-		if (!choice) return;
-		if (platform == QStringLiteral("twitch") || platform == QStringLiteral("kick")) {
-			(*foundGames)[platform] = entries;
-			for (const auto &entry : entries) {
-				const QString label = entry.toObject().value(QStringLiteral("name")).toString();
-				if (!label.isEmpty() && matches->isVisible())
-					matches->addItem(QStringLiteral("%1 · %2").arg(label, platformTitle(platform)), label);
-			}
-		}
-		const QString before = choice->currentData().toString();
-		const QString beforeName = choice->currentText();
-		int exact = -1;
-		{
-			const QSignalBlocker blocked(choice);
-			choice->clear();
-			choice->addItem(QStringLiteral("Не выбрана"), QString{});
-			for (const auto &entry : entries) {
-				const auto item = entry.toObject();
-				const QString itemId = item.value(QStringLiteral("id")).toVariant().toString();
-				const QString label = item.value(QStringLiteral("name")).toString();
-				if (itemId.isEmpty() || label.isEmpty()) continue;
-				choice->addItem(label, itemId);
-				if (platform != QStringLiteral("youtube") &&
-				    label.compare(game->text().trimmed(), Qt::CaseInsensitive) == 0) exact = choice->count() - 1;
-			}
-			if (!before.isEmpty()) selectCategory(choice, before, beforeName);
-			else if (exact >= 0) choice->setCurrentIndex(exact);
-		}
-		if (before.isEmpty() && exact >= 0) {
-			local->setValue(editorKey(platform + QStringLiteral("Category")), choice->currentData().toString());
-			local->setValue(editorKey(platform + QStringLiteral("CategoryName")), choice->currentText());
-			localFlush->start();
-		}
-		renderRemote();
+	QObject::connect(studio, &YouTubeStudioBridge::gameSaved, panel, [=](const QString &, const QString &message, bool success) {
+		studioState->setText(message);
+		studioState->setStyleSheet(success ? QStringLiteral("color: #70d9b2") : QStringLiteral("color: #ecb16d"));
 	});
 
 	QObject::connect(gateway, &ChatGateway::broadcastInfo, panel, [=](const QString &id, const QJsonObject &info) {
-		(*remote)[id] = info;
 		const QString platform = info.value(QStringLiteral("platform")).toString();
 		const QString actualTitle = info.value(QStringLiteral("title")).toString();
 		const QString actualDescription = info.value(QStringLiteral("description")).toString();
 		const QString actualGame = info.value(QStringLiteral("categoryName")).toString();
-		if (!*initialTitle && !actualTitle.isEmpty()) title->setText(actualTitle);
-		if (!*initialDescription && !actualDescription.isEmpty()) description->setPlainText(actualDescription);
-		if (!*initialGame && platform != QStringLiteral("youtube") && !actualGame.isEmpty())
-			game->setText(actualGame);
-		auto *choice = categoryChoices->value(platform);
-		const QString actualCategory = info.value(QStringLiteral("categoryId")).toVariant().toString();
-		if (choice && !actualCategory.isEmpty() && actualCategory != QStringLiteral("0") &&
-		    choice->currentData().toString().isEmpty()) {
-			const QString label = actualGame.isEmpty() ? QStringLiteral("Категория %1").arg(actualCategory) : actualGame;
-			selectCategory(choice, actualCategory, label);
-			local->setValue(editorKey(platform + QStringLiteral("Category")), actualCategory);
-			local->setValue(editorKey(platform + QStringLiteral("CategoryName")), label);
-			localFlush->start();
+		if (platform != QStringLiteral("twitch") && platform != QStringLiteral("kick") &&
+		    platform != QStringLiteral("youtube")) return;
+		if (!*firstTitle && !actualTitle.isEmpty()) title->setText(actualTitle);
+		if (!*firstDescription && !actualDescription.isEmpty()) description->setPlainText(actualDescription);
+		if (!*firstGame && platform == QStringLiteral("twitch") && !actualGame.isEmpty()) game->setText(actualGame);
+		if (platform != QStringLiteral("youtube")) {
+			const QString actualId = info.value(QStringLiteral("categoryId")).toVariant().toString();
+			if (!actualId.isEmpty() && categories->value(platform)->currentData().toString().isEmpty())
+				choose(categories->value(platform), actualId, actualGame);
+			return;
 		}
-		if (platform == QStringLiteral("youtube")) {
-			const QString eventId = info.value(QStringLiteral("id")).toString();
-			if (!eventId.isEmpty() && !youtubeIds->contains(id)) (*youtubeIds)[id] = eventId;
-			if (id == chosenYoutube()) showYoutube();
+		const QString selectedId = info.value(QStringLiteral("id")).toString();
+		if (selectedId.isEmpty()) youtubeIds->remove(id);
+		else (*youtubeIds)[id] = selectedId;
+		const QSignalBlocker blocked(youtubeEvent);
+		const QString previously = youtubeEvent->currentData().toString();
+		youtubeEvent->clear();
+		youtubeEvent->addItem(QStringLiteral("Автоматически"), QString{});
+		for (const auto &entry : info.value(QStringLiteral("broadcasts")).toArray()) {
+			const auto item = entry.toObject();
+			youtubeEvent->addItem(item.value(QStringLiteral("title")).toString(), item.value(QStringLiteral("id")).toString());
 		}
-		renderRemote();
+		if (const int index = youtubeEvent->findData(previously); index > 0) youtubeEvent->setCurrentIndex(index);
 	});
 
 	QObject::connect(gateway, &ChatGateway::broadcastResult, panel, [=](const QString &id, const QString &message, bool success) {
 		writeDiagnostic(QStringLiteral("broadcast:%1:%2").arg(id, success ? QStringLiteral("ok") : QStringLiteral("error")), message);
-		(*saveResults)[id] = message;
-		QStringList statuses;
-		for (const auto &entry : gateway->accounts())
-			if (saveResults->contains(entry.id)) statuses << saveResults->value(entry.id);
-		status->setText(statuses.join(QLatin1Char('\n')));
-		status->setStyleSheet(success ? QStringLiteral("color: #70d9b2") : QStringLiteral("color: #ecb16d"));
+		(*report)[id] = message + warnings->value(id);
+		QStringList lines;
+		for (const auto &account : gateway->accounts())
+			if (report->contains(account.id)) lines << report->value(account.id);
+		status->setText(lines.join(QLatin1Char('\n')));
 		if (success) gateway->inspectBroadcast(id, youtubeIds->value(id));
 	});
+	QObject::connect(gateway, &ChatGateway::thumbnailUpdated, panel, [=](const QString &, const QString &message, bool) {
+		status->setText(status->text() + QLatin1Char('\n') + message);
+	});
 	QObject::connect(gateway, &ChatGateway::youtubeMetadataUpdated, panel, [=](const QString &id, bool success) {
-		if (pendingStudio->contains(id)) {
-			const QString videoId = pendingStudio->take(id);
-			if (success && studio->isReadyFor(youtubeChannel()))
-				studio->setGame(videoId, *studioMid, *studioName);
-			else if (!success)
-				studioState->setText(QStringLiteral("YouTube: игра не обновлена, официальный API вернул ошибку"));
+		if (pendingGame->contains(id)) {
+			const QJsonObject pending = pendingGame->take(id);
+			if (success && studio->isReadyFor(youtubeAccount().providerId))
+				studio->setGame(pending.value(QStringLiteral("video")).toString(),
+					pending.value(QStringLiteral("mid")).toString(), pending.value(QStringLiteral("title")).toString());
+			else if (!success) studioState->setText(QStringLiteral("YouTube: игра не изменена — ошибка метаданных"));
+		}
+		if (pendingThumbnail->contains(id)) {
+			const auto selection = pendingThumbnail->take(id);
+			gateway->uploadYouTubeThumbnail(id, selection.first, selection.second);
 		}
 	});
-	QObject::connect(read, &QPushButton::clicked, panel, [=] {
-		gateway->reloadAccounts();
-		for (const auto &entry : gateway->accounts()) {
-			const QString eventId = entry.id == chosenYoutube() && !broadcast->currentData().toString().isEmpty()
-				? broadcast->currentData().toString() : youtubeIds->value(entry.id);
-			gateway->inspectBroadcast(entry.id, eventId);
-			if (entry.platform == QStringLiteral("youtube")) gateway->searchCategories(entry.id, QString{});
-		}
-		status->setStyleSheet({});
-		status->setText(QStringLiteral("Получаем фактические данные, локальные поля не изменяются…"));
-	});
-	QObject::connect(apply, &QPushButton::clicked, panel, [=] {
-		local->sync();
-		saveResults->clear();
-		int sent = 0;
-		for (const auto &entry : gateway->accounts()) {
-			const QString eventId = entry.id == chosenYoutube() && !broadcast->currentData().toString().isEmpty()
-				? broadcast->currentData().toString()
-				: youtubeIds->value(entry.id, entry.platform == QStringLiteral("youtube")
-				? local->value(editorKey(QStringLiteral("youtubeEvent-")) + entry.id).toString() : QString{});
-			if (entry.platform == QStringLiteral("youtube") && eventId.isEmpty()) {
-				status->setText(QStringLiteral("YouTube: нет выбранной трансляции — её данные не изменены"));
-				continue;
+
+	// Installed after GameProfilesWorkspace connects the same button; that
+	// handler persists the chosen profile and activates its OBS scene first.
+	QTimer::singleShot(0, panel, [=] {
+		QObject::connect(save, &QPushButton::clicked, panel, [=] {
+			if (save->property("xinkxProfileReady").isValid() &&
+			    !save->property("xinkxProfileReady").toBool()) return;
+			local->sync();
+			report->clear();
+			warnings->clear();
+			int sent = 0;
+			const QString name = game->text().trimmed();
+			const QString gameMid = game->property("xinkxYoutubeMid").toString();
+			for (const auto &entry : gateway->accounts()) {
+				if (entry.platform != QStringLiteral("twitch") && entry.platform != QStringLiteral("kick") &&
+				    entry.platform != QStringLiteral("youtube")) continue;
+				QString eventId;
+				if (entry.platform == QStringLiteral("youtube")) {
+					eventId = resolveVideo(entry.id);
+					if (eventId.isEmpty()) {
+						(*report)[entry.id] = QStringLiteral("YouTube: нет однозначного эфира — данные не изменены");
+						continue;
+					}
+					(*youtubeIds)[entry.id] = eventId;
+					if (!gameMid.isEmpty() && studio->isReadyFor(entry.providerId))
+						(*pendingGame)[entry.id] = QJsonObject{
+							{QStringLiteral("video"), eventId}, {QStringLiteral("mid"), gameMid},
+							{QStringLiteral("title"), game->property("xinkxYoutubeGameName").toString().isEmpty()
+								? name : game->property("xinkxYoutubeGameName").toString()}};
+					if (!thumbnail->text().isEmpty()) (*pendingThumbnail)[entry.id] = {eventId, thumbnail->text()};
+				}
+				QString category = categories->value(entry.platform)->currentData().toString();
+				if (!name.isEmpty() && category.isEmpty() && entry.platform != QStringLiteral("youtube"))
+					(*warnings)[entry.id] = QStringLiteral(" · игра не найдена на площадке, категория не менялась");
+				if (entry.platform == QStringLiteral("youtube") && !name.isEmpty() &&
+				    !youtubeGaming->value(entry.id).isEmpty()) {
+					category = QStringLiteral("20"); // verified against videoCategories.list at startup
+				}
+				if (entry.platform == QStringLiteral("youtube") && !name.isEmpty() && gameMid.isEmpty())
+					(*warnings)[entry.id] = QStringLiteral(" · конкретная игра не сопоставлена с YouTube Studio");
+				else if (entry.platform == QStringLiteral("youtube") && !name.isEmpty() && !studio->isReadyFor(entry.providerId))
+					(*warnings)[entry.id] = QStringLiteral(" · YouTube Studio не подключена: игра не менялась");
+				if (entry.platform == QStringLiteral("youtube") && category != QStringLiteral("20"))
+					pendingGame->remove(entry.id); // game field requires Gaming category
+				gateway->updateBroadcast(entry.id, eventId, title->text(), description->toPlainText(), category);
+				++sent;
 			}
-			auto *choice = categoryChoices->value(entry.platform);
-			if (entry.platform == QStringLiteral("youtube")) (*youtubeIds)[entry.id] = eventId;
-			if (entry.platform == QStringLiteral("youtube") && !studioMid->isEmpty() &&
-			    game->text().trimmed() == *studioName && studio->isReadyFor(entry.providerId))
-				(*pendingStudio)[entry.id] = eventId;
-			else if (entry.platform == QStringLiteral("youtube") && !game->text().trimmed().isEmpty())
-				studioState->setText(QStringLiteral("Конкретная игра YouTube не изменена: выберите игру из поиска и проверьте сессию Studio"));
-			const QString category = entry.platform == QStringLiteral("youtube") &&
-				!studioMid->isEmpty() && game->text().trimmed() == *studioName
-				? QStringLiteral("20") : choice ? choice->currentData().toString() : QString{};
-			gateway->updateBroadcast(entry.id, eventId, title->text(), description->toPlainText(), category);
-			++sent;
-		}
-		if (sent) status->setText(QStringLiteral("Сохраняем данные на %1 площадках…").arg(sent));
+			QStringList notes;
+			for (const auto &value : *report) notes << value;
+			status->setText(QStringLiteral("Обновляются площадки: %1").arg(sent) +
+				(notes.isEmpty() ? QString{} : QStringLiteral("\n") + notes.join(QLatin1Char('\n'))));
+			if (!thumbnail->text().isEmpty())
+				status->setText(status->text() + QStringLiteral("\nTwitch/Kick: API загрузки произвольного превью недоступен; файл сохранён локально."));
+		});
 	});
-	QObject::connect(create, &QPushButton::clicked, panel, [=] {
-		gateway->createYouTubeBroadcast(chosenYoutube(), title->text(), description->toPlainText(),
-			youtubeCategory->currentData().toString());
-		status->setText(QStringLiteral("Создаём эфир и RTMP-поток YouTube…"));
-	});
-	QObject::connect(bind, &QPushButton::clicked, panel, [=] {
-		gateway->bindYouTubeStream(chosenYoutube(), broadcast->currentData().toString(),
-			stream->currentData().toString());
-		status->setText(QStringLiteral("Привязываем видеопоток YouTube…"));
-	});
-	renderRemote();
-	// Retrieve YouTube's full regional category catalog at startup, without
-	// relying on the text of a game search or a selected account.
-	for (const auto &entry : accounts) {
+
+	for (const auto &entry : gateway->accounts()) {
 		gateway->inspectBroadcast(entry.id);
-		if (entry.platform == QStringLiteral("youtube")) gateway->searchCategories(entry.id, QString{});
+		if (entry.platform == QStringLiteral("youtube")) gateway->searchCategories(entry.id, {});
 	}
-	if (youtubeAccount->count() > 0)
-		QTimer::singleShot(1800, panel, [=] { studio->connectChannel(youtubeChannel()); });
+	if (!youtubeAccount().id.isEmpty() && studio->hasProfile())
+		QTimer::singleShot(2000, panel, [=] { studio->connectChannel(youtubeAccount().providerId); });
 
 	auto *scroll = new QScrollArea(dock);
 	scroll->setObjectName(QStringLiteral("xinkxBroadcastEditor"));

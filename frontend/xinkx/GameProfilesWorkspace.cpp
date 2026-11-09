@@ -6,14 +6,11 @@
 #include <obs-frontend-api.h>
 #include <obs.h>
 
-#include <QCheckBox>
 #include <QComboBox>
-#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
-#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -25,22 +22,12 @@
 #include <QScrollArea>
 #include <QSettings>
 #include <QSignalBlocker>
-#include <QTimer>
 #include <QVBoxLayout>
 
 #include <memory>
 
 namespace xinkx {
 namespace {
-
-QString currentScene()
-{
-	obs_source_t *source = obs_frontend_get_current_scene();
-	if (!source) return {};
-	const QString name = QString::fromUtf8(obs_source_get_name(source));
-	obs_source_release(source);
-	return name;
-}
 
 QString currentSceneId()
 {
@@ -53,16 +40,9 @@ QString currentSceneId()
 
 bool useScene(const QString &uuid, const QString &legacyName)
 {
+	if (uuid.isEmpty() && legacyName.isEmpty()) return true;
 	obs_source_t *source = uuid.isEmpty() ? nullptr : obs_get_source_by_uuid(uuid.toUtf8().constData());
 	if (!source && !legacyName.isEmpty()) source = obs_get_source_by_name(legacyName.toUtf8().constData());
-	if (!source && uuid.isEmpty()) {
-		// Migration of old name-only profiles after a rename: unambiguous only
-		// when the collection contains one scene.
-		obs_frontend_source_list scenes{};
-		obs_frontend_get_scenes(&scenes);
-		if (scenes.sources.num == 1) source = obs_source_get_ref(scenes.sources.array[0]);
-		obs_frontend_source_list_free(&scenes);
-	}
 	if (!source) return false;
 	const bool valid = obs_source_get_type(source) == OBS_SOURCE_TYPE_SCENE;
 	if (valid) obs_frontend_set_current_scene(source);
@@ -72,19 +52,9 @@ bool useScene(const QString &uuid, const QString &legacyName)
 
 void refreshScenes(QComboBox *select)
 {
-	const QString before = select->currentData().toString();
+	const QString previous = select->currentData().toString();
 	obs_frontend_source_list scenes{};
 	obs_frontend_get_scenes(&scenes);
-	bool unchanged = select->count() == static_cast<int>(scenes.sources.num) + 1;
-	if (unchanged) for (size_t i = 0; i < scenes.sources.num; ++i) {
-		obs_source_t *source = scenes.sources.array[i];
-		if (select->itemText(static_cast<int>(i) + 1) != QString::fromUtf8(obs_source_get_name(source)) ||
-		    select->itemData(static_cast<int>(i) + 1).toString() != QString::fromUtf8(obs_source_get_uuid(source))) {
-			unchanged = false;
-			break;
-		}
-	}
-	if (unchanged) { obs_frontend_source_list_free(&scenes); return; }
 	const QSignalBlocker blocked(select);
 	select->clear();
 	select->addItem(QStringLiteral("Сцена не привязана"), QString{});
@@ -94,9 +64,7 @@ void refreshScenes(QComboBox *select)
 			QString::fromUtf8(obs_source_get_uuid(source)));
 	}
 	obs_frontend_source_list_free(&scenes);
-	int index = select->findData(before);
-	if (index < 0) index = select->findText(before); // Old name-based selections.
-	if (index >= 0) select->setCurrentIndex(index);
+	if (const int index = select->findData(previous); index >= 0) select->setCurrentIndex(index);
 }
 
 QString filePath()
@@ -110,23 +78,23 @@ bool validProfiles(const QJsonObject &root)
 		return false;
 	const auto profiles = root.value(QStringLiteral("profiles")).toArray();
 	if (profiles.size() > 60) return false;
-	for (const auto &item : profiles) {
-		const auto profile = item.toObject();
-		if (!item.isObject() || profile.value(QStringLiteral("name")).toString().trimmed().isEmpty()) return false;
+	for (const auto &entry : profiles) {
+		if (!entry.isObject()) return false;
+		const auto object = entry.toObject();
+		if (object.value(QStringLiteral("name")).toString().trimmed().isEmpty()) return false;
 		for (const auto &key : {"name", "scene", "title", "description", "twitchCategory", "kickCategory",
-			"youtubeCategory", "youtubeBroadcast"}) {
-			if (!profile.value(QString::fromLatin1(key)).isString() ||
-			    profile.value(QString::fromLatin1(key)).toString().size() > 5000)
-				return false;
+			"youtubeCategory", "youtubeBroadcast"})
+			if (!object.value(QString::fromLatin1(key)).isString() ||
+			    object.value(QString::fromLatin1(key)).toString().size() > 5000) return false;
+		for (const auto &key : {"twitchCategoryName", "kickCategoryName", "youtubeCategoryName",
+			"youtubeBroadcastName", "youtubeGameMid", "thumbnail"}) {
+			const auto item = object.value(QString::fromLatin1(key));
+			if (!item.isUndefined() && (!item.isString() || item.toString().size() > 1024)) return false;
 		}
-		for (const auto &key : {"twitchCategoryName", "kickCategoryName", "youtubeCategoryName", "youtubeBroadcastName"}) {
-			const auto value = profile.value(QString::fromLatin1(key));
-			if (!value.isUndefined() && (!value.isString() || value.toString().size() > 200)) return false;
+		for (const auto &key : {"sceneUuid", "game"}) {
+			const auto item = object.value(QString::fromLatin1(key));
+			if (!item.isUndefined() && (!item.isString() || item.toString().size() > 160)) return false;
 		}
-		const auto sceneUuid = profile.value(QStringLiteral("sceneUuid"));
-		if (!sceneUuid.isUndefined() && (!sceneUuid.isString() || sceneUuid.toString().size() > 100)) return false;
-		const auto game = profile.value(QStringLiteral("game"));
-		if (!game.isUndefined() && (!game.isString() || game.toString().size() > 150)) return false;
 	}
 	return true;
 }
@@ -140,36 +108,39 @@ bool storeProfiles(const QJsonObject &root)
 	return bytes.size() < 65536 && file.write(bytes) == bytes.size() && file.commit();
 }
 
-void selectSaved(QComboBox *combo, const QString &id, const QString &label)
+void selectSaved(QComboBox *combo, const QString &id, const QString &name)
 {
-	if (!combo) return;
 	const QSignalBlocker blocked(combo);
-	const int found = combo->findData(id);
-	if (found >= 0) { combo->setCurrentIndex(found); return; }
-	if (!id.isEmpty()) combo->addItem(label.isEmpty() ? QStringLiteral("Сохранённая категория") : label, id);
-	combo->setCurrentIndex(id.isEmpty() ? 0 : combo->count() - 1);
+	int index = combo->findData(id);
+	if (index < 0 && !id.isEmpty()) {
+		combo->addItem(name.isEmpty() ? QStringLiteral("Сохранённая категория") : name, id);
+		index = combo->count() - 1;
+	}
+	combo->setCurrentIndex(index >= 0 ? index : 0);
 }
 
 } // namespace
 
 void installGameProfilesWorkspace(OBSBasic *mainWindow)
 {
-	auto *gateway = mainWindow->findChild<ChatGateway *>(QStringLiteral("xinkxChatGateway"));
 	auto *dock = studioDock(mainWindow);
-	if (!gateway || !dock) return;
+	if (!dock) return;
 	auto *scroll = dock->findChild<QScrollArea *>(QStringLiteral("xinkxBroadcastEditor"));
 	if (!scroll || !scroll->widget()) return;
 	auto *panel = scroll->widget();
-	auto *editorLayout = qobject_cast<QVBoxLayout *>(panel->layout());
-	if (!editorLayout) return;
+	auto *editor = qobject_cast<QVBoxLayout *>(panel->layout());
+	if (!editor) return;
 	auto *title = panel->findChild<QLineEdit *>(QStringLiteral("xinkxBroadcastTitle"));
 	auto *description = panel->findChild<QPlainTextEdit *>(QStringLiteral("xinkxBroadcastDescription"));
 	auto *game = panel->findChild<QLineEdit *>(QStringLiteral("xinkxBroadcastGame"));
+	auto *thumbnail = panel->findChild<QLineEdit *>(QStringLiteral("xinkxBroadcastThumbnail"));
 	auto *twitch = panel->findChild<QComboBox *>(QStringLiteral("xinkxBroadcastTwitchGame"));
 	auto *kick = panel->findChild<QComboBox *>(QStringLiteral("xinkxBroadcastKickGame"));
 	auto *youtube = panel->findChild<QComboBox *>(QStringLiteral("xinkxBroadcastYouTubeGame"));
-	auto *youtubeBroadcast = panel->findChild<QComboBox *>(QStringLiteral("xinkxBroadcastYouTubeEvent"));
-	if (!title || !description || !game || !twitch || !kick || !youtube || !youtubeBroadcast) return;
+	auto *youtubeEvent = panel->findChild<QComboBox *>(QStringLiteral("xinkxBroadcastYouTubeEvent"));
+	auto *save = panel->findChild<QPushButton *>(QStringLiteral("xinkxBroadcastSave"));
+	if (!title || !description || !game || !thumbnail || !twitch || !kick || !youtube || !youtubeEvent || !save)
+		return;
 
 	auto root = std::make_shared<QJsonObject>(QJsonObject{{QStringLiteral("version"), 1},
 		{QStringLiteral("automatic"), false}, {QStringLiteral("profiles"), QJsonArray{}}});
@@ -178,87 +149,79 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 		const auto json = QJsonDocument::fromJson(file.readAll());
 		if (json.isObject() && validProfiles(json.object())) *root = json.object();
 	}
+	// Explicit Save is the only action that writes remotely. Migrate legacy
+	// automatic scene-change profiles to manual mode without deleting them.
+	root->insert(QStringLiteral("automatic"), false);
 
-	auto *group = new QGroupBox(QStringLiteral("Профили эфира"), panel);
+	auto *group = new QGroupBox(QStringLiteral("Профиль эфира"), panel);
 	auto *layout = new QVBoxLayout(group);
-	layout->setSpacing(5);
+	layout->setSpacing(6);
 	auto *form = new QFormLayout();
 	auto *profiles = new QComboBox(group);
-	form->addRow(QStringLiteral("Заготовка"), profiles);
+	form->addRow(QStringLiteral("Профиль"), profiles);
 	auto *name = new QLineEdit(group);
 	name->setMaxLength(120);
-	name->setPlaceholderText(QStringLiteral("Название заготовки"));
-	form->addRow(QStringLiteral("Имя профиля"), name);
+	name->setPlaceholderText(QStringLiteral("Название профиля"));
+	form->addRow(QStringLiteral("Имя"), name);
 	auto *scene = new QComboBox(group);
 	form->addRow(QStringLiteral("Сцена OBS"), scene);
 	layout->addLayout(form);
-	auto *buttons = new QGridLayout();
-	auto *newProfile = new QPushButton(QStringLiteral("Новый"), group);
-	auto *saveProfile = new QPushButton(QStringLiteral("Сохранить"), group);
-	auto *removeProfile = new QPushButton(QStringLiteral("Удалить"), group);
-	auto *activate = new QPushButton(QStringLiteral("Применить"), group);
-	buttons->addWidget(newProfile, 0, 0);
-	buttons->addWidget(saveProfile, 0, 1);
-	buttons->addWidget(removeProfile, 1, 0);
-	buttons->addWidget(activate, 1, 1);
-	layout->addLayout(buttons);
-	auto *automatic = new QCheckBox(QStringLiteral("Обновлять площадки при переключении на привязанную сцену"), group);
-	automatic->setChecked(root->value(QStringLiteral("automatic")).toBool());
-	layout->addWidget(automatic);
-	auto *note = new QLabel(QStringLiteral("Один редактор для текущего эфира и профиля. "
-		"«Сохранить» запоминает поля ниже; «Применить» переключает сцену и обновляет площадки."), group);
+	auto *actions = new QHBoxLayout();
+	auto *newProfile = new QPushButton(QStringLiteral("Новый профиль"), group);
+	auto *removeProfile = new QPushButton(QStringLiteral("Удалить профиль"), group);
+	actions->addWidget(newProfile);
+	actions->addWidget(removeProfile);
+	layout->addLayout(actions);
+	auto *note = new QLabel(QStringLiteral("«Сохранить» внизу сохранит профиль, активирует его сцену и обновит площадки."), group);
 	note->setWordWrap(true);
 	layout->addWidget(note);
-	editorLayout->insertWidget(0, group);
+	editor->insertWidget(0, group);
 
 	const auto reload = [=] {
-		const int selected = profiles->currentIndex();
+		const int previous = profiles->currentData().toInt();
 		const QSignalBlocker blocked(profiles);
 		profiles->clear();
 		profiles->addItem(QStringLiteral("Новый профиль"), -1);
 		const auto list = root->value(QStringLiteral("profiles")).toArray();
 		for (int i = 0; i < list.size(); ++i)
 			profiles->addItem(list.at(i).toObject().value(QStringLiteral("name")).toString(), i);
-		profiles->setCurrentIndex(qBound(0, selected, profiles->count() - 1));
+		const int index = profiles->findData(previous);
+		profiles->setCurrentIndex(index >= 0 ? index : 0);
 	};
 	const auto load = [=] {
-		const int index = profiles->currentData().toInt();
 		const auto list = root->value(QStringLiteral("profiles")).toArray();
+		const int index = profiles->currentData().toInt();
+		refreshScenes(scene);
 		if (index < 0 || index >= list.size()) {
 			name->clear();
-			refreshScenes(scene);
 			if (const int current = scene->findData(currentSceneId()); current >= 0) scene->setCurrentIndex(current);
 			return;
 		}
 		const auto profile = list.at(index).toObject();
 		name->setText(profile.value(QStringLiteral("name")).toString());
-		refreshScenes(scene);
-		const QString storedUuid = profile.value(QStringLiteral("sceneUuid")).toString();
-		int s = storedUuid.isEmpty() ? -1 : scene->findData(storedUuid);
-		if (s < 0) s = scene->findText(profile.value(QStringLiteral("scene")).toString());
-		if (profile.value(QStringLiteral("scene")).toString().isEmpty() && storedUuid.isEmpty()) s = 0;
-		if (s < 0 && scene->count() == 2) s = 1;
-		if (s >= 0)
-			scene->setCurrentIndex(s);
+		const QString uuid = profile.value(QStringLiteral("sceneUuid")).toString();
+		int sceneIndex = uuid.isEmpty() ? -1 : scene->findData(uuid);
+		if (sceneIndex < 0) sceneIndex = scene->findText(profile.value(QStringLiteral("scene")).toString());
+		if (sceneIndex >= 0) scene->setCurrentIndex(sceneIndex);
 		title->setText(profile.value(QStringLiteral("title")).toString());
 		description->setPlainText(profile.value(QStringLiteral("description")).toString());
-		if (profile.contains(QStringLiteral("game"))) game->setText(profile.value(QStringLiteral("game")).toString());
+		game->setText(profile.value(QStringLiteral("game")).toString());
+		const QString mid = profile.value(QStringLiteral("youtubeGameMid")).toString();
+		game->setProperty("xinkxYoutubeMid", mid);
+		game->setProperty("xinkxYoutubeGameName", game->text());
+		thumbnail->setText(profile.value(QStringLiteral("thumbnail")).toString());
 		selectSaved(twitch, profile.value(QStringLiteral("twitchCategory")).toString(),
 			profile.value(QStringLiteral("twitchCategoryName")).toString());
 		selectSaved(kick, profile.value(QStringLiteral("kickCategory")).toString(),
 			profile.value(QStringLiteral("kickCategoryName")).toString());
 		selectSaved(youtube, profile.value(QStringLiteral("youtubeCategory")).toString(),
 			profile.value(QStringLiteral("youtubeCategoryName")).toString());
-		QSettings local(studioSettingsPath(), QSettings::IniFormat);
-		for (const auto &platform : {QStringLiteral("twitch"), QStringLiteral("kick"), QStringLiteral("youtube")}) {
-			const QString prefix = QStringLiteral("broadcast/editor/") + platform;
-			local.setValue(prefix + QStringLiteral("Category"), profile.value(platform + QStringLiteral("Category")).toString());
-			local.setValue(prefix + QStringLiteral("CategoryName"),
-				profile.value(platform + QStringLiteral("CategoryName")).toString());
-		}
-		local.sync();
-		selectSaved(youtubeBroadcast, profile.value(QStringLiteral("youtubeBroadcast")).toString(),
+		selectSaved(youtubeEvent, profile.value(QStringLiteral("youtubeBroadcast")).toString(),
 			profile.value(QStringLiteral("youtubeBroadcastName")).toString());
+		QSettings settings(studioSettingsPath(), QSettings::IniFormat);
+		settings.setValue(QStringLiteral("broadcast/editor/youtubeGameMid"), mid);
+		settings.setValue(QStringLiteral("broadcast/editor/youtubeGameName"), game->text());
+		settings.sync();
 	};
 	QObject::connect(profiles, &QComboBox::currentIndexChanged, group, load);
 	reload();
@@ -269,88 +232,57 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 		refreshScenes(scene);
 		if (const int current = scene->findData(currentSceneId()); current >= 0) scene->setCurrentIndex(current);
 	});
-	QObject::connect(saveProfile, &QPushButton::clicked, group, [=] {
-		if (name->text().trimmed().isEmpty()) { note->setText(QStringLiteral("Укажи название профиля")); return; }
-		QJsonArray list = root->value(QStringLiteral("profiles")).toArray();
-		const QJsonObject profile{{QStringLiteral("name"), name->text().trimmed()},
-			{QStringLiteral("scene"), scene->currentData().toString().isEmpty() ? QString{} : scene->currentText()},
-			{QStringLiteral("sceneUuid"), scene->currentData().toString()},
-			{QStringLiteral("title"), title->text()},
-			{QStringLiteral("description"), description->toPlainText().left(5000)},
-			{QStringLiteral("game"), game->text().left(150)},
-			{QStringLiteral("twitchCategory"), twitch->currentData().toString()},
-			{QStringLiteral("twitchCategoryName"), twitch->currentText()},
-			{QStringLiteral("kickCategory"), kick->currentData().toString()},
-			{QStringLiteral("kickCategoryName"), kick->currentText()},
-			{QStringLiteral("youtubeCategory"), youtube->currentData().toString()},
-			{QStringLiteral("youtubeCategoryName"), youtube->currentText()},
-			{QStringLiteral("youtubeBroadcast"), youtubeBroadcast->currentData().toString()},
-			{QStringLiteral("youtubeBroadcastName"), youtubeBroadcast->currentText()}};
-		const int index = profiles->currentData().toInt();
-		if (index >= 0 && index < list.size()) list.replace(index, profile);
-		else list.append(profile);
-		root->insert(QStringLiteral("profiles"), list);
-		if (!storeProfiles(*root)) { note->setText(QStringLiteral("Ошибка сохранения game-profiles.json")); return; }
-		reload();
-		profiles->setCurrentIndex(index >= 0 && index < list.size() ? index + 1 : list.size());
-		note->setText(QStringLiteral("Профиль сохранён"));
-	});
 	QObject::connect(removeProfile, &QPushButton::clicked, group, [=] {
 		const int index = profiles->currentData().toInt();
 		QJsonArray list = root->value(QStringLiteral("profiles")).toArray();
 		if (index < 0 || index >= list.size()) return;
 		list.removeAt(index);
 		root->insert(QStringLiteral("profiles"), list);
-		if (!storeProfiles(*root)) { note->setText(QStringLiteral("Ошибка удаления")); return; }
+		if (!storeProfiles(*root)) { note->setText(QStringLiteral("Ошибка удаления профиля")); return; }
 		reload();
 		profiles->setCurrentIndex(0);
 	});
-	const auto apply = [=](const QJsonObject &profile) {
-		const QString target = profile.value(QStringLiteral("scene")).toString();
-		const QString uuid = profile.value(QStringLiteral("sceneUuid")).toString();
-		if ((!target.isEmpty() || !uuid.isEmpty()) && !useScene(uuid, target)) {
-			note->setText(QStringLiteral("Не найдена сцена: ") + target);
+	QObject::connect(save, &QPushButton::clicked, group, [=] {
+		save->setProperty("xinkxProfileReady", true);
+		const QString uuid = scene->currentData().toString();
+		if (!useScene(uuid, uuid.isEmpty() ? QString{} : scene->currentText())) {
+			save->setProperty("xinkxProfileReady", false);
+			note->setText(QStringLiteral("Сцена не найдена — профиль не сохранён"));
 			return;
 		}
-		for (const auto &account : gateway->accounts()) {
-			const QString field = account.platform == QStringLiteral("twitch") ? QStringLiteral("twitchCategory") :
-				account.platform == QStringLiteral("kick") ? QStringLiteral("kickCategory") :
-				QStringLiteral("youtubeCategory");
-			const QString category = profile.value(field).toString();
-			const QString heading = profile.value(QStringLiteral("title")).toString();
-			const QString description = profile.value(QStringLiteral("description")).toString();
-			if (category.isEmpty() && heading.isEmpty() && description.isEmpty()) continue;
-			gateway->updateBroadcast(account.id, profile.value(QStringLiteral("youtubeBroadcast")).toString(),
-				heading, account.platform == QStringLiteral("kick") ? QString{} : description, category);
-		}
-	};
-	QObject::connect(activate, &QPushButton::clicked, group, [=] {
+		// A blank new profile is an ad-hoc broadcast. Do not create one silently.
+		if (name->text().trimmed().isEmpty()) return;
+		QJsonArray list = root->value(QStringLiteral("profiles")).toArray();
+		const QJsonObject profile{
+			{QStringLiteral("name"), name->text().trimmed()},
+			{QStringLiteral("scene"), scene->currentData().toString().isEmpty() ? QString{} : scene->currentText()},
+			{QStringLiteral("sceneUuid"), scene->currentData().toString()},
+			{QStringLiteral("title"), title->text()},
+			{QStringLiteral("description"), description->toPlainText().left(5000)},
+			{QStringLiteral("game"), game->text().left(150)},
+			{QStringLiteral("thumbnail"), thumbnail->text()},
+			{QStringLiteral("youtubeGameMid"), game->property("xinkxYoutubeMid").toString()},
+			{QStringLiteral("twitchCategory"), twitch->currentData().toString()},
+			{QStringLiteral("twitchCategoryName"), twitch->currentText()},
+			{QStringLiteral("kickCategory"), kick->currentData().toString()},
+			{QStringLiteral("kickCategoryName"), kick->currentText()},
+			{QStringLiteral("youtubeCategory"), youtube->currentData().toString()},
+			{QStringLiteral("youtubeCategoryName"), youtube->currentText()},
+			{QStringLiteral("youtubeBroadcast"), youtubeEvent->currentData().toString()},
+			{QStringLiteral("youtubeBroadcastName"), youtubeEvent->currentText()}};
 		const int index = profiles->currentData().toInt();
-		const QJsonArray list = root->value(QStringLiteral("profiles")).toArray();
-		if (index >= 0 && index < list.size()) apply(list.at(index).toObject());
-	});
-	QObject::connect(automatic, &QCheckBox::toggled, group, [=](bool checked) {
-		root->insert(QStringLiteral("automatic"), checked);
-		if (!storeProfiles(*root)) note->setText(QStringLiteral("Не удалось сохранить автоматизацию"));
-	});
-	auto sceneWatch = std::make_shared<QString>(currentSceneId());
-	auto *timer = new QTimer(group);
-	timer->setInterval(850);
-	QObject::connect(timer, &QTimer::timeout, group, [=] {
-		// Refresh the display names even when OBS renames a scene in place.
-		refreshScenes(scene);
-		const QString current = currentSceneId();
-		if (current == *sceneWatch) return;
-		*sceneWatch = current;
-		if (!root->value(QStringLiteral("automatic")).toBool() || current.isEmpty()) return;
-		for (const auto &entry : root->value(QStringLiteral("profiles")).toArray()) {
-			const QJsonObject profile = entry.toObject();
-			if (profile.value(QStringLiteral("sceneUuid")).toString() == current ||
-			    (profile.value(QStringLiteral("sceneUuid")).toString().isEmpty() &&
-			     profile.value(QStringLiteral("scene")).toString() == currentScene())) { apply(profile); break; }
+		if (index >= 0 && index < list.size()) list.replace(index, profile);
+		else list.append(profile);
+		root->insert(QStringLiteral("profiles"), list);
+		if (!storeProfiles(*root)) {
+			save->setProperty("xinkxProfileReady", false);
+			note->setText(QStringLiteral("Ошибка сохранения game-profiles.json"));
+			return;
 		}
+		reload();
+		profiles->setCurrentIndex(index >= 0 && index < list.size() ? index + 1 : list.size());
+		note->setText(QStringLiteral("Профиль сохранён"));
 	});
-	timer->start();
 }
 
 } // namespace xinkx

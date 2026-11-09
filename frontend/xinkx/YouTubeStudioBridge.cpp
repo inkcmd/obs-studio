@@ -96,6 +96,11 @@ bool YouTubeStudioBridge::isReadyFor(const QString &channelId) const
 	return socketReady && !channelId.isEmpty() && verifiedChannel == channelId;
 }
 
+bool YouTubeStudioBridge::hasProfile() const
+{
+	return !profile.isEmpty() && QFileInfo::exists(QDir(profile).filePath(QStringLiteral("Local State")));
+}
+
 void YouTubeStudioBridge::openLogin()
 {
 	if (executable.isEmpty() || profile.isEmpty()) {
@@ -114,7 +119,7 @@ void YouTubeStudioBridge::openLogin()
 		notify(QStringLiteral("Не удалось открыть браузер YouTube Studio"));
 		return;
 	}
-	notify(QStringLiteral("Войдите в YouTube Studio. Закройте ВСЕ окна этого профиля и нажмите «Проверить сессию»."));
+	notify(QStringLiteral("Войдите в YouTube Studio. Закройте все окна профиля XINKX и снова нажмите «Подключить Studio»."));
 }
 
 void YouTubeStudioBridge::connectChannel(const QString &channelId)
@@ -128,7 +133,7 @@ void YouTubeStudioBridge::connectChannel(const QString &channelId)
 		return;
 	}
 	if (executable.isEmpty() || profile.isEmpty()) { notify(QStringLiteral("Chrome/Edge или конфигурация XINKX недоступны")); return; }
-	if (!QFileInfo::exists(QDir(profile).filePath(QStringLiteral("Local State")))) {
+	if (!hasProfile()) {
 		notify(QStringLiteral("Сначала выполните вход через «Подключить YouTube Studio»"));
 		return;
 	}

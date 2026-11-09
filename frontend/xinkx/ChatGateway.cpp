@@ -10,6 +10,8 @@
 #include <utility/RemoteTextThread.hpp>
 
 #include <QDateTime>
+#include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QRegularExpression>
@@ -472,19 +474,35 @@ void ChatGateway::inspectBroadcast(const QString &id, const QString &youtubeBroa
 			if (!result.ok) { emit broadcastResult(id, result.error, false); return; }
 			QJsonArray broadcasts;
 			QJsonObject selected;
+			QJsonArray active;
+			QJsonArray boundToConfiguredStream;
+			const QString configuredStream = known.value(id).youtubeStreamId;
 			for (const auto &entry : result.json.value(QStringLiteral("items")).toArray()) {
 				const auto item = entry.toObject();
 				const auto status = item.value(QStringLiteral("status")).toObject();
-				if (status.value(QStringLiteral("lifeCycleStatus")) == QStringLiteral("complete")) continue;
+				const QString lifecycle = status.value(QStringLiteral("lifeCycleStatus")).toString();
+				if (lifecycle == QStringLiteral("complete") || lifecycle == QStringLiteral("revoked")) continue;
 				const auto snippet = item.value(QStringLiteral("snippet")).toObject();
 				const QJsonObject value{{QStringLiteral("id"), item.value(QStringLiteral("id"))},
 					{QStringLiteral("title"), snippet.value(QStringLiteral("title"))},
 					{QStringLiteral("description"), snippet.value(QStringLiteral("description"))},
 					{QStringLiteral("categoryId"), snippet.value(QStringLiteral("categoryId"))},
+					{QStringLiteral("lifecycle"), lifecycle},
 					{QStringLiteral("boundStreamId"), item.value(QStringLiteral("contentDetails")).toObject()
 						.value(QStringLiteral("boundStreamId"))}};
 				broadcasts.append(value);
-				if (selected.isEmpty() || value.value(QStringLiteral("id")) == youtubeBroadcastId) selected = value;
+				if (!youtubeBroadcastId.isEmpty() && value.value(QStringLiteral("id")) == youtubeBroadcastId)
+					selected = value;
+				if (lifecycle == QStringLiteral("live") || lifecycle == QStringLiteral("liveStarting"))
+					active.append(value);
+				if (!configuredStream.isEmpty() &&
+				    value.value(QStringLiteral("boundStreamId")).toString() == configuredStream)
+					boundToConfiguredStream.append(value);
+			}
+			if (selected.isEmpty()) {
+				if (active.size() == 1) selected = active.first().toObject();
+				else if (boundToConfiguredStream.size() == 1) selected = boundToConfiguredStream.first().toObject();
+				else if (broadcasts.size() == 1) selected = broadcasts.first().toObject();
 			}
 			const auto streamsUrl = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveStreams"),
 				{{QStringLiteral("part"), QStringLiteral("id,snippet,status")},
@@ -521,7 +539,7 @@ void ChatGateway::searchCategories(const QString &id, const QString &query)
 		QStringLiteral("https://api.kick.com/public/v2/categories"),
 		{{QStringLiteral("name"), name}, {QStringLiteral("limit"), QStringLiteral("20")}});
 	else url = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/videoCategories"),
-		{{QStringLiteral("part"), QStringLiteral("snippet")}, {QStringLiteral("regionCode"), QStringLiteral("US")},
+		{{QStringLiteral("part"), QStringLiteral("snippet")}, {QStringLiteral("id"), QStringLiteral("20")},
 		 {QStringLiteral("hl"), QStringLiteral("ru")}});
 	authorized(id, url, {}, [this, id](const HttpResult &result) {
 		if (!result.ok) { emit broadcastResult(id, result.error, false); return; }
@@ -534,14 +552,54 @@ void ChatGateway::searchCategories(const QString &id, const QString &query)
 			const auto label = account.platform == QStringLiteral("youtube") ?
 				obj.value(QStringLiteral("snippet")).toObject().value(QStringLiteral("title")).toString()
 				: obj.value(QStringLiteral("name")).toString();
-			// YouTube's catalog is a complete list of broad video categories.
-			// Searching for a game must not filter any of these categories out.
+			// In the shared *game* editor only the assignable Gaming category
+			// matters. The public API doesn't expose Studio's detailed game catalog.
 			const auto value = obj.value(QStringLiteral("id")).toVariant().toString();
 			if (!value.isEmpty() && !label.isEmpty()) categories.append(QJsonObject{
 				{QStringLiteral("id"), value}, {QStringLiteral("name"), label}});
 			if (categories.size() >= 50) break;
 		}
 		emit categoryResults(id, categories);
+	});
+}
+
+void ChatGateway::uploadYouTubeThumbnail(const QString &id, const QString &videoId, const QString &path)
+{
+	if (known.value(id).platform != QStringLiteral("youtube") ||
+	    !QRegularExpression(QStringLiteral("^[A-Za-z0-9_-]{11}$")).match(videoId).hasMatch()) {
+		emit thumbnailUpdated(id, QStringLiteral("YouTube: не выбран эфир для обложки"), false);
+		return;
+	}
+	const QFileInfo info(path);
+	if (!info.isFile() || info.size() > 20 * 1024 * 1024 || info.size() < 100) {
+		emit thumbnailUpdated(id, QStringLiteral("Превью: файл не найден или больше 20 МБ"), false);
+		return;
+	}
+	QFile file(path);
+	if (!file.open(QIODevice::ReadOnly)) {
+		emit thumbnailUpdated(id, QStringLiteral("Превью: нет доступа к файлу"), false);
+		return;
+	}
+	const QByteArray image = file.readAll();
+	const bool jpeg = image.startsWith(QByteArray::fromHex("ffd8ff"));
+	const bool png = image.startsWith(QByteArray::fromHex("89504e470d0a1a0a"));
+	if (!jpeg && !png) {
+		emit thumbnailUpdated(id, QStringLiteral("Превью: поддерживаются PNG и JPEG"), false);
+		return;
+	}
+	const QByteArray mime = jpeg ? QByteArray("image/jpeg") : QByteArray("image/png");
+	const QString endpoint = apiUrl(QStringLiteral("https://www.googleapis.com/upload/youtube/v3/thumbnails/set"),
+		{{QStringLiteral("videoId"), videoId}, {QStringLiteral("uploadType"), QStringLiteral("media")}});
+	tokenFor(id, [this, id, endpoint, image, mime](const QString &token) {
+		if (token.isEmpty()) {
+			emit thumbnailUpdated(id, QStringLiteral("YouTube: OAuth недоступен для загрузки превью"), false);
+			return;
+		}
+		request(id, endpoint, image, mime, [this, id](const HttpResult &result) {
+			emit thumbnailUpdated(id, result.ok
+				? QStringLiteral("YouTube: обложка загружена через thumbnails.set")
+				: QStringLiteral("YouTube: обложка не загружена: ") + result.error, result.ok);
+		}, true, {}, QByteArray("POST"));
 	});
 }
 
@@ -607,9 +665,31 @@ void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
 			const auto endpoint = QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts?part=snippet");
 			const auto body = QJsonObject{{QStringLiteral("id"), broadcastId},
 				{QStringLiteral("snippet"), snippet}};
-			jsonApi(id, endpoint, QByteArray("PUT"), body, [this, id](const HttpResult &reply) {
-				emit broadcastResult(id, reply.ok ? QStringLiteral("YouTube: параметры эфира сохранены") : reply.error, reply.ok);
-				emit youtubeMetadataUpdated(id, reply.ok);
+			jsonApi(id, endpoint, QByteArray("PUT"), body, [this, id, broadcastId, category](const HttpResult &reply) {
+				if (!reply.ok) {
+					emit broadcastResult(id, QStringLiteral("YouTube: ") + reply.error, false);
+					emit youtubeMetadataUpdated(id, false);
+					return;
+				}
+				if (category.isEmpty()) {
+					emit broadcastResult(id, QStringLiteral("YouTube: параметры эфира сохранены"), true);
+					emit youtubeMetadataUpdated(id, true);
+					return;
+				}
+				// A 2xx update alone does not prove that the actual video has
+				// the intended category (in particular, Gaming = 20).
+				const QString verify = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/videos"),
+					{{QStringLiteral("part"), QStringLiteral("snippet")}, {QStringLiteral("id"), broadcastId}});
+				authorized(id, verify, {}, [this, id, category](const HttpResult &check) {
+					const auto videos = check.json.value(QStringLiteral("items")).toArray();
+					const QString actual = videos.isEmpty() ? QString{} : videos.first().toObject()
+						.value(QStringLiteral("snippet")).toObject().value(QStringLiteral("categoryId")).toString();
+					const bool verified = check.ok && actual == category;
+					emit broadcastResult(id, verified ? QStringLiteral("YouTube: категория и параметры проверены через videos.list")
+						: QStringLiteral("YouTube: категория не подтверждена на видео (ожидали %1, получили %2); %3")
+							.arg(category, actual, check.error), verified);
+					emit youtubeMetadataUpdated(id, verified);
+				});
 			});
 		});
 		return;
