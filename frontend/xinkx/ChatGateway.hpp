@@ -96,6 +96,9 @@ private:
 	QHash<QString, StreamAccount> known;
 	QHash<QString, YouTubeState> youtube;
 	QHash<QString, NativeWebSocket *> twitch;
+	QHash<QString, QSet<QString>> twitchScopes;
+	QSet<QString> twitchPermissionChecks;
+	QSet<QString> twitchOptionalWarnings;
 	QHash<QString, KickState> kick;
 	QHash<QString, NativeWebSocket *> kickSockets;
 	QSet<QString> refreshing;
@@ -116,6 +119,7 @@ private:
 	void subscribeTwitch(const QString &id, const QString &sessionId);
 	void handleTwitchFrame(const QString &id, const QByteArray &frame);
 	void startTwitch(const QString &id);
+	void openTwitchSocket(const QString &id);
 	void startKick(const QString &id);
 	void kickResolveRoom(const QString &id);
 	void kickDiscover(const QString &id);

@@ -1,5 +1,6 @@
 #include "OverlayRuntime.hpp"
 #include "PresentationSettings.hpp"
+#include "StudioWorkspace.hpp"
 
 #include <OBSApp.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -26,6 +27,7 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QSpinBox>
+#include <QTabWidget>
 #include <QHostAddress>
 #include <QTcpSocket>
 #include <QVBoxLayout>
@@ -377,8 +379,9 @@ bool OverlayRuntime::addToScene(OBSBasic *mainWindow, QString *message)
 		*message = QStringLiteral("Выбери сцену OBS");
 		return false;
 	}
-	if (obs_scene_find_source(scene, kSourceName.constData())) {
-		*message = QStringLiteral("Слой XINKX уже есть в выбранной сцене");
+	if (auto *existing = obs_scene_find_source(scene, kSourceName.constData())) {
+		obs_sceneitem_select(existing, true);
+		*message = QStringLiteral("Слой XINKX выделен в предпросмотре OBS. Перемещай и меняй размер мышью");
 		return true;
 	}
 	obs_source_t *source = obs_get_source_by_name(kSourceName.constData());
@@ -407,24 +410,26 @@ bool OverlayRuntime::addToScene(OBSBasic *mainWindow, QString *message)
 		}
 	}
 	OBSData before = OBSBasic::BackupScene(scene);
-	const auto *item = obs_scene_add(scene, source);
+	auto *item = obs_scene_add(scene, source);
 	obs_source_release(source);
 	if (!item) {
 		*message = QStringLiteral("Не удалось добавить источник в сцену");
 		return false;
 	}
+	obs_sceneitem_select(item, true);
 	OBSData after = OBSBasic::BackupScene(scene);
 	mainWindow->CreateSceneUndoRedoAction(QStringLiteral("XINKX: добавить эффекты и события"), before, after);
-	*message = QStringLiteral("Слой XINKX добавлен в сцену · Ctrl+Z для отмены");
+	*message = QStringLiteral("Слой XINKX добавлен и выбран: его размер и позиция меняются в предпросмотре OBS · Ctrl+Z для отмены");
 	return true;
 }
 
 void installOverlayWorkspace(OBSBasic *mainWindow, QDockWidget *sourceInspector)
 {
+	Q_UNUSED(sourceInspector);
 	auto *runtime = new OverlayRuntime(mainWindow);
 	runtime->setObjectName(QStringLiteral("xinkxOverlayRuntime"));
-	auto *dock = new QDockWidget(QStringLiteral("События и эффекты"), mainWindow);
-	dock->setObjectName(QStringLiteral("xinkxEffectsDock"));
+	auto *dock = studioDock(mainWindow);
+	if (!dock) return;
 	auto *content = new QWidget(dock);
 	auto *layout = new QVBoxLayout(content);
 	layout->setContentsMargins(10, 8, 10, 8);
@@ -534,25 +539,19 @@ void installOverlayWorkspace(OBSBasic *mainWindow, QDockWidget *sourceInspector)
 			delete history->takeItem(history->count() - 1);
 		}
 	});
-	dock->setWidget(content);
-	mainWindow->AddDockWidget(dock, Qt::RightDockWidgetArea);
+	studioTabs(mainWindow)->addTab(content, QStringLiteral("Эффекты"));
 	// Qt window geometry is OBS-owned. XINKX only stores its own dock visibility and options.
 	char path[512];
 	const int length = GetAppConfigPath(path, sizeof(path), "xinkx-studio/studio.ini");
-	bool visible = true;
 	if (length > 0 && static_cast<size_t>(length) < sizeof(path)) {
 		QDir().mkpath(QFileInfo(QString::fromUtf8(path)).absolutePath());
 		auto *settings = new QSettings(QString::fromUtf8(path), QSettings::IniFormat, dock);
-		visible = settings->value(QStringLiteral("workspace/effectsVisible"), true).toBool();
 		duration->setValue(settings->value(QStringLiteral("effects/timerSeconds"), 180).toInt());
 		const int index = position->findData(settings->value(QStringLiteral("effects/position"),
 									    QStringLiteral("top-right")));
 		if (index >= 0) {
 			position->setCurrentIndex(index);
 		}
-		QObject::connect(dock, &QDockWidget::visibilityChanged, dock, [settings](bool value) {
-			settings->setValue(QStringLiteral("workspace/effectsVisible"), value);
-		});
 		QObject::connect(duration, &QSpinBox::valueChanged, dock, [settings](int value) {
 			settings->setValue(QStringLiteral("effects/timerSeconds"), value);
 		});
@@ -560,13 +559,6 @@ void installOverlayWorkspace(OBSBasic *mainWindow, QDockWidget *sourceInspector)
 			settings->setValue(QStringLiteral("effects/position"), position->currentData());
 		});
 	}
-	QTimer::singleShot(0, dock, [mainWindow, sourceInspector, dock, visible] {
-		dock->setFloating(false);
-		mainWindow->addDockWidget(Qt::RightDockWidgetArea, dock);
-		mainWindow->tabifyDockWidget(sourceInspector, dock);
-		dock->setVisible(visible);
-		sourceInspector->raise();
-	});
 }
 
 } // namespace xinkx

@@ -1,4 +1,5 @@
 #include "DonationGateway.hpp"
+#include "StudioWorkspace.hpp"
 
 #include "OverlayRuntime.hpp"
 
@@ -10,6 +11,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QTabWidget>
 #include <QVBoxLayout>
 
 namespace xinkx {
@@ -26,8 +28,8 @@ void installDonationWorkspace(OBSBasic *mainWindow)
 					name, amount, message);
 			});
 	}
-	auto *dock = new QDockWidget(QStringLiteral("Донаты"), mainWindow);
-	dock->setObjectName(QStringLiteral("xinkxDonationsDock"));
+	auto *dock = studioDock(mainWindow);
+	if (!dock) return;
 	auto *panel = new QWidget(dock);
 	auto *layout = new QVBoxLayout(panel);
 	layout->setContentsMargins(10, 10, 10, 10);
@@ -71,11 +73,7 @@ void installDonationWorkspace(OBSBasic *mainWindow)
 		[status](const QString &name, const QString &amount, const QString &) {
 			status->setText(QStringLiteral("Донат: %1 · %2").arg(name, amount));
 		});
-	dock->setWidget(panel);
-	mainWindow->AddDockWidget(dock, Qt::RightDockWidgetArea);
-	if (auto *chat = mainWindow->findChild<QDockWidget *>(QStringLiteral("xinkxChatDock")))
-		mainWindow->tabifyDockWidget(chat, dock);
-	dock->show();
+	studioTabs(mainWindow)->addTab(panel, QStringLiteral("Донаты"));
 }
 
 } // namespace xinkx

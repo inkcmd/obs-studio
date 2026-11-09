@@ -1,4 +1,5 @@
 #include "ChatGateway.hpp"
+#include "StudioWorkspace.hpp"
 
 #include <widgets/OBSBasic.hpp>
 
@@ -15,6 +16,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSignalBlocker>
+#include <QTabWidget>
 #include <QVBoxLayout>
 
 #include <memory>
@@ -25,8 +27,8 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 {
 	auto *gateway = mainWindow->findChild<ChatGateway *>(QStringLiteral("xinkxChatGateway"));
 	if (!gateway) return;
-	auto *dock = new QDockWidget(QStringLiteral("Управление эфиром"), mainWindow);
-	dock->setObjectName(QStringLiteral("xinkxBroadcastDock"));
+	auto *dock = studioDock(mainWindow);
+	if (!dock) return;
 	auto *panel = new QWidget(dock);
 	auto *layout = new QVBoxLayout(panel);
 	layout->setContentsMargins(10, 10, 10, 10);
@@ -42,8 +44,10 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 	description->setPlaceholderText(QStringLiteral("YouTube: описание выбранного эфира; Twitch и Kick не поддерживают описание через этот API"));
 	form->addRow(QStringLiteral("Описание"), description);
 	auto *category = new QLineEdit(panel);
-	category->setPlaceholderText(QStringLiteral("ID игры / категории"));
-	form->addRow(QStringLiteral("ID категории"), category);
+	category->hide();
+	auto *categoryName = new QLabel(QStringLiteral("Не выбрана"), panel);
+	categoryName->setWordWrap(true);
+	form->addRow(QStringLiteral("Игра / категория"), categoryName);
 	auto *searchRow = new QHBoxLayout();
 	auto *query = new QLineEdit(panel);
 	query->setPlaceholderText(QStringLiteral("Найти игру или категорию"));
@@ -106,8 +110,10 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 		stream->clear();
 		candidates->clear();
 		category->clear();
+		categoryName->setText(QStringLiteral("Не выбрана"));
 		title->clear();
 		description->clear();
+		if (!selectedId.isEmpty()) gateway->inspectBroadcast(selectedId);
 	};
 	QObject::connect(account, &QComboBox::currentIndexChanged, dock, changePlatform);
 	changePlatform();
@@ -121,7 +127,10 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 	});
 	QObject::connect(query, &QLineEdit::returnPressed, search, &QPushButton::click);
 	QObject::connect(candidates, &QComboBox::activated, dock, [=](int index) {
-		if (index >= 0) category->setText(candidates->itemData(index).toString());
+		if (index >= 0) {
+			category->setText(candidates->itemData(index).toString());
+			categoryName->setText(candidates->itemText(index));
+		}
 	});
 	QObject::connect(broadcast, &QComboBox::activated, dock, [=](int index) {
 		if (index >= 0) {
@@ -143,6 +152,7 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 		title->setText(info.value(QStringLiteral("title")).toString());
 		description->setPlainText(info.value(QStringLiteral("description")).toString());
 		category->setText(info.value(QStringLiteral("categoryId")).toVariant().toString());
+		categoryName->setText(info.value(QStringLiteral("categoryName")).toString(QStringLiteral("Не выбрана")));
 		const auto broadcasts = info.value(QStringLiteral("broadcasts")).toArray();
 		if (!info.value(QStringLiteral("id")).toString().isEmpty())
 			(*youtubeIds)[id] = info.value(QStringLiteral("id")).toString();
@@ -204,11 +214,10 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 	auto *scroll = new QScrollArea(dock);
 	scroll->setWidgetResizable(true);
 	scroll->setWidget(panel);
-	dock->setWidget(scroll);
-	mainWindow->AddDockWidget(dock, Qt::RightDockWidgetArea);
-	if (auto *chat = mainWindow->findChild<QDockWidget *>(QStringLiteral("xinkxChatDock")))
-		mainWindow->tabifyDockWidget(chat, dock);
-	dock->show();
+	auto *tabs = new QTabWidget(dock);
+	tabs->setObjectName(QStringLiteral("xinkxBroadcastTabs"));
+	tabs->addTab(scroll, QStringLiteral("Текущий эфир"));
+	studioTabs(mainWindow)->addTab(tabs, QStringLiteral("Эфир"));
 }
 
 } // namespace xinkx

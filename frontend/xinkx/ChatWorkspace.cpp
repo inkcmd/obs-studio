@@ -1,4 +1,5 @@
 #include "ChatGateway.hpp"
+#include "StudioWorkspace.hpp"
 
 #include <widgets/OBSBasic.hpp>
 
@@ -18,6 +19,7 @@
 #include <QSet>
 #include <QSettings>
 #include <QShortcut>
+#include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -40,9 +42,10 @@ void installChatWorkspace(OBSBasic *mainWindow)
 {
 	auto *gateway = new ChatGateway(mainWindow);
 	gateway->setObjectName(QStringLiteral("xinkxChatGateway"));
-	auto *dock = new QDockWidget(QStringLiteral("Мультичат"), mainWindow);
-	dock->setObjectName(QStringLiteral("xinkxChatDock"));
+	auto *dock = studioDock(mainWindow);
+	if (!dock) return;
 	auto *panel = new QWidget(dock);
+	panel->setObjectName(QStringLiteral("xinkxChatPage"));
 	auto *root = new QVBoxLayout(panel);
 	root->setContentsMargins(9, 8, 9, 8);
 	root->setSpacing(6);
@@ -106,37 +109,6 @@ void installChatWorkspace(OBSBasic *mainWindow)
 		gateway->reloadAccounts();
 		rebuild();
 	});
-	auto *kickRoomRow = new QHBoxLayout();
-	auto *kickSelect = new QComboBox(panel);
-	auto *kickRoom = new QLineEdit(panel);
-	kickRoom->setPlaceholderText(QStringLiteral("Kick chatroom ID (пусто = автоматически)"));
-	kickRoom->setMaxLength(15);
-	auto *kickSave = new QPushButton(QStringLiteral("Комната Kick"), panel);
-	kickRoomRow->addWidget(kickSelect);
-	kickRoomRow->addWidget(kickRoom, 1);
-	kickRoomRow->addWidget(kickSave);
-	root->addLayout(kickRoomRow);
-	auto rebuildKick = [=] {
-		const auto selected = kickSelect->currentData().toString();
-		kickSelect->clear();
-		for (const auto &account : gateway->accounts()) {
-			if (account.platform == QStringLiteral("kick")) kickSelect->addItem(account.displayName(), account.id);
-		}
-		const int index = kickSelect->findData(selected);
-		if (index >= 0) kickSelect->setCurrentIndex(index);
-		kickRoom->setVisible(kickSelect->count() > 0);
-		kickSelect->setVisible(kickSelect->count() > 0);
-		kickSave->setVisible(kickSelect->count() > 0);
-		kickRoom->setText(gateway->kickRoomId(kickSelect->currentData().toString()));
-	};
-	QObject::connect(kickSelect, &QComboBox::currentIndexChanged, dock, [=] {
-		kickRoom->setText(gateway->kickRoomId(kickSelect->currentData().toString()));
-	});
-	QObject::connect(kickSave, &QPushButton::clicked, dock, [=] {
-		gateway->setKickRoomId(kickSelect->currentData().toString(), kickRoom->text());
-	});
-	QObject::connect(refresh, &QPushButton::clicked, dock, rebuildKick);
-	rebuildKick();
 	auto *feed = new QListWidget(panel);
 	feed->setWordWrap(true);
 	feed->setAlternatingRowColors(true);
@@ -215,24 +187,7 @@ void installChatWorkspace(OBSBasic *mainWindow)
 			feed->scrollToBottom();
 		});
 	gateway->reloadAccounts();
-	dock->setWidget(panel);
-	mainWindow->AddDockWidget(dock, Qt::RightDockWidgetArea);
-	bool visible = true;
-	const auto path = studioSettingsPath();
-	if (!path.isEmpty()) {
-		auto *settings = new QSettings(path, QSettings::IniFormat, dock);
-		visible = settings->value(QStringLiteral("workspace/chatVisible"), true).toBool();
-		QObject::connect(dock, &QDockWidget::visibilityChanged, dock, [settings](bool shown) {
-			settings->setValue(QStringLiteral("workspace/chatVisible"), shown);
-		});
-	}
-	QTimer::singleShot(0, dock, [=] {
-		if (auto *effects = mainWindow->findChild<QDockWidget *>(QStringLiteral("xinkxEffectsDock"))) {
-			mainWindow->tabifyDockWidget(effects, dock);
-		}
-		dock->setVisible(visible);
-		dock->raise();
-	});
+	studioTabs(mainWindow)->addTab(panel, QStringLiteral("Чат"));
 }
 
 } // namespace xinkx

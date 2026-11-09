@@ -98,6 +98,19 @@ void ChatGateway::reloadAccounts()
 			updated.insert(account.id, account);
 		}
 	}
+	for (auto it = twitchScopes.begin(); it != twitchScopes.end();) {
+		const auto old = known.value(it.key());
+		const auto next = updated.value(it.key());
+		if (next.id.isEmpty() || next.oauth.accessToken != old.oauth.accessToken ||
+		    next.providerId != old.providerId || next.oauth.clientId != old.oauth.clientId) {
+			twitchPermissionChecks.remove(it.key());
+			for (auto warning = twitchOptionalWarnings.begin(); warning != twitchOptionalWarnings.end();) {
+				if (warning->startsWith(it.key())) warning = twitchOptionalWarnings.erase(warning);
+				else ++warning;
+			}
+			it = twitchScopes.erase(it);
+		} else ++it;
+	}
 	for (auto it = twitch.begin(); it != twitch.end();) {
 		const auto account = updated.value(it.key());
 		if (account.id.isEmpty() || account.oauth.accessToken.isEmpty() ||
@@ -767,6 +780,50 @@ void ChatGateway::startTwitch(const QString &id)
 		nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() + 30000;
 		return;
 	}
+	if (twitchScopes.contains(id)) {
+		if (twitchScopes.value(id).contains(QStringLiteral("user:read:chat"))) openTwitchSocket(id);
+		else nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() + 300000;
+		return;
+	}
+	if (twitchPermissionChecks.contains(id)) return;
+	twitchPermissionChecks.insert(id);
+	tokenFor(id, [this, id](const QString &token) {
+		if (token.isEmpty()) { twitchPermissionChecks.remove(id); return; }
+		request(id, QStringLiteral("https://id.twitch.tv/oauth2/validate"), {}, {},
+			[this, id](const HttpResult &result) {
+				twitchPermissionChecks.remove(id);
+				if (!result.ok) {
+					status(id, QStringLiteral("Twitch: OAuth не прошёл проверку (%1). Переподключи аккаунт").arg(result.error));
+					nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() + 300000;
+					return;
+				}
+				const QString actualUserId = result.json.value(QStringLiteral("user_id")).toString();
+				const QString actualClientId = result.json.value(QStringLiteral("client_id")).toString();
+				QSet<QString> scopes;
+				for (const auto &scope : result.json.value(QStringLiteral("scopes")).toArray()) scopes.insert(scope.toString());
+				twitchScopes[id] = scopes;
+				if (actualUserId != known.value(id).providerId ||
+				    actualClientId != known.value(id).oauth.clientId) {
+					status(id, QStringLiteral("Twitch: OAuth не соответствует пользователю или Client ID. Переподключи аккаунт"));
+					twitchScopes[id].remove(QStringLiteral("user:read:chat"));
+					nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() + 300000;
+					return;
+				}
+				if (!scopes.contains(QStringLiteral("user:read:chat"))) {
+					status(id, QStringLiteral("Twitch: нет права user:read:chat. Отключи и заново подключи OAuth в Настройки → Трансляция"));
+					nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() + 300000;
+					return;
+				}
+				if (!scopes.contains(QStringLiteral("user:write:chat")))
+					emit providerWarning(id, QStringLiteral("Twitch: для отправки сообщений потребуется повторный OAuth с user:write:chat"));
+				openTwitchSocket(id);
+			}, false, {QStringLiteral("Authorization: OAuth %1").arg(token)});
+	});
+}
+
+void ChatGateway::openTwitchSocket(const QString &id)
+{
+	if (twitch.contains(id)) return;
 	status(id, QStringLiteral("Twitch: подключаем EventSub"));
 	twitch[id] = new NativeWebSocket(this, QUrl(QStringLiteral("wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30")),
 		[this, id](const QByteArray &frame) { handleTwitchFrame(id, frame); },
@@ -1019,7 +1076,14 @@ void ChatGateway::subscribeTwitch(const QString &id, const QString &sessionId)
 						status(id, message);
 						nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() + 60000;
 						delete twitch.take(id);
-					} else emit providerWarning(id, message);
+					} else {
+						const QString key = id + (result.status == 403 ? QStringLiteral(":403") : type);
+						if (twitchOptionalWarnings.contains(key)) return;
+						twitchOptionalWarnings.insert(key);
+						emit providerWarning(id, result.status == 403
+							? QStringLiteral("Twitch: часть уведомлений недоступна (403). Проверь разрешения OAuth для подписок, фолловеров и Bits")
+							: message);
+					}
 				}
 				else if (type == QStringLiteral("channel.chat.message")) {
 					status(id, QStringLiteral("Twitch: чат подключён · EventSub"));
@@ -1028,15 +1092,19 @@ void ChatGateway::subscribeTwitch(const QString &id, const QString &sessionId)
 	};
 	subscribe(QStringLiteral("channel.chat.message"), QStringLiteral("1"),
 		{{QStringLiteral("broadcaster_user_id"), userId}, {QStringLiteral("user_id"), userId}});
-	subscribe(QStringLiteral("channel.follow"), QStringLiteral("2"),
+	const auto scopes = twitchScopes.value(id);
+	if (scopes.contains(QStringLiteral("moderator:read:followers"))) subscribe(QStringLiteral("channel.follow"), QStringLiteral("2"),
 		{{QStringLiteral("broadcaster_user_id"), userId}, {QStringLiteral("moderator_user_id"), userId}});
-	subscribe(QStringLiteral("channel.subscribe"), QStringLiteral("1"), {{QStringLiteral("broadcaster_user_id"), userId}});
-	subscribe(QStringLiteral("channel.subscription.message"), QStringLiteral("1"),
+	if (scopes.contains(QStringLiteral("channel:read:subscriptions"))) {
+		subscribe(QStringLiteral("channel.subscribe"), QStringLiteral("1"), {{QStringLiteral("broadcaster_user_id"), userId}});
+		subscribe(QStringLiteral("channel.subscription.message"), QStringLiteral("1"),
 		{{QStringLiteral("broadcaster_user_id"), userId}});
-	subscribe(QStringLiteral("channel.subscription.gift"), QStringLiteral("1"),
+		subscribe(QStringLiteral("channel.subscription.gift"), QStringLiteral("1"),
 		{{QStringLiteral("broadcaster_user_id"), userId}});
+	}
 	subscribe(QStringLiteral("channel.raid"), QStringLiteral("1"), {{QStringLiteral("to_broadcaster_user_id"), userId}});
-	subscribe(QStringLiteral("channel.cheer"), QStringLiteral("1"), {{QStringLiteral("broadcaster_user_id"), userId}});
+	if (scopes.contains(QStringLiteral("bits:read")))
+		subscribe(QStringLiteral("channel.cheer"), QStringLiteral("1"), {{QStringLiteral("broadcaster_user_id"), userId}});
 }
 
 void ChatGateway::handleTwitchFrame(const QString &id, const QByteArray &frame)

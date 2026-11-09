@@ -2,6 +2,7 @@
 
 #include "ChatGateway.hpp"
 #include "OverlayRuntime.hpp"
+#include "StudioWorkspace.hpp"
 
 #include <widgets/OBSBasic.hpp>
 
@@ -17,8 +18,11 @@
 #include <QFormLayout>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QPainter>
 #include <QPlainTextEdit>
@@ -271,8 +275,8 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 	}
 	QObject::connect(settings, &PresentationSettings::changed, streamer, &StreamerOverlay::configure);
 
-	auto *dock = new QDockWidget(QStringLiteral("Оформление и реакции"), mainWindow);
-	dock->setObjectName(QStringLiteral("xinkxPresentationDock"));
+	auto *dock = studioDock(mainWindow);
+	if (!dock) return;
 	auto *panel = new QWidget(dock);
 	auto *layout = new QVBoxLayout(panel);
 	layout->setContentsMargins(10, 10, 10, 10);
@@ -353,7 +357,172 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 	auto *cooldown = numeric(panel, 0, 300000, QStringLiteral(" мс"));
 	form->addRow(QStringLiteral("Общий cooldown (0 = нет)"), cooldown);
 	layout->addLayout(form);
+	auto *rulesTitle = new QLabel(QStringLiteral("Реакции зрителей · без JSON"), panel);
+	rulesTitle->setStyleSheet(QStringLiteral("font-weight:600"));
+	layout->addWidget(rulesTitle);
+	auto *rulesList = new QListWidget(panel);
+	rulesList->setMaximumHeight(150);
+	layout->addWidget(rulesList);
+	auto *ruleButtons = new QHBoxLayout();
+	auto *ruleAdd = new QPushButton(QStringLiteral("Добавить"), panel);
+	auto *ruleEdit = new QPushButton(QStringLiteral("Изменить"), panel);
+	auto *ruleRemove = new QPushButton(QStringLiteral("Удалить"), panel);
+	ruleButtons->addWidget(ruleAdd);
+	ruleButtons->addWidget(ruleEdit);
+	ruleButtons->addWidget(ruleRemove);
+	layout->addLayout(ruleButtons);
 	auto draft = std::make_shared<QJsonObject>(settings->snapshot());
+	auto rules = std::make_shared<QJsonArray>(draft->value(QStringLiteral("reactions")).toArray());
+	auto refreshRules = [=] {
+		const int selected = rulesList->currentRow();
+		rulesList->clear();
+		for (const auto &entry : *rules) {
+			const auto rule = entry.toObject();
+			rulesList->addItem(QStringLiteral("%1 → %2 · %3 · пауза %4 с")
+				.arg(rule.value(QStringLiteral("phrase")).toString(),
+					rule.value(QStringLiteral("effect")).toString(),
+					rule.value(QStringLiteral("enabled")).toBool() ? QStringLiteral("включено") : QStringLiteral("отключено"))
+				.arg(rule.value(QStringLiteral("cooldownMs")).toInt() / 1000));
+		}
+		if (selected >= 0 && selected < rulesList->count()) rulesList->setCurrentRow(selected);
+	};
+	auto editRule = [=](int index) {
+		if (index < 0 && rules->size() >= 12) return;
+		QJsonObject rule = index >= 0 && index < rules->size() ? rules->at(index).toObject() : QJsonObject{};
+		QDialog dialog(dock);
+		dialog.setWindowTitle(index < 0 ? QStringLiteral("Новая реакция") : QStringLiteral("Редактирование реакции"));
+		auto *box = new QVBoxLayout(&dialog);
+		auto *fields = new QFormLayout();
+		auto *phrase = new QLineEdit(rule.value(QStringLiteral("phrase")).toString(), &dialog);
+		phrase->setMaxLength(40);
+		fields->addRow(QStringLiteral("Слово или команда"), phrase);
+		auto *effect = new QComboBox(&dialog);
+		for (const auto &value : {QStringLiteral("gg"), QStringLiteral("boom"),
+			QStringLiteral("low-hp"), QStringLiteral("confetti")}) effect->addItem(value, value);
+		effect->setCurrentIndex(std::max(0, effect->findData(rule.value(QStringLiteral("effect")).toString())));
+		fields->addRow(QStringLiteral("Эффект"), effect);
+		auto *match = new QComboBox(&dialog);
+		match->addItem(QStringLiteral("Содержит"), QStringLiteral("contains"));
+		match->addItem(QStringLiteral("Отдельное слово"), QStringLiteral("word"));
+		match->addItem(QStringLiteral("Точное совпадение"), QStringLiteral("exact"));
+		match->setCurrentIndex(std::max(0, match->findData(rule.value(QStringLiteral("match")).toString())));
+		fields->addRow(QStringLiteral("Совпадение"), match);
+		auto *wait = numeric(&dialog, 0, 300, QStringLiteral(" с"));
+		wait->setValue(rule.value(QStringLiteral("cooldownMs")).toInt() / 1000);
+		fields->addRow(QStringLiteral("Пауза (0 = без ограничений)"), wait);
+		auto *time = numeric(&dialog, 0, 60, QStringLiteral(" с"));
+		time->setValue(rule.value(QStringLiteral("durationMs")).toInt(5000) / 1000);
+		fields->addRow(QStringLiteral("Время (0 = не ограничивать)"), time);
+		auto *perViewer = new QCheckBox(QStringLiteral("Отдельный cooldown у каждого зрителя"), &dialog);
+		perViewer->setChecked(rule.value(QStringLiteral("perViewer")).toBool(true));
+		fields->addRow(QString{}, perViewer);
+		auto *enabled = new QCheckBox(QStringLiteral("Включено"), &dialog);
+		enabled->setChecked(rule.value(QStringLiteral("enabled")).toBool(true));
+		fields->addRow(QString{}, enabled);
+		box->addLayout(fields);
+		auto *commit = new QPushButton(QStringLiteral("Сохранить реакцию"), &dialog);
+		box->addWidget(commit);
+		QObject::connect(commit, &QPushButton::clicked, &dialog, [&] {
+			if (phrase->text().trimmed().isEmpty()) return;
+			rule.insert(QStringLiteral("id"), rule.value(QStringLiteral("id")).toString(
+				QStringLiteral("custom-%1").arg(QRandomGenerator::global()->bounded(100000000))));
+			rule.insert(QStringLiteral("phrase"), phrase->text().trimmed());
+			rule.insert(QStringLiteral("effect"), effect->currentData().toString());
+			rule.insert(QStringLiteral("match"), match->currentData().toString());
+			rule.insert(QStringLiteral("cooldownMs"), wait->value() * 1000);
+			rule.insert(QStringLiteral("durationMs"), time->value() * 1000);
+			rule.insert(QStringLiteral("perViewer"), perViewer->isChecked());
+			rule.insert(QStringLiteral("enabled"), enabled->isChecked());
+			if (index >= 0 && index < rules->size()) rules->replace(index, rule);
+			else rules->append(rule);
+			refreshRules();
+			dialog.accept();
+		});
+		dialog.exec();
+	};
+	QObject::connect(ruleAdd, &QPushButton::clicked, dock, [=] { editRule(-1); });
+	QObject::connect(ruleEdit, &QPushButton::clicked, dock, [=] { editRule(rulesList->currentRow()); });
+	QObject::connect(rulesList, &QListWidget::itemDoubleClicked, dock, [=] { editRule(rulesList->currentRow()); });
+	QObject::connect(ruleRemove, &QPushButton::clicked, dock, [=] {
+		if (rulesList->currentRow() < 0) return;
+		rules->removeAt(rulesList->currentRow());
+		refreshRules();
+	});
+	refreshRules();
+	auto *botTitle = new QLabel(QStringLiteral("Команды чат-бота · без JSON"), panel);
+	botTitle->setStyleSheet(QStringLiteral("font-weight:600"));
+	layout->addWidget(botTitle);
+	auto *botList = new QListWidget(panel);
+	botList->setMaximumHeight(110);
+	layout->addWidget(botList);
+	auto *botRow = new QHBoxLayout();
+	auto *botAdd = new QPushButton(QStringLiteral("Добавить команду"), panel);
+	auto *botEdit = new QPushButton(QStringLiteral("Изменить"), panel);
+	auto *botRemove = new QPushButton(QStringLiteral("Удалить"), panel);
+	botRow->addWidget(botAdd);
+	botRow->addWidget(botEdit);
+	botRow->addWidget(botRemove);
+	layout->addLayout(botRow);
+	auto botCommands = std::make_shared<QJsonArray>(draft->value(QStringLiteral("botCommands")).toArray());
+	auto refreshBot = [=] {
+		const int selected = botList->currentRow();
+		botList->clear();
+		for (const auto &entry : *botCommands) {
+			const auto item = entry.toObject();
+			botList->addItem(item.value(QStringLiteral("trigger")).toString() + QStringLiteral(" → ") +
+				item.value(QStringLiteral("reply")).toString().left(75));
+		}
+		if (selected >= 0 && selected < botList->count()) botList->setCurrentRow(selected);
+	};
+	auto editBot = [=](int index) {
+		if (index < 0 && botCommands->size() >= 20) return;
+		QJsonObject command = index >= 0 && index < botCommands->size() ? botCommands->at(index).toObject() : QJsonObject{};
+		QDialog dialog(dock);
+		dialog.setWindowTitle(QStringLiteral("Команда чат-бота"));
+		auto *box = new QVBoxLayout(&dialog);
+		auto *form = new QFormLayout();
+		auto *trigger = new QLineEdit(command.value(QStringLiteral("trigger")).toString(), &dialog);
+		trigger->setPlaceholderText(QStringLiteral("!discord"));
+		trigger->setMaxLength(40);
+		form->addRow(QStringLiteral("Команда"), trigger);
+		auto *reply = new QLineEdit(command.value(QStringLiteral("reply")).toString(), &dialog);
+		reply->setMaxLength(200);
+		form->addRow(QStringLiteral("Ответ"), reply);
+		auto *wait = numeric(&dialog, 0, 300, QStringLiteral(" с"));
+		wait->setValue(command.value(QStringLiteral("cooldownMs")).toInt() / 1000);
+		form->addRow(QStringLiteral("Cooldown"), wait);
+		auto *perViewer = new QCheckBox(QStringLiteral("Отдельный cooldown у каждого зрителя"), &dialog);
+		perViewer->setChecked(command.value(QStringLiteral("perViewer")).toBool(true));
+		form->addRow(QString{}, perViewer);
+		auto *enabled = new QCheckBox(QStringLiteral("Команда включена"), &dialog);
+		enabled->setChecked(command.value(QStringLiteral("enabled")).toBool(true));
+		form->addRow(QString{}, enabled);
+		box->addLayout(form);
+		auto *commit = new QPushButton(QStringLiteral("Сохранить команду"), &dialog);
+		box->addWidget(commit);
+		QObject::connect(commit, &QPushButton::clicked, &dialog, [&] {
+			if (!trigger->text().startsWith(QLatin1Char('!')) || reply->text().trimmed().isEmpty()) return;
+			command.insert(QStringLiteral("trigger"), trigger->text().trimmed());
+			command.insert(QStringLiteral("reply"), reply->text().trimmed());
+			command.insert(QStringLiteral("cooldownMs"), wait->value() * 1000);
+			command.insert(QStringLiteral("perViewer"), perViewer->isChecked());
+			command.insert(QStringLiteral("enabled"), enabled->isChecked());
+			if (index >= 0 && index < botCommands->size()) botCommands->replace(index, command);
+			else botCommands->append(command);
+			refreshBot();
+			dialog.accept();
+		});
+		dialog.exec();
+	};
+	QObject::connect(botAdd, &QPushButton::clicked, dock, [=] { editBot(-1); });
+	QObject::connect(botEdit, &QPushButton::clicked, dock, [=] { editBot(botList->currentRow()); });
+	QObject::connect(botList, &QListWidget::itemDoubleClicked, dock, [=] { editBot(botList->currentRow()); });
+	QObject::connect(botRemove, &QPushButton::clicked, dock, [=] {
+		if (botList->currentRow() < 0) return;
+		botCommands->removeAt(botList->currentRow());
+		refreshBot();
+	});
+	refreshBot();
 	auto selectedFont = std::make_shared<QString>();
 	auto refresh = [=] {
 		const auto profile = draft->value(surface->currentData().toString()).toObject();
@@ -437,6 +606,8 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 		profile.insert(QStringLiteral("effects"), effects);
 		draft->insert(key, profile);
 		draft->insert(QStringLiteral("globalCooldownMs"), cooldown->value());
+		draft->insert(QStringLiteral("reactions"), *rules);
+		draft->insert(QStringLiteral("botCommands"), *botCommands);
 		QString error;
 		if (!settings->save(*draft, &error)) QMessageBox::warning(dock, QStringLiteral("Оформление"), error);
 	});
@@ -467,6 +638,10 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 				return;
 			}
 			*draft = settings->snapshot();
+			*rules = draft->value(QStringLiteral("reactions")).toArray();
+			refreshRules();
+			*botCommands = draft->value(QStringLiteral("botCommands")).toArray();
+			refreshBot();
 			refresh();
 			dialog.accept();
 		});
@@ -475,12 +650,7 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 	auto *scroll = new QScrollArea(dock);
 	scroll->setWidgetResizable(true);
 	scroll->setWidget(panel);
-	dock->setWidget(scroll);
-	mainWindow->AddDockWidget(dock, Qt::RightDockWidgetArea);
-	if (auto *effectsDock = mainWindow->findChild<QDockWidget *>(QStringLiteral("xinkxEffectsDock"))) {
-		mainWindow->tabifyDockWidget(effectsDock, dock);
-	}
-	dock->show();
+	studioTabs(mainWindow)->addTab(scroll, QStringLiteral("Оформление"));
 }
 
 } // namespace xinkx

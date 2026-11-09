@@ -31,6 +31,7 @@
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStatusBar>
+#include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -64,6 +65,17 @@ QDoubleSpinBox *makeDimensionField(QWidget *parent, bool sizeField)
 }
 
 } // namespace
+
+QDockWidget *studioDock(OBSBasic *mainWindow)
+{
+	return mainWindow->findChild<QDockWidget *>(QStringLiteral("xinkxStudioDock"));
+}
+
+QTabWidget *studioTabs(OBSBasic *mainWindow)
+{
+	auto *dock = studioDock(mainWindow);
+	return dock ? dock->findChild<QTabWidget *>(QStringLiteral("xinkxStudioTabs")) : nullptr;
+}
 
 void installStudioWorkspace(OBSBasic *mainWindow)
 {
@@ -220,6 +232,16 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	auto *openProperties = new QPushButton(QStringLiteral("Свойства источника"), content);
 	openProperties->setEnabled(false);
 	layout->addWidget(openProperties);
+	auto *overlaySource = new QPushButton(QStringLiteral("Добавить / выделить чат и эффекты"), content);
+	overlaySource->setToolTip(QStringLiteral("XINKX-слой добавляется в текущую сцену как обычный источник OBS. Размер и положение редактируются в предпросмотре."));
+	layout->addWidget(overlaySource);
+	QObject::connect(overlaySource, &QPushButton::clicked, mainWindow, [mainWindow] {
+		auto *runtime = mainWindow->findChild<OverlayRuntime *>(QStringLiteral("xinkxOverlayRuntime"));
+		QString message;
+		if (runtime) runtime->addToScene(mainWindow, &message);
+		else message = QStringLiteral("Слой XINKX недоступен");
+		mainWindow->statusBar()->showMessage(message, 7000);
+	});
 	scroll->setWidget(content);
 	inspector->setWidget(scroll);
 	mainWindow->AddDockWidget(inspector, Qt::RightDockWidgetArea);
@@ -447,13 +469,32 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 		inspector->setVisible(inspectorVisible);
 		mainWindow->resizeDocks({inspector}, {280}, Qt::Horizontal);
 	});
+	auto *studio = new QDockWidget(QStringLiteral("XINKX Studio"), mainWindow);
+	studio->setObjectName(QStringLiteral("xinkxStudioDock"));
+	studio->setAllowedAreas(Qt::RightDockWidgetArea);
+	studio->setFeatures(studio->features() & ~QDockWidget::DockWidgetFloatable);
+	auto *studioPages = new QTabWidget(studio);
+	studioPages->setObjectName(QStringLiteral("xinkxStudioTabs"));
+	studioPages->setDocumentMode(true);
+	studio->setWidget(studioPages);
+	mainWindow->AddDockWidget(studio, Qt::RightDockWidgetArea);
 	installOverlayWorkspace(mainWindow, inspector);
 	installChatWorkspace(mainWindow);
 	installPresentationWorkspace(mainWindow);
 	installBroadcastWorkspace(mainWindow);
 	installGameProfilesWorkspace(mainWindow);
-	installSceneJsonWorkspace(mainWindow);
+	// JSON scene export remains available in source for diagnostics. Native source and
+	// scene editing in OBS is the default; no separate raw JSON dock is opened.
 	installDonationWorkspace(mainWindow);
+	QTimer::singleShot(0, mainWindow, [mainWindow, inspector, studio, studioPages] {
+		studio->setFloating(false);
+		mainWindow->tabifyDockWidget(inspector, studio);
+		studio->show();
+		studio->raise();
+		mainWindow->resizeDocks({studio}, {450}, Qt::Horizontal);
+		const int chat = studioPages->indexOf(studioPages->findChild<QWidget *>(QStringLiteral("xinkxChatPage")));
+		if (chat >= 0) studioPages->setCurrentIndex(chat);
+	});
 }
 
 void shutdownStudioOutputs(OBSBasic *mainWindow)
