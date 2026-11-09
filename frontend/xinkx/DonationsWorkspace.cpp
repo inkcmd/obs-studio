@@ -1,22 +1,18 @@
 #include "DonationGateway.hpp"
 #include "OverlayRuntime.hpp"
-#include "StreamAccounts.hpp"
 
 #include <widgets/OBSBasic.hpp>
 
+#include <QCheckBox>
 #include <QDialog>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMessageBox>
 #include <QPushButton>
-#include <QScrollArea>
-#include <QSettings>
-#include <QVariant>
 #include <QVBoxLayout>
 
 namespace xinkx {
@@ -27,158 +23,136 @@ void installDonationWorkspace(OBSBasic *mainWindow)
 	donations->setObjectName(QStringLiteral("xinkxDonationGateway"));
 	auto *runtime = mainWindow->findChild<OverlayRuntime *>(QStringLiteral("xinkxOverlayRuntime"));
 	if (runtime) {
-		QObject::connect(donations, &DonationGateway::donationReceived, runtime,
-			[runtime](const QString &name, const QString &amount, const QString &message) {
-				runtime->publishAlert(QStringLiteral("donation"), QStringLiteral("DonationAlerts"), name, amount, message);
+		QObject::connect(donations, &DonationGateway::donationEvent, runtime,
+			[runtime](const QString &provider, const QString &name, const QString &amount, const QString &message) {
+				runtime->publishAlert(QStringLiteral("donation"), provider, name, amount, message);
 			});
 	}
-	auto *dialog = new QDialog(mainWindow);
-	dialog->setObjectName(QStringLiteral("xinkxDonationSettingsDialog"));
-	dialog->setWindowTitle(QStringLiteral("XINKX · Донаты и события"));
-	dialog->resize(720, 630);
-	auto *outer = new QVBoxLayout(dialog);
-	auto *scroll = new QScrollArea(dialog);
-	scroll->setWidgetResizable(true);
-	auto *panel = new QWidget(scroll);
-	auto *layout = new QVBoxLayout(panel);
-	layout->setSpacing(10);
-	auto *hint = new QLabel(QStringLiteral("Все источники событий подключаются к общему движку XINKX. Сейчас OAuth реализован для DonationAlerts; свои шаблоны можно проверять вручную."), panel);
-	hint->setWordWrap(true);
-	layout->addWidget(hint);
-	auto *provider = new QGroupBox(QStringLiteral("DonationAlerts · OAuth"), panel);
-	auto *providerLayout = new QVBoxLayout(provider);
-	auto *form = new QFormLayout();
-	auto *id = new QLineEdit(donations->clientId(), provider);
-	id->setMaxLength(100);
-	form->addRow(QStringLiteral("Client ID"), id);
+}
+
+QWidget *createDonationsSettingsPage(OBSBasic *mainWindow, QWidget *parent)
+{
+	auto *donations = mainWindow->findChild<DonationGateway *>(QStringLiteral("xinkxDonationGateway"));
+	auto *page = new QWidget(parent);
+	auto *layout = new QVBoxLayout(page);
+	layout->setSpacing(12);
+	auto *intro = new QLabel(QStringLiteral(
+		"Все реальные события попадают в один XINKX-движок. Подключения и оформление уведомлений "
+		"независимы: здесь указываются источники платежных событий, а внешний вид задаётся у источника XINKX в OBS."), page);
+	intro->setWordWrap(true);
+	layout->addWidget(intro);
+	if (!donations) return page;
+
+	auto *provider = new QGroupBox(QStringLiteral("DonationAlerts · OAuth"), page);
+	auto *providerForm = new QFormLayout(provider);
+	auto *clientId = new QLineEdit(donations->clientId(), provider);
+	clientId->setMaxLength(100);
 	auto *secret = new QLineEdit(provider);
 	secret->setEchoMode(QLineEdit::Password);
-	secret->setPlaceholderText(QStringLiteral("Client Secret (только для OAuth)"));
-	form->addRow(QStringLiteral("Client Secret"), secret);
-	auto *callback = new QLineEdit(donations->callbackUrl(), provider);
-	callback->setReadOnly(true);
-	form->addRow(QStringLiteral("Redirect URI"), callback);
-	providerLayout->addLayout(form);
-	auto *help = new QLabel(QStringLiteral("Права: oauth-user-show, oauth-donation-index, oauth-donation-subscribe. Опрос каждые 15 секунд; публичный webhook не нужен."), provider);
-	help->setWordWrap(true);
-	providerLayout->addWidget(help);
-	auto *buttons = new QHBoxLayout();
-	auto *connect = new QPushButton(QStringLiteral("Подключить OAuth"), provider);
-	auto *refresh = new QPushButton(QStringLiteral("Обновить"), provider);
+	secret->setPlaceholderText(QStringLiteral("Client Secret (сохранённый вводить повторно не нужно)"));
+	providerForm->addRow(QStringLiteral("Client ID"), clientId);
+	providerForm->addRow(QStringLiteral("Client Secret"), secret);
+	providerForm->addRow(QStringLiteral("Callback"), new QLabel(donations->callbackUrl(), provider));
+	auto *authButtons = new QHBoxLayout();
+	auto *connect = new QPushButton(QStringLiteral("Подключить"), provider);
+	auto *refresh = new QPushButton(QStringLiteral("Проверить события"), provider);
 	auto *disconnect = new QPushButton(QStringLiteral("Отключить"), provider);
-	for (auto *button : {connect, refresh, disconnect}) buttons->addWidget(button);
-	providerLayout->addLayout(buttons);
-	auto *status = new QLabel(donations->connected() ? QStringLiteral("OAuth сохранён (DPAPI)") :
-		QStringLiteral("DonationAlerts не подключён"), provider);
+	for (auto *button : {connect, refresh, disconnect}) authButtons->addWidget(button);
+	providerForm->addRow(authButtons);
+	auto *status = new QLabel(donations->connected() ? QStringLiteral("OAuth подключён") :
+		QStringLiteral("OAuth не подключён"), provider);
 	status->setWordWrap(true);
-	providerLayout->addWidget(status);
+	providerForm->addRow(status);
 	layout->addWidget(provider);
+	QObject::connect(connect, &QPushButton::clicked, page, [=] {
+		donations->authorize(clientId->text(), secret->text());
+		secret->clear();
+	});
+	QObject::connect(refresh, &QPushButton::clicked, page, [=] { donations->refreshNow(); });
+	QObject::connect(disconnect, &QPushButton::clicked, page, [=] { donations->disconnectAccount(); });
+	QObject::connect(donations, &DonationGateway::statusChanged, status, &QLabel::setText);
 
-	auto *presets = new QGroupBox(QStringLiteral("Кастомные шаблоны донатов"), panel);
-	auto *presetsLayout = new QVBoxLayout(presets);
-	auto *list = new QListWidget(presets);
-	list->setMaximumHeight(180);
-	presetsLayout->addWidget(list);
-	auto *presetActions = new QHBoxLayout();
-	auto *add = new QPushButton(QStringLiteral("Добавить"), presets);
-	auto *edit = new QPushButton(QStringLiteral("Изменить"), presets);
-	auto *remove = new QPushButton(QStringLiteral("Удалить"), presets);
-	auto *test = new QPushButton(QStringLiteral("Тест"), presets);
-	for (auto *button : {add, edit, remove, test}) presetActions->addWidget(button);
-	presetsLayout->addLayout(presetActions);
-	auto *presetHelp = new QLabel(QStringLiteral("Шаблон не принимает реальные платежи. Он создаёт тестовое событие в том же движке, куда приходят OAuth-донаты."), presets);
-	presetHelp->setWordWrap(true);
-	presetsLayout->addWidget(presetHelp);
-	layout->addWidget(presets);
+	auto *feedsBox = new QGroupBox(QStringLiteral("Другие сайты и платёжные шлюзы · JSON API"), page);
+	auto *feedsLayout = new QVBoxLayout(feedsBox);
+	auto *help = new QLabel(QStringLiteral(
+		"HTTPS API с Bearer-токеном (токен хранится через Windows DPAPI). "
+		"Ответ: {\"data\":[{\"id\":\"123\",\"name\":\"Зритель\",\"amount\":100,\"currency\":\"RUB\",\"message\":\"...\"}]}. "
+		"ID каждого события должен быть стабильным; существующие платежи при подключении пропускаются. "
+		"Банковские подписи, webhook и отдельные OAuth-процедуры требуют адаптера конкретного провайдера."), feedsBox);
+	help->setWordWrap(true);
+	feedsLayout->addWidget(help);
+	auto *list = new QListWidget(feedsBox);
+	list->setMinimumHeight(130);
+	feedsLayout->addWidget(list);
+	auto *feedActions = new QHBoxLayout();
+	auto *add = new QPushButton(QStringLiteral("Добавить API"), feedsBox);
+	auto *edit = new QPushButton(QStringLiteral("Изменить"), feedsBox);
+	auto *remove = new QPushButton(QStringLiteral("Удалить"), feedsBox);
+	for (auto *button : {add, edit, remove}) feedActions->addWidget(button);
+	feedsLayout->addLayout(feedActions);
+	layout->addWidget(feedsBox);
 	layout->addStretch();
-	scroll->setWidget(panel);
-	outer->addWidget(scroll);
 
-	auto *storage = new QSettings(studioSettingsPath(), QSettings::IniFormat, dialog);
-	const auto persist = [=] {
-		QStringList items;
-		for (int i = 0; i < list->count(); ++i)
-			items.append(QString::fromUtf8(QJsonDocument(list->item(i)->data(Qt::UserRole).toJsonObject())
-				.toJson(QJsonDocument::Compact)));
-		storage->setValue(QStringLiteral("donations/customPresets"), items);
-		storage->sync();
-	};
-	for (const auto &encoded : storage->value(QStringLiteral("donations/customPresets")).toStringList()) {
-		const auto object = QJsonDocument::fromJson(encoded.toUtf8()).object();
-		if (object.value(QStringLiteral("name")).toString().isEmpty()) continue;
-			auto *row = new QListWidgetItem(object.value(QStringLiteral("name")).toString(), list);
-			row->setData(Qt::UserRole, QVariant::fromValue(object));
-	}
-	if (!storage->contains(QStringLiteral("donations/customPresets"))) {
-		for (const auto &amount : {QStringLiteral("100 ₽"), QStringLiteral("500 ₽"), QStringLiteral("1000 ₽")}) {
-			const QJsonObject object{{QStringLiteral("name"), QStringLiteral("Донат · ") + amount},
-				{QStringLiteral("sender"), QStringLiteral("Тестовый зритель")},
-				{QStringLiteral("amount"), amount}, {QStringLiteral("message"), QStringLiteral("Проверка оформления доната")}};
-			auto *row = new QListWidgetItem(object.value(QStringLiteral("name")).toString(), list);
-			row->setData(Qt::UserRole, QVariant::fromValue(object));
+	const auto populate = [=] {
+		const QString previous = list->currentItem() ? list->currentItem()->data(Qt::UserRole).toString() : QString{};
+		list->clear();
+		for (const auto &feed : donations->feeds()) {
+			auto *row = new QListWidgetItem(feed.name + (feed.enabled ? QStringLiteral(" · активен") :
+				QStringLiteral(" · выключен")), list);
+			row->setData(Qt::UserRole, feed.id);
+			row->setToolTip(feed.url);
+			if (feed.id == previous) list->setCurrentItem(row);
 		}
-		persist();
-	}
-	const auto editPreset = [=](bool fresh) {
-		if (fresh && list->count() >= 40) return;
-		auto *current = fresh ? nullptr : list->currentItem();
-		if (!fresh && !current) return;
-		const auto old = current ? current->data(Qt::UserRole).toJsonObject() : QJsonObject{};
-		QDialog editor(dialog);
-		editor.setWindowTitle(fresh ? QStringLiteral("Новый шаблон") : QStringLiteral("Изменить шаблон"));
+	};
+	const auto openEditor = [=](bool fresh) {
+		DonationGateway::Feed feed;
+		if (!fresh) {
+			if (!list->currentItem()) return;
+			for (const auto &saved : donations->feeds())
+				if (saved.id == list->currentItem()->data(Qt::UserRole).toString()) feed = saved;
+		}
+		QDialog editor(page);
+		editor.setWindowTitle(fresh ? QStringLiteral("Новый источник событий") :
+			QStringLiteral("Изменить источник событий"));
 		auto *fields = new QFormLayout(&editor);
-		auto *name = new QLineEdit(old.value(QStringLiteral("name")).toString(), &editor);
-		name->setMaxLength(60);
+		auto *name = new QLineEdit(feed.name, &editor);
+		auto *url = new QLineEdit(feed.url, &editor);
+		url->setPlaceholderText(QStringLiteral("https://provider.example/api/donations"));
+		auto *token = new QLineEdit(&editor);
+		token->setEchoMode(QLineEdit::Password);
+		token->setPlaceholderText(feed.hasToken ? QStringLiteral("Оставь пустым, чтобы сохранить токен") :
+			QStringLiteral("Bearer token, если необходим"));
+		auto *enabled = new QCheckBox(QStringLiteral("Опрос включён"), &editor);
+		enabled->setChecked(fresh || feed.enabled);
 		fields->addRow(QStringLiteral("Название"), name);
-		auto *sender = new QLineEdit(old.value(QStringLiteral("sender")).toString(QStringLiteral("Тестовый зритель")), &editor);
-		sender->setMaxLength(80);
-		fields->addRow(QStringLiteral("Зритель"), sender);
-		auto *amount = new QLineEdit(old.value(QStringLiteral("amount")).toString(QStringLiteral("100 ₽")), &editor);
-		amount->setMaxLength(60);
-		fields->addRow(QStringLiteral("Сумма"), amount);
-		auto *message = new QLineEdit(old.value(QStringLiteral("message")).toString(), &editor);
-		message->setMaxLength(240);
-		fields->addRow(QStringLiteral("Сообщение"), message);
+		fields->addRow(QStringLiteral("URL JSON API"), url);
+		fields->addRow(QStringLiteral("Bearer token"), token);
+		fields->addRow(enabled);
 		auto *save = new QPushButton(QStringLiteral("Сохранить"), &editor);
 		fields->addRow(save);
 		QObject::connect(save, &QPushButton::clicked, &editor, [&] {
-			if (name->text().trimmed().isEmpty()) return;
-			const QJsonObject object{{QStringLiteral("name"), name->text().trimmed()},
-				{QStringLiteral("sender"), sender->text()}, {QStringLiteral("amount"), amount->text()},
-				{QStringLiteral("message"), message->text()}};
-			if (!current) current = new QListWidgetItem(list);
-			current->setText(name->text() + QStringLiteral(" · ") + amount->text());
-			current->setData(Qt::UserRole, QVariant::fromValue(object));
-			persist();
+			feed.name = name->text();
+			feed.url = url->text();
+			feed.enabled = enabled->isChecked();
+			QString error;
+			if (!donations->saveFeed(feed, token->text(), &error)) {
+				QMessageBox::warning(&editor, QStringLiteral("Источник событий"), error);
+				return;
+			}
 			editor.accept();
 		});
-		editor.exec();
+		if (editor.exec() == QDialog::Accepted) populate();
 	};
-	QObject::connect(add, &QPushButton::clicked, dialog, [=] { editPreset(true); });
-	QObject::connect(edit, &QPushButton::clicked, dialog, [=] { editPreset(false); });
-	QObject::connect(list, &QListWidget::itemDoubleClicked, dialog, [=] { editPreset(false); });
-	QObject::connect(remove, &QPushButton::clicked, dialog, [=] {
-		delete list->takeItem(list->currentRow());
-		persist();
+	QObject::connect(add, &QPushButton::clicked, page, [=] { openEditor(true); });
+	QObject::connect(edit, &QPushButton::clicked, page, [=] { openEditor(false); });
+	QObject::connect(list, &QListWidget::itemDoubleClicked, page, [=] { openEditor(false); });
+	QObject::connect(remove, &QPushButton::clicked, page, [=] {
+		if (!list->currentItem()) return;
+		donations->removeFeed(list->currentItem()->data(Qt::UserRole).toString());
+		populate();
 	});
-	QObject::connect(test, &QPushButton::clicked, dialog, [=] {
-		if (!runtime || !list->currentItem()) return;
-		const auto object = list->currentItem()->data(Qt::UserRole).toJsonObject();
-		runtime->publishAlert(QStringLiteral("donation"), QStringLiteral("custom"),
-			object.value(QStringLiteral("sender")).toString(), object.value(QStringLiteral("amount")).toString(),
-			object.value(QStringLiteral("message")).toString());
-	});
-	QObject::connect(connect, &QPushButton::clicked, dialog, [=] {
-		donations->authorize(id->text(), secret->text());
-		secret->clear();
-	});
-	QObject::connect(refresh, &QPushButton::clicked, dialog, [=] { donations->refreshNow(); });
-	QObject::connect(disconnect, &QPushButton::clicked, dialog, [=] { donations->disconnectAccount(); });
-	QObject::connect(donations, &DonationGateway::statusChanged, status, &QLabel::setText);
-	QObject::connect(donations, &DonationGateway::donationReceived, dialog,
-		[status](const QString &name, const QString &amount, const QString &) {
-			status->setText(QStringLiteral("Донат: %1 · %2").arg(name, amount));
-		});
+	populate();
+	return page;
 }
 
 } // namespace xinkx

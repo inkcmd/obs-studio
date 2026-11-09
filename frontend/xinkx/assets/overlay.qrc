@@ -1,5 +1,9 @@
 <RCC>
   <qresource prefix="/xinkx">
     <file>overlay.html</file>
+    <file>twitch.svg</file>
+    <file>youtube.svg</file>
+    <file>kick.svg</file>
+    <file>xinkx-source.svg</file>
   </qresource>
 </RCC>

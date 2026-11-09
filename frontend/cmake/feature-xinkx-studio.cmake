@@ -20,6 +20,10 @@ target_sources(
     xinkx/OAuthLogin.hpp
     xinkx/OverlayRuntime.cpp
     xinkx/OverlayRuntime.hpp
+    xinkx/NativeSources.cpp
+    xinkx/NativeSources.hpp
+    xinkx/StudioSettingsPages.cpp
+    xinkx/StudioSettingsPages.hpp
     xinkx/ChatGateway.cpp
     xinkx/ChatGateway.hpp
     xinkx/ChatWorkspace.cpp

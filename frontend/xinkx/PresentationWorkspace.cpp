@@ -281,6 +281,7 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 	auto *layout = new QVBoxLayout(panel);
 	layout->setContentsMargins(10, 10, 10, 10);
 	auto *enable = new QCheckBox(QStringLiteral("Поверх всех окон · без реакции на мышь"), panel);
+	enable->setObjectName(QStringLiteral("xinkxStreamerOverlayEnabled"));
 	QObject::connect(enable, &QCheckBox::toggled, streamer, &StreamerOverlay::toggle);
 	layout->addWidget(enable);
 	auto *surface = new QComboBox(panel);

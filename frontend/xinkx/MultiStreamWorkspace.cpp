@@ -18,6 +18,7 @@
 #include <QHeaderView>
 #include <QHash>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
@@ -533,29 +534,6 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 	notice->setWordWrap(true);
 	layout->addWidget(notice);
 	streamPage->layout()->addWidget(group);
-	auto *extras = new QGroupBox(u"XINKX · Донаты, чат и оформление"_s, streamPage);
-	auto *extraActions = new QHBoxLayout(extras);
-	auto *donationSettings = new QPushButton(u"Донаты и шаблоны…"_s, extras);
-	auto *appearanceSettings = new QPushButton(u"Чат, реакции и боты…"_s, extras);
-	auto *automationSettings = new QPushButton(u"Автоматизация / LLM…"_s, extras);
-	extraActions->addWidget(donationSettings);
-	extraActions->addWidget(appearanceSettings);
-	extraActions->addWidget(automationSettings);
-	streamPage->layout()->addWidget(extras);
-	const auto openSettings = [streamPage](const QString &name) {
-		auto *host = streamPage->window()->parentWidget(); // OBSBasic is the parent of OBSBasicSettings.
-		if (!host) return;
-		if (auto *editor = host->findChild<QDialog *>(name)) editor->exec();
-	};
-	QObject::connect(donationSettings, &QPushButton::clicked, extras, [openSettings] {
-		openSettings(QStringLiteral("xinkxDonationSettingsDialog"));
-	});
-	QObject::connect(appearanceSettings, &QPushButton::clicked, extras, [openSettings] {
-		openSettings(QStringLiteral("xinkxAppearanceSettingsDialog"));
-	});
-	QObject::connect(automationSettings, &QPushButton::clicked, extras, [openSettings] {
-		openSettings(QStringLiteral("xinkxAutomationSettingsDialog"));
-	});
 
 	const auto updateActions = [=] {
 		const auto *selected = tree->currentItem();
@@ -585,6 +563,7 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 			const QString provider = account.platform == u"obs_service"_s
 						 ? account.destination.serviceName : platformTitle(account.platform);
 			item->setText(1, u"%1 · %2"_s.arg(provider, account.displayName()));
+			item->setIcon(1, QIcon(QStringLiteral(":/xinkx/%1.svg").arg(account.platform)));
 			const auto &dest = account.destination;
 			const bool connected = !account.oauth.requiresAuthorization() && !account.providerId.isEmpty();
 			const bool ready = dest.ready() && (!dest.fromOAuth || !account.oauth.accessToken.isEmpty());

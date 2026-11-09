@@ -1,6 +1,7 @@
 #include "MultiStreamManager.hpp"
 
 #include <QMenu>
+#include <QIcon>
 #include <QTimer>
 
 #include <algorithm>
@@ -8,6 +9,13 @@
 namespace xinkx {
 
 using namespace Qt::StringLiterals;
+
+static QIcon platformIcon(const QString &platform)
+{
+	if (platform == u"twitch"_s || platform == u"youtube"_s || platform == u"kick"_s)
+		return QIcon(u":/xinkx/%1.svg"_s.arg(platform));
+	return QIcon();
+}
 
 OBSServiceAutoRelease createStreamService(const StreamDestination &destination, const char *name)
 {
@@ -290,6 +298,28 @@ QString MultiStreamManager::sessionDetails() const
 	return details.join(QLatin1Char('\n'));
 }
 
+QVector<MultiStreamManager::OutputSnapshot> MultiStreamManager::outputSnapshots() const
+{
+	QVector<OutputSnapshot> rows;
+	for (const auto &account : loadStreamAccounts(false)) {
+		if (!enabled(account)) continue;
+		OutputSnapshot state;
+		state.id = account.id;
+		state.platform = account.platform;
+		state.name = account.displayName();
+		for (const auto &session : sessions) {
+			if (session->account.id != account.id) continue;
+			state.live = session->running && session->output && obs_output_active(session->output);
+			state.reconnecting = session->running && session->output && obs_output_reconnecting(session->output);
+			state.kbps = state.live ? session->stats.kbps : 0;
+			state.dropped = session->output ? obs_output_get_frames_dropped(session->output) : 0;
+			break;
+		}
+		rows.push_back(state);
+	}
+	return rows;
+}
+
 void MultiStreamManager::populateMenu(QMenu *menu)
 {
 	menu->clear();
@@ -298,6 +328,7 @@ void MultiStreamManager::populateMenu(QMenu *menu)
 			const auto id = session->account.id;
 			auto *action = menu->addAction(u"%1 · %2: %3"_s.arg(
 				platformTitle(session->account.platform), session->account.displayName(), session->description()));
+			action->setIcon(platformIcon(session->account.platform));
 			action->setEnabled(session->running && !session->stopping);
 			action->setToolTip(u"Остановить только этот выход"_s);
 			connect(action, &QAction::triggered, this, [this, id] {
@@ -315,6 +346,7 @@ void MultiStreamManager::populateMenu(QMenu *menu)
 
 	for (const auto &account : loadStreamAccounts()) {
 		auto *action = menu->addAction(u"%1 · %2"_s.arg(platformTitle(account.platform), account.displayName()));
+		action->setIcon(platformIcon(account.platform));
 		action->setCheckable(true);
 		action->setChecked(enabled(account));
 		connect(action, &QAction::toggled, this, [this, id = account.id](bool checked) {

@@ -3,6 +3,7 @@
 #include "StudioController.hpp"
 #include "MultiStreamManager.hpp"
 #include "OverlayRuntime.hpp"
+#include "NativeSources.hpp"
 #include "ChatGateway.hpp"
 #include "PresentationSettings.hpp"
 #include "DonationGateway.hpp"
@@ -20,6 +21,7 @@
 #include <QDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QHash>
 #include <QFrame>
 #include <QGuiApplication>
 #include <QGridLayout>
@@ -32,9 +34,11 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSettings>
+#include <QSet>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStatusBar>
+#include <QPixmap>
 #include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -83,21 +87,64 @@ QTabWidget *studioTabs(OBSBasic *mainWindow)
 
 void installStudioWorkspace(OBSBasic *mainWindow)
 {
+	registerNativeSources();
 	auto *controller = new StudioController(mainWindow);
 	auto *manager = new MultiStreamManager(mainWindow);
-	auto *extraStatus = new QLabel(mainWindow);
-	mainWindow->statusBar()->addPermanentWidget(extraStatus);
-	auto updateExtraStatus = [extraStatus, manager, mainWindow] {
-		const int active = manager->activeCount();
-		const int count = manager->configuredCount();
-		auto text = QStringLiteral("Выходы: %1/%2").arg(active).arg(count);
-		if (active) {
-			text += QStringLiteral(" · %1 кбит/с · пропущено: %2")
-					.arg(manager->extraBitrate()).arg(manager->totalDroppedFrames());
+	// OBS already displays aggregate throughput. Only per-destination rates belong here.
+	auto *destinations = new QWidget(mainWindow);
+	auto *destinationLayout = new QHBoxLayout(destinations);
+	destinationLayout->setContentsMargins(4, 0, 4, 0);
+	destinationLayout->setSpacing(8);
+	auto indicators = std::make_shared<QHash<QString, QWidget *>>();
+	mainWindow->statusBar()->addPermanentWidget(destinations);
+	auto updateExtraStatus = [destinations, destinationLayout, indicators, manager] {
+		QSet<QString> visible;
+		for (const auto &output : manager->outputSnapshots()) {
+			visible.insert(output.id);
+			QWidget *badge = indicators->value(output.id, nullptr);
+			if (!badge) {
+				badge = new QWidget(destinations);
+				auto *line = new QHBoxLayout(badge);
+				line->setContentsMargins(0, 0, 0, 0);
+				line->setSpacing(3);
+				auto *icon = new QLabel(badge);
+				const QString asset = output.platform == QStringLiteral("twitch") ? QStringLiteral("twitch") :
+					output.platform == QStringLiteral("youtube") ? QStringLiteral("youtube") :
+					output.platform == QStringLiteral("kick") ? QStringLiteral("kick") : QString{};
+				const QPixmap pixmap(QStringLiteral(":/xinkx/%1.svg").arg(asset));
+				if (!pixmap.isNull()) icon->setPixmap(pixmap.scaled(16, 16, Qt::KeepAspectRatio,
+					Qt::SmoothTransformation));
+				icon->setFixedSize(16, 16);
+				line->addWidget(icon);
+				auto *rate = new QLabel(badge);
+				rate->setObjectName(QStringLiteral("xinkxBadgeRate"));
+				line->addWidget(rate);
+				destinationLayout->addWidget(badge);
+				indicators->insert(output.id, badge);
+			}
+			const QString current = output.reconnecting ? QStringLiteral("↻") :
+				output.live ? QStringLiteral("%1k").arg(output.kbps) : QStringLiteral("—");
+			if (auto *rate = badge->findChild<QLabel *>(QStringLiteral("xinkxBadgeRate"))) {
+				rate->setText(current);
+				rate->setStyleSheet(output.live ? QStringLiteral("color: #58dea2;") :
+					QStringLiteral("color: #a3a9b5;"));
+			}
+			badge->setToolTip(QStringLiteral("%1 · %2\n%3\nБитрейт: %4 кбит/с\nПропущено кадров: %5")
+				.arg(platformTitle(output.platform), output.name,
+					output.reconnecting ? QStringLiteral("Переподключение") :
+					output.live ? QStringLiteral("В эфире") : QStringLiteral("Остановлен"))
+				.arg(output.kbps).arg(output.dropped));
+			badge->show();
 		}
-		extraStatus->setText(text);
-		extraStatus->setStyleSheet(active > 0 ? QStringLiteral("color: #58dea2;") : QString());
-		extraStatus->setToolTip(manager->sessionDetails().toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>")));
+		for (auto it = indicators->begin(); it != indicators->end();) {
+			if (!visible.contains(it.key())) {
+				delete it.value();
+				it = indicators->erase(it);
+			} else {
+				++it;
+			}
+		}
+		destinations->setVisible(!visible.isEmpty());
 	};
 	QObject::connect(manager, &MultiStreamManager::statusChanged, mainWindow, updateExtraStatus);
 	updateExtraStatus();
@@ -482,43 +529,7 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	studioPages->setDocumentMode(true);
 	studio->setWidget(studioPages);
 	mainWindow->AddDockWidget(studio, Qt::RightDockWidgetArea);
-	auto *automation = new StudioAutomation(mainWindow);
-	// A local model's future tool bridge will dispatch these same allowlisted
-	// commands. Nothing is exposed on a listening socket by this editor.
-	auto *commandDialog = new QDialog(mainWindow);
-	commandDialog->setObjectName(QStringLiteral("xinkxAutomationSettingsDialog"));
-	commandDialog->setWindowTitle(QStringLiteral("XINKX · Локальные команды и LLM"));
-	commandDialog->resize(680, 440);
-	auto *commandLayout = new QVBoxLayout(commandDialog);
-	auto *commandHelp = new QLabel(QStringLiteral("Локальные нативные команды OBS. Для LLM предусмотрен безопасный список действий. Подключение модели и сетевой доступ пока не включены."), commandDialog);
-	commandHelp->setWordWrap(true);
-	commandLayout->addWidget(commandHelp);
-	auto *commandEdit = new QPlainTextEdit(commandDialog);
-	commandEdit->setPlainText(QStringLiteral("{\"command\":\"overlay.add\",\"layer\":\"chat\"}"));
-	commandLayout->addWidget(commandEdit, 1);
-	auto *commandButtons = new QHBoxLayout();
-	auto *commandList = new QPushButton(QStringLiteral("Команды и сцены"), commandDialog);
-	auto *commandRun = new QPushButton(QStringLiteral("Проверить команду"), commandDialog);
-	commandButtons->addWidget(commandList);
-	commandButtons->addWidget(commandRun);
-	commandLayout->addLayout(commandButtons);
-	auto *commandStatus = new QLabel(commandDialog);
-	commandStatus->setWordWrap(true);
-	commandLayout->addWidget(commandStatus);
-	QObject::connect(commandList, &QPushButton::clicked, commandDialog, [=] {
-		commandStatus->setText(QString::fromUtf8(QJsonDocument(automation->describe()).toJson(QJsonDocument::Indented)));
-	});
-	QObject::connect(commandRun, &QPushButton::clicked, commandDialog, [=] {
-		if (commandEdit->toPlainText().size() > 8192) {
-			commandStatus->setText(QStringLiteral("Команда слишком длинная"));
-			return;
-		}
-		QJsonParseError error;
-		const auto json = QJsonDocument::fromJson(commandEdit->toPlainText().toUtf8(), &error);
-		const auto response = json.isObject() ? automation->execute(json.object()) :
-			QJsonObject{{QStringLiteral("ok"), false}, {QStringLiteral("message"), error.errorString()}};
-		commandStatus->setText(QString::fromUtf8(QJsonDocument(response).toJson(QJsonDocument::Compact)));
-	});
+	new StudioAutomation(mainWindow);
 	installOverlayWorkspace(mainWindow, inspector);
 	installChatWorkspace(mainWindow);
 	installPresentationWorkspace(mainWindow);

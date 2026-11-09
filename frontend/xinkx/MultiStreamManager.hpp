@@ -22,6 +22,15 @@ class MultiStreamManager final : public QObject {
 	Q_OBJECT
 
 public:
+	struct OutputSnapshot {
+		QString id;
+		QString platform;
+		QString name;
+		bool live = false;
+		bool reconnecting = false;
+		uint64_t kbps = 0;
+		int dropped = 0;
+	};
 	explicit MultiStreamManager(QObject *parent = nullptr);
 	~MultiStreamManager() override;
 
@@ -38,6 +47,7 @@ public:
 	int totalDroppedFrames() const;
 	int totalVideoFrames() const;
 	QString sessionDetails() const;
+	QVector<OutputSnapshot> outputSnapshots() const;
 	void populateMenu(QMenu *menu);
 
 signals:

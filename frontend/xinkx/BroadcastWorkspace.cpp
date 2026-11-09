@@ -10,6 +10,7 @@
 #include <QFormLayout>
 #include <QHash>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QJsonArray>
 #include <QLabel>
 #include <QLineEdit>
@@ -37,12 +38,15 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 	layout->setContentsMargins(10, 10, 10, 10);
 	layout->setSpacing(7);
 	auto *form = new QFormLayout();
+	form->setVerticalSpacing(6);
 	auto *account = new QComboBox(panel);
 	form->addRow(QStringLiteral("Площадка"), account);
 	auto *title = new QLineEdit(panel);
+	title->setObjectName(QStringLiteral("xinkxBroadcastTitle"));
 	title->setMaxLength(100);
 	form->addRow(QStringLiteral("Название"), title);
 	auto *description = new QPlainTextEdit(panel);
+	description->setObjectName(QStringLiteral("xinkxBroadcastDescription"));
 	description->setMaximumHeight(95);
 	description->setPlaceholderText(QStringLiteral("Описание Twitch / YouTube; Kick: только просмотр"));
 	form->addRow(QStringLiteral("Описание"), description);
@@ -62,8 +66,11 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 	layout->addLayout(searchRow);
 	auto *categoryFields = new QFormLayout();
 	auto *twitchCategory = new QComboBox(panel);
+	twitchCategory->setObjectName(QStringLiteral("xinkxBroadcastTwitchGame"));
 	auto *kickCategory = new QComboBox(panel);
+	kickCategory->setObjectName(QStringLiteral("xinkxBroadcastKickGame"));
 	auto *youtubeCategory = new QComboBox(panel);
+	youtubeCategory->setObjectName(QStringLiteral("xinkxBroadcastYouTubeGame"));
 	for (auto *choice : {twitchCategory, kickCategory, youtubeCategory})
 		choice->addItem(QStringLiteral("Не изменять"), QString{});
 	categoryFields->addRow(QStringLiteral("Twitch"), twitchCategory);
@@ -79,11 +86,12 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 	auto *youtubeForm = new QFormLayout(ytRow);
 	youtubeForm->setContentsMargins(0, 0, 0, 0);
 	auto *broadcast = new QComboBox(ytRow);
+	broadcast->setObjectName(QStringLiteral("xinkxBroadcastYouTubeEvent"));
 	youtubeForm->addRow(QStringLiteral("Трансляция YouTube"), broadcast);
 	auto *stream = new QComboBox(ytRow);
 	youtubeForm->addRow(QStringLiteral("Видеопоток"), stream);
 	layout->addWidget(ytRow);
-	auto *ytActions = new QHBoxLayout();
+	auto *ytActions = new QVBoxLayout();
 	auto *create = new QPushButton(QStringLiteral("Создать эфир и поток YouTube"), panel);
 	create->setToolTip(QStringLiteral("Создаст эфир с доступом по ссылке, новый RTMP-поток и привяжет его"));
 	auto *bind = new QPushButton(QStringLiteral("Привязать выбранный поток"), panel);
@@ -93,7 +101,7 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 	auto *all = new QCheckBox(QStringLiteral("Обновить название и найденные категории на всех площадках"), panel);
 	all->setChecked(true);
 	layout->addWidget(all);
-	auto *actions = new QHBoxLayout();
+	auto *actions = new QVBoxLayout();
 	auto *read = new QPushButton(QStringLiteral("Загрузить текущие данные"), panel);
 	auto *apply = new QPushButton(QStringLiteral("Сохранить на площадке"), panel);
 	actions->addWidget(read);
@@ -119,7 +127,8 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 		const auto previous = selected();
 		account->clear();
 		for (const auto &entry : gateway->accounts())
-			account->addItem(platformTitle(entry.platform) + QStringLiteral(" · ") + entry.displayName(), entry.id);
+			account->addItem(QIcon(QStringLiteral(":/xinkx/%1.svg").arg(entry.platform)),
+				platformTitle(entry.platform) + QStringLiteral(" · ") + entry.displayName(), entry.id);
 		const int index = account->findData(previous);
 		if (index >= 0) account->setCurrentIndex(index);
 	};
@@ -278,12 +287,10 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 		status->setText(QStringLiteral("Привязываем видеопоток YouTube…"));
 	});
 	auto *scroll = new QScrollArea(dock);
+	scroll->setObjectName(QStringLiteral("xinkxBroadcastEditor"));
 	scroll->setWidgetResizable(true);
 	scroll->setWidget(panel);
-	auto *tabs = new QTabWidget(dock);
-	tabs->setObjectName(QStringLiteral("xinkxBroadcastTabs"));
-	tabs->addTab(scroll, QStringLiteral("Текущий эфир"));
-	studioTabs(mainWindow)->addTab(tabs, QStringLiteral("Эфир"));
+	studioTabs(mainWindow)->addTab(scroll, QStringLiteral("Эфир"));
 }
 
 } // namespace xinkx

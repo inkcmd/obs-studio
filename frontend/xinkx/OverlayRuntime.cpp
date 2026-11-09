@@ -31,6 +31,8 @@
 #include <QSettings>
 #include <QSpinBox>
 #include <QTabWidget>
+#include <QUrl>
+#include <QUrlQuery>
 #include <QHostAddress>
 #include <QTcpSocket>
 #include <QVBoxLayout>
@@ -188,9 +190,13 @@ void OverlayRuntime::handleRequest(QTcpSocket *socket, const QByteArray &header)
 						    {QStringLiteral("viewers"), currentViewers}});
 		return;
 	}
-	if (requestLine == "GET /overlay HTTP/1.1" ||
-	    (requestLine.startsWith("GET /overlay?layer=") && requestLine.endsWith(" HTTP/1.1") &&
-	     validLayer(QString::fromLatin1(requestLine.mid(19, requestLine.size() - 28))))) {
+	const QList<QByteArray> requestParts = requestLine.split(' ');
+	const QUrl requested = requestParts.size() == 3 ? QUrl::fromEncoded(requestParts.at(1)) : QUrl();
+	const QUrlQuery query(requested);
+	if (requestParts.size() == 3 && requestParts.at(0) == "GET" &&
+	    requested.path() == QStringLiteral("/overlay") &&
+	    validLayer(query.queryItemValue(QStringLiteral("layer")).isEmpty()
+		? QStringLiteral("all") : query.queryItemValue(QStringLiteral("layer")))) {
 		QFile html(QStringLiteral(":/xinkx/overlay.html"));
 		if (html.open(QIODevice::ReadOnly)) {
 			const auto bytes = html.readAll();
@@ -413,7 +419,13 @@ bool OverlayRuntime::addToScene(OBSBasic *mainWindow, QString *message, const QS
 		return true;
 	}
 	obs_source_t *source = obs_get_source_by_name(sourceName.constData());
-	if (source && std::strcmp(obs_source_get_id(source), "browser_source") != 0) {
+	const QByteArray nativeId = layer == QStringLiteral("chat") ? "xinkx_chat" :
+		layer == QStringLiteral("effects") ? "xinkx_reactions" :
+		layer == QStringLiteral("alerts") ? "xinkx_alerts" :
+		layer == QStringLiteral("timer") ? "xinkx_timer" :
+		layer == QStringLiteral("viewers") ? "xinkx_viewers" :
+		layer == QStringLiteral("frame") ? "xinkx_frame" : "browser_source";
+	if (source && std::strcmp(obs_source_get_id(source), nativeId.constData()) != 0) {
 		obs_source_release(source);
 		*message = QStringLiteral("Имя слоя XINKX занято другим OBS-источником");
 		return false;
@@ -425,7 +437,8 @@ bool OverlayRuntime::addToScene(OBSBasic *mainWindow, QString *message, const QS
 			return false;
 		}
 		OBSData settings = obs_data_create();
-		obs_data_set_string(settings, "url", sourceUrl(layer).toUtf8().constData());
+		if (layer == QStringLiteral("all"))
+			obs_data_set_string(settings, "url", sourceUrl(layer).toUtf8().constData());
 		const int width = layer == QStringLiteral("chat") ? 720 :
 			layer == QStringLiteral("timer") ? 480 :
 			layer == QStringLiteral("alerts") ? 960 :
@@ -441,7 +454,7 @@ bool OverlayRuntime::addToScene(OBSBasic *mainWindow, QString *message, const QS
 		obs_data_set_int(settings, "fps", 30);
 		obs_data_set_bool(settings, "shutdown", false);
 		obs_data_set_bool(settings, "restart_when_active", true);
-		source = obs_source_create("browser_source", sourceName.constData(), settings, nullptr);
+		source = obs_source_create(nativeId.constData(), sourceName.constData(), settings, nullptr);
 		obs_data_release(settings);
 		if (!source) {
 			*message = QStringLiteral("OBS Browser Source недоступен: проверь obs-browser в сборке");
@@ -476,60 +489,10 @@ void installOverlayWorkspace(OBSBasic *mainWindow, QDockWidget *sourceInspector)
 	auto *status = new QLabel(runtime->available() ? QStringLiteral("Локальный движок · готов") : runtime->error(), content);
 	status->setWordWrap(true);
 	layout->addWidget(status);
-	auto *sourceGroup = new QGroupBox(QStringLiteral("Элементы сцены OBS"), content);
-	auto *sourceLayout = new QVBoxLayout(sourceGroup);
-	auto *sourceRow = new QHBoxLayout();
-	auto *layer = new QComboBox(sourceGroup);
-	for (const auto &entry : {std::pair{QStringLiteral("Чат"), QStringLiteral("chat")},
-				  std::pair{QStringLiteral("Реакции"), QStringLiteral("effects")},
-				  std::pair{QStringLiteral("Алерты и донаты"), QStringLiteral("alerts")},
-				  std::pair{QStringLiteral("Таймер"), QStringLiteral("timer")},
-				  std::pair{QStringLiteral("Счётчик зрителей"), QStringLiteral("viewers")},
-				  std::pair{QStringLiteral("Рамка камеры"), QStringLiteral("frame")},
-				  std::pair{QStringLiteral("Все вместе (legacy)"), QStringLiteral("all")}})
-		layer->addItem(entry.first, entry.second);
-	auto *add = new QPushButton(QStringLiteral("Добавить / выделить"), sourceGroup);
-	add->setEnabled(runtime->available());
-	sourceRow->addWidget(layer, 1);
-	sourceRow->addWidget(add);
-	sourceLayout->addLayout(sourceRow);
-	auto *sourceHint = new QLabel(QStringLiteral("Каждый элемент — отдельный источник OBS. Перемещай, масштабируй и меняй порядок на холсте."), sourceGroup);
+	auto *sourceHint = new QLabel(QStringLiteral("Источники XINKX добавляются штатной кнопкой «+» в OBS. "
+		"Двойной щелчок по источнику открывает его свойства; размеры и положение меняются в предпросмотре."), content);
 	sourceHint->setWordWrap(true);
-	sourceLayout->addWidget(sourceHint);
-	auto *createRow = new QHBoxLayout();
-	auto *newScene = new QPushButton(QStringLiteral("Новая сцена"), sourceGroup);
-	auto *newText = new QPushButton(QStringLiteral("Текстовый элемент"), sourceGroup);
-	createRow->addWidget(newScene);
-	createRow->addWidget(newText);
-	sourceLayout->addLayout(createRow);
-	layout->addWidget(sourceGroup);
-	QObject::connect(newScene, &QPushButton::clicked, dock, [=] {
-		bool ok = false;
-		const auto name = QInputDialog::getText(dock, QStringLiteral("Новая сцена OBS"),
-			QStringLiteral("Название"), QLineEdit::Normal, QString{}, &ok);
-		if (!ok || name.trimmed().isEmpty()) return;
-		if (auto *bus = mainWindow->findChild<StudioAutomation *>())
-			status->setText(bus->execute({{QStringLiteral("command"), QStringLiteral("scene.create")},
-				{QStringLiteral("name"), name}}).value(QStringLiteral("message")).toString());
-	});
-	QObject::connect(newText, &QPushButton::clicked, dock, [=] {
-		bool ok = false;
-		const auto name = QInputDialog::getText(dock, QStringLiteral("Текст OBS"),
-			QStringLiteral("Имя источника"), QLineEdit::Normal, QStringLiteral("XINKX · Текст"), &ok);
-		if (!ok || name.trimmed().isEmpty()) return;
-		const auto value = QInputDialog::getText(dock, QStringLiteral("Текст OBS"),
-			QStringLiteral("Содержимое"), QLineEdit::Normal, QString{}, &ok);
-		if (!ok || value.isEmpty()) return;
-		if (auto *bus = mainWindow->findChild<StudioAutomation *>())
-			status->setText(bus->execute({{QStringLiteral("command"), QStringLiteral("source.text.add")},
-				{QStringLiteral("name"), name}, {QStringLiteral("text"), value}})
-				.value(QStringLiteral("message")).toString());
-	});
-	QObject::connect(add, &QPushButton::clicked, dock, [=] {
-		QString notice;
-		runtime->addToScene(mainWindow, &notice, layer->currentData().toString());
-		status->setText(notice);
-	});
+	layout->addWidget(sourceHint);
 	auto *testGroup = new QGroupBox(QStringLiteral("Реакции и тест событий"), content);
 	auto *testLayout = new QVBoxLayout(testGroup);
 	auto *position = new QComboBox(content);

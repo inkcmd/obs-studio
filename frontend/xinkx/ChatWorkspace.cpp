@@ -12,6 +12,7 @@
 #include <QDateTime>
 #include <QDockWidget>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -78,22 +79,27 @@ void installChatWorkspace(OBSBasic *mainWindow)
 		const auto accounts = gateway->accounts();
 		for (const auto &account : accounts) {
 			auto *column = new QWidget(selector);
-			auto *stack = new QVBoxLayout(column);
-			stack->setContentsMargins(0, 0, 6, 0);
-			stack->setSpacing(2);
-			auto *box = new QCheckBox(platformTitle(account.platform) +
-				QStringLiteral(" · ") + account.displayName(), column);
+			auto *stack = new QHBoxLayout(column);
+			stack->setContentsMargins(0, 0, 4, 0);
+			stack->setSpacing(3);
+			auto *icon = new QLabel(column);
+			const QPixmap image(QStringLiteral(":/xinkx/%1.svg").arg(account.platform));
+			if (!image.isNull()) icon->setPixmap(image.scaled(16, 16, Qt::KeepAspectRatio,
+				Qt::SmoothTransformation));
+			icon->setFixedSize(16, 16);
+			stack->addWidget(icon);
+			auto *box = new QCheckBox(platformTitle(account.platform), column);
 			box->setChecked(!hadChoices || enabled.contains(account.id));
-			box->setToolTip(QStringLiteral("Отправлять сообщение в этот чат"));
+			box->setToolTip(QStringLiteral("%1 · %2\nОтправлять сообщения в этот чат")
+				.arg(platformTitle(account.platform), account.displayName()));
 			stack->addWidget(box);
 			auto *status = new QLabel(view->statusCache.value(account.id, QStringLiteral("Ожидание соединения")), column);
-			status->setWordWrap(true);
-			status->setStyleSheet(QStringLiteral("color:#a1b5c9; font-size: 11px"));
-			stack->addWidget(status);
-			auto *viewer = new QLabel(QStringLiteral("Зрители: —"), column);
+			status->hide();
+			box->setToolTip(box->toolTip() + QStringLiteral("\n") + status->text());
+			auto *viewer = new QLabel(QStringLiteral("—"), column);
 			viewer->setStyleSheet(QStringLiteral("font-size:11px;color:#82d8d3"));
 			stack->addWidget(viewer);
-			accountRow->addWidget(column, 1);
+			accountRow->addWidget(column);
 			view->targets.insert(account.id, box);
 			view->statuses.insert(account.id, status);
 			view->viewers.insert(account.id, viewer);
@@ -147,7 +153,11 @@ void installChatWorkspace(OBSBasic *mainWindow)
 	QObject::connect(gateway, &ChatGateway::providerStatus, dock,
 		[=](const QString &id, const QString &message) {
 			view->statusCache[id] = message;
-			if (view->statuses.contains(id)) view->statuses.value(id)->setText(message);
+			if (view->statuses.contains(id)) {
+				view->statuses.value(id)->setText(message);
+				if (auto *box = view->targets.value(id))
+					box->setToolTip(box->text() + QStringLiteral("\n") + message);
+			}
 		});
 	QObject::connect(gateway, &ChatGateway::providerWarning, dock,
 		[=](const QString &id, const QString &message) {
@@ -158,7 +168,7 @@ void installChatWorkspace(OBSBasic *mainWindow)
 		});
 	QObject::connect(gateway, &ChatGateway::viewersReceived, dock, [view](const QString &id, int count) {
 		if (auto *label = view->viewers.value(id)) label->setText(count < 0
-			? QStringLiteral("Зрители: —") : QStringLiteral("Зрители: %1").arg(count));
+			? QStringLiteral("—") : QString::number(count));
 	});
 	QObject::connect(gateway, &ChatGateway::incoming, dock, [=](const ChatLine &message) {
 		const auto timestamp = QDateTime::fromMSecsSinceEpoch(message.receivedAt).toString(QStringLiteral("HH:mm:ss"));
@@ -167,6 +177,7 @@ void installChatWorkspace(OBSBasic *mainWindow)
 		if (message.type == QStringLiteral("chat")) formatted += QStringLiteral(": ") + message.text;
 		else formatted += QStringLiteral(" · %1 %2 %3").arg(message.type, message.amount, message.text);
 		auto *item = new QListWidgetItem(formatted, feed);
+		item->setIcon(QIcon(QStringLiteral(":/xinkx/%1.svg").arg(message.platform)));
 		item->setForeground(QColor(message.platform == QStringLiteral("twitch") ? QStringLiteral("#ba91ff")
 			: message.platform == QStringLiteral("youtube") ? QStringLiteral("#ff9292")
 									   : QStringLiteral("#8be2b4")));

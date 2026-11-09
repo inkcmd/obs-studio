@@ -603,7 +603,13 @@ void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
 	if (body.isEmpty()) { emit broadcastResult(id, QStringLiteral("Для этой площадки укажи название или категорию"), false); return; }
 	jsonApi(id, url, method, body, [this, id, account](const HttpResult &result) {
 		const auto label = platformTitle(account.platform);
-		emit broadcastResult(id, result.ok ? label + QStringLiteral(": данные обновлены") : label + QStringLiteral(": ") + result.error,
+		const QString reason = account.platform == QStringLiteral("kick") && result.status == 401
+			? QStringLiteral("Kick: HTTP 401 после обновления токена. Переподключи OAuth в «Настройки → Трансляция» "
+				"с разрешением channel:write и проверь, что это аккаунт владельца канала.")
+			: account.platform == QStringLiteral("kick") && result.status == 403
+			? QStringLiteral("Kick: HTTP 403 — проверь разрешение channel:write и права на канал")
+			: label + QStringLiteral(": ") + result.error;
+		emit broadcastResult(id, result.ok ? label + QStringLiteral(": данные обновлены") : reason,
 			result.ok);
 	});
 }

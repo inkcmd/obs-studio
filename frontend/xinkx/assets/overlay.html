@@ -9,6 +9,7 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent !important; }
   body { font-family: "Segoe UI", "Inter", sans-serif; color: white; pointer-events: none; }
+  #surface, #chat, #timer, #viewers, #frame { zoom: var(--source-scale, 1); }
   #surface { position: absolute; inset: 0; overflow: hidden; }
   .effect { position: absolute; left: 50%; top: 26%; transform: translate(-50%, -50%);
     animation: enter .24s cubic-bezier(.2,1.4,.2,1) both; will-change: transform, opacity; }
@@ -19,11 +20,11 @@
   body[data-position="top-left"] .effect.alert { left: 4%; top: 9%; transform: none; }
   body[data-position="center"] .effect.alert { left: 50%; top: 40%; }
   .alert-card { min-width: 300px; max-width: 640px; padding: 22px 30px; border: 1px solid #8be5f68c;
-    border-radius: 16px; background: linear-gradient(125deg,#0a1838ed,#181536eb);
+    border-radius: var(--source-radius,16px); background: var(--source-background,#0a1838ed);
     box-shadow: 0 14px 55px #0008, 0 0 36px #4ec9ff3a; }
   .alert-card .kind { color: var(--cyan); letter-spacing: .2em; text-transform: uppercase; font-size: 15px; font-weight: 800; }
-  .alert-card .name { font-size: clamp(26px,3vw,47px); font-weight: 800; margin: 8px 0; word-break: break-word; }
-  .alert-card .detail { font-size: 20px; color: #e0e8ff; overflow-wrap: anywhere; }
+  .alert-card .name { font-size: var(--source-font-size,clamp(26px,3vw,47px)); font-weight: 800; margin: 8px 0; word-break: break-word; }
+  .alert-card .detail { font-size: 20px; color: var(--source-text,#e0e8ff); overflow-wrap: anywhere; }
   .impact { text-align: center; font-size: clamp(85px, 12vw, 230px); font-weight: 950; letter-spacing: -.07em;
     line-height: 1; font-style: italic; text-shadow: 0 4px #09112e, 0 0 25px #53dfff, 0 0 85px #3c5dfb; }
   .impact.boom { color: #ffd268; text-shadow: 0 4px #8d1720,0 0 18px #ff9d31,0 0 100px #ff4034;
@@ -57,6 +58,9 @@
     border-radius:6px 12px 12px 6px; padding:9px 14px; font-size:clamp(17px,1.5vw,29px);
     box-shadow:0 4px 28px #0008; overflow-wrap:anywhere; animation:chatIn .28s both; }
   .chat-line .who { color:var(--cyan); font-weight:850; margin-right:10px; }
+  .platform-mark { display:inline-flex; align-items:center; vertical-align:middle; margin-right:6px; }
+  .platform-mark svg { display:block; width:19px; height:19px; }
+  .viewer-mark { display:inline-flex; gap:4px; align-items:center; margin-right:12px; }
   .chat-line .badge { color:#97a8c7; font-size:.7em; font-weight:700; margin-right:8px; }
   .chat-line.leave { animation:chatOut .4s both; }
   @keyframes chatIn { from { opacity:0; transform:translateX(-28px); } }
@@ -95,6 +99,31 @@
   'use strict';
   const layer = new URLSearchParams(location.search).get('layer') || 'all';
   document.body.dataset.layer = layer;
+  // Appearance is stored on the OBS source, independently of other XINKX layers.
+  const sourceOptions = new URLSearchParams(location.search);
+  const accent = sourceOptions.get('accent') || '';
+  if (/^#[0-9a-fA-F]{6}$/.test(accent))
+    document.documentElement.style.setProperty('--cyan', accent);
+  const opacity = Number(sourceOptions.get('opacity'));
+  if (sourceOptions.has('opacity') && Number.isFinite(opacity))
+    document.body.style.opacity = String(Math.max(0, Math.min(100, opacity)) / 100);
+  const sourceScale = Number(sourceOptions.get('scale'));
+  if (sourceOptions.has('scale') && Number.isFinite(sourceScale))
+    document.documentElement.style.setProperty('--source-scale', Math.max(25, Math.min(200, sourceScale)) / 100);
+  const sourceColor = (name, property) => {
+    const value = sourceOptions.get(name) || '';
+    if (/^#[0-9a-fA-F]{6}$/.test(value)) document.documentElement.style.setProperty(property, value);
+    return /^#[0-9a-fA-F]{6}$/.test(value) ? value : '';
+  };
+  const customBackground=sourceColor('background','--source-background');
+  const customText=sourceColor('text','--source-text');
+  if (customText) document.body.style.color=customText;
+  const fontSize=Number(sourceOptions.get('fontSize'));
+  if (sourceOptions.has('fontSize') && Number.isFinite(fontSize))
+    document.documentElement.style.setProperty('--source-font-size',Math.max(10,Math.min(100,fontSize))+'px');
+  const radius=Number(sourceOptions.get('radius'));
+  if (sourceOptions.has('radius') && Number.isFinite(radius))
+    document.documentElement.style.setProperty('--source-radius',Math.max(0,Math.min(60,radius))+'px');
   const surface = document.getElementById('surface');
   const timer = document.getElementById('timer');
   const chat = document.getElementById('chat');
@@ -110,6 +139,24 @@
     const result = document.createElement(tag); result.className = cls || '';
     if (value !== undefined) result.textContent = String(value).slice(0,240);
     return result;
+  }
+  function icon(platform) {
+    const wrapper=node('span','platform-mark');
+    const parts={
+      twitch:['#9146ff','M3 1h19v15l-6 6h-5l-3 2v-4H3z'],
+      youtube:['#ff0033','M2 4h20v16H2z'],
+      kick:['#53fc18','M5 5h5v5h3V8h3V5h3v6h-3v2h3v6h-3v-3h-3v-2h-3v5H5z']
+    };
+    const spec=parts[String(platform||'').toLowerCase()];
+    if (!spec) return wrapper;
+    const ns='http://www.w3.org/2000/svg';
+    const svg=document.createElementNS(ns,'svg');
+    svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('aria-label',platform);
+    const path=document.createElementNS(ns,'path');path.setAttribute('d',spec[1]);path.setAttribute('fill',spec[0]);
+    svg.append(path);
+    if (platform==='youtube') {const play=document.createElementNS(ns,'path');
+      play.setAttribute('d','M10 8v8l7-4z');play.setAttribute('fill','#fff');svg.append(play);}
+    wrapper.append(svg);return wrapper;
   }
   function particles(gg) {
     const root = node('div','particles');
@@ -184,7 +231,7 @@
     if (!['chat','all'].includes(layer)) return;
     if (!event || paused || !event.message) return;
     const line=node('div','chat-line');
-    if (style.chat.showPlatform) line.append(node('span','badge',String(event.platform||'').toUpperCase()));
+    if (style.chat.showPlatform) line.append(icon(event.platform));
     line.append(node('span','who',event.name||'Зритель'));
     if (style.chat.showTime) line.append(node('span','badge',new Date().toLocaleTimeString()));
     line.append(node('span','message',event.message));
@@ -216,12 +263,12 @@
   }
   function updateLine(line) {
     const c=style.chat||{};
-    line.style.background=String(c.backgroundColor||'#09152c')+
+    line.style.background=customBackground || String(c.backgroundColor||'#09152c')+
       Math.round((Number(c.opacity)||88)*2.55).toString(16).padStart(2,'0');
-    line.style.color=String(c.textColor||'#f6faff');
+    line.style.color=customText || String(c.textColor||'#f6faff');
     line.style.padding=(Number(c.padding)||0)+'px';
-    line.style.borderRadius=(Number(c.radius)||0)+'px';
-    line.style.fontSize=(Number(c.fontSize)||26)+'px';
+    line.style.borderRadius=sourceOptions.has('radius') ? Math.max(0,Math.min(60,radius))+'px' : (Number(c.radius)||0)+'px';
+    line.style.fontSize=sourceOptions.has('fontSize') ? Math.max(10,Math.min(100,fontSize))+'px' : (Number(c.fontSize)||26)+'px';
     line.style.fontWeight=String(Number(c.fontWeight)||600);
     const who=line.querySelector('.who');if(who)who.style.color=String(c.nameColor||'#8de9fb');
   }
@@ -234,7 +281,11 @@
   function state(value) {
     if (value.presentation&&value.presentation.viewer) applyAppearance(value.presentation.viewer);
     const counts=value.viewers||{};
-    viewers.textContent=style.chat.showViewers ? Object.entries(counts).map(([p,v])=>p+': '+v).join('   ') : '';
+    viewers.replaceChildren();
+    if (style.chat.showViewers) for (const [platform,count] of Object.entries(counts)) {
+      const item=node('span','viewer-mark');
+      item.append(icon(platform),node('span','',count));viewers.append(item);
+    }
     paused=Boolean(value.paused);
     const where=String(value.position||'top-right');
     document.body.dataset.position=['top-right','top-left','center'].includes(where)?where:'top-right';

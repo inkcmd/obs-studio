@@ -19,6 +19,9 @@
 #include "OBSBasicSettings.hpp"
 #include "OBSHotkeyLabel.hpp"
 #include "OBSHotkeyWidget.hpp"
+#ifdef XINKX_STUDIO
+#include "../xinkx/StudioSettingsPages.hpp"
+#endif
 
 #include <components/Multiview.hpp>
 #include <components/OBSSourceLabel.hpp>
@@ -854,6 +857,9 @@ OBSBasicSettings::OBSBasicSettings(QWidget *parent)
 	InitStreamPage();
 	InitAppearancePage();
 	LoadSettings(false);
+#ifdef XINKX_STUDIO
+	xinkx::installStudioSettingsPages(this);
+#endif
 
 	ui->advOutTrack1->setAccessibleName(QTStr("Basic.Settings.Output.Adv.Audio.Track1"));
 	ui->advOutTrack2->setAccessibleName(QTStr("Basic.Settings.Output.Adv.Audio.Track2"));
