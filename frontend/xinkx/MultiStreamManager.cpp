@@ -97,14 +97,17 @@ int MultiStreamManager::startConfigured()
 	}
 	configured = loadStreamAccounts();
 	sessions.clear();
+	liveMode = false;
 	for (const auto &account : configured) {
 		if (enabled(account)) {
 			start(account);
 		}
 	}
-	updateStatus();
-	return static_cast<int>(std::count_if(sessions.cbegin(), sessions.cend(),
+	const int started = static_cast<int>(std::count_if(sessions.cbegin(), sessions.cend(),
 						   [](const auto &entry) { return entry->running; }));
+	liveMode = started > 0;
+	updateStatus();
+	return started;
 }
 
 void MultiStreamManager::start(const StreamAccount &account)
@@ -138,6 +141,28 @@ void MultiStreamManager::start(const StreamAccount &account)
 	session.failed = !session.running;
 }
 
+void MultiStreamManager::restart(Session &session)
+{
+	if (session.stopping) {
+		session.restartRequested = true;
+		return;
+	}
+	if (session.running) return;
+	session.restartRequested = false;
+	if (!session.output || !session.service) {
+		session.failed = true;
+		return;
+	}
+	// Reuse this account's encoders/output, rather than accumulating a new
+	// output every time a checkbox is toggled. Counters restart from zero.
+	session.stats = OutputStats{};
+	session.stats.sampleTime = clock.elapsed();
+	session.failed = false;
+	session.running = obs_output_start(session.output);
+	session.failed = !session.running;
+	if (session.running) session.stats.bytes = obs_output_get_total_bytes(session.output);
+}
+
 void MultiStreamManager::outputStopped(void *data, calldata_t *params)
 {
 	auto *session = static_cast<Session *>(data);
@@ -150,6 +175,9 @@ void MultiStreamManager::outputStopped(void *data, calldata_t *params)
 				entry->running = false;
 				entry->failed = !entry->stopping && code != OBS_OUTPUT_SUCCESS;
 				entry->stopping = false;
+				if (entry->restartRequested && manager->liveMode && manager->enabled(entry->account))
+					manager->restart(*entry);
+				else entry->restartRequested = false;
 				manager->updateStatus();
 				break;
 			}
@@ -172,7 +200,9 @@ void MultiStreamManager::stop(Session &session, bool force)
 
 void MultiStreamManager::stopAll(bool force)
 {
+	liveMode = false;
 	for (auto &session : sessions) {
+		session->restartRequested = false;
 		stop(*session, force);
 	}
 	updateStatus();
@@ -323,34 +353,36 @@ QVector<MultiStreamManager::OutputSnapshot> MultiStreamManager::outputSnapshots(
 void MultiStreamManager::populateMenu(QMenu *menu)
 {
 	menu->clear();
-	if (anythingActive()) {
-		for (const auto &session : sessions) {
-			const auto id = session->account.id;
-			auto *action = menu->addAction(u"%1 · %2: %3"_s.arg(
-				platformTitle(session->account.platform), session->account.displayName(), session->description()));
-			action->setIcon(platformIcon(session->account.platform));
-			action->setEnabled(session->running && !session->stopping);
-			action->setToolTip(u"Остановить только этот выход"_s);
-			connect(action, &QAction::triggered, this, [this, id] {
-				for (auto &entry : sessions) {
-					if (entry->account.id == id) {
-						stop(*entry, false);
-						updateStatus();
-						break;
-					}
-				}
-			});
-		}
-		return;
-	}
-
-	for (const auto &account : loadStreamAccounts()) {
-		auto *action = menu->addAction(u"%1 · %2"_s.arg(platformTitle(account.platform), account.displayName()));
+	const auto accounts = liveMode ? configured : loadStreamAccounts();
+	for (const auto &account : accounts) {
+		Session *session = nullptr;
+		for (const auto &entry : sessions)
+			if (entry->account.id == account.id) { session = entry.get(); break; }
+		const QString description = liveMode
+			? u": %1"_s.arg(session ? session->description() : u"Остановлен"_s) : QString{};
+		auto *action = menu->addAction(u"%1 · %2%3"_s.arg(
+			platformTitle(account.platform), account.displayName(), description));
 		action->setIcon(platformIcon(account.platform));
 		action->setCheckable(true);
-		action->setChecked(enabled(account));
-		connect(action, &QAction::toggled, this, [this, id = account.id](bool checked) {
-			selection[id] = checked;
+		action->setChecked(liveMode
+			? session && ((session->running && !session->stopping) || session->restartRequested)
+			: enabled(account));
+		action->setToolTip(liveMode ? u"Включить или отключить только этот RTMP-выход"_s
+			: u"Выбрать площадку для следующего запуска"_s);
+		connect(action, &QAction::toggled, this, [this, account](bool checked) {
+			selection[account.id] = checked;
+			if (liveMode) {
+				Session *current = nullptr;
+				for (const auto &entry : sessions)
+					if (entry->account.id == account.id) { current = entry.get(); break; }
+				if (checked) {
+					if (current) restart(*current);
+					else start(account);
+				} else if (current) {
+					current->restartRequested = false;
+					stop(*current, false);
+				}
+			}
 			updateStatus();
 		});
 	}
@@ -362,7 +394,7 @@ void MultiStreamManager::populateMenu(QMenu *menu)
 void MultiStreamManager::OutputStats::sample(obs_output_t *output, qint64 now)
 {
 	const auto totalBytes = obs_output_get_total_bytes(output);
-	if (totalBytes && !timer.isValid()) {
+	if (totalBytes > bytes && !timer.isValid()) {
 		timer.start();
 	}
 	const auto elapsed = now - sampleTime;

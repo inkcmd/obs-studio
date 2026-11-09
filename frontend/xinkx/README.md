@@ -1,4 +1,12 @@
-# XINKX Studio — Stage 19 (0.15-dev)
+# XINKX Studio — Stage 20 (0.15-dev)
+
+## Stage 20 — independent RTMP output toggles (Windows runtime verification pending)
+
+- The account menu next to **Остановить трансляцию** no longer turns into one-way, disabled Stop commands. Each Twitch/YouTube/Kick/custom RTMP destination keeps a checkable action while a session is running. Unchecking stops only that output; checking it again restarts its own libobs encoder/output without restarting the other platforms or accumulating duplicate outputs.
+- Checking a provider while its previous output is still stopping queues its restart until libobs emits the `stop` signal. Clicking the global **Остановить трансляцию** cancels such queued restarts and stops every output. When streaming has not started, the same checkboxes only select destinations for the next global Start.
+- An independent 0 kbps/stopped RTMP output can be restarted even if other accounts remain live. This only changes RTMP output connectivity: YouTube ingest reporting "excellent connection" does not prove that the selected broadcast is publicly live. YouTube Live Control Room may still require the matching stream key/broadcast binding, a processed preview and the **Go live** action unless automatic start is enabled.
+
+Verification on Windows: start Twitch+YouTube+Kick; uncheck only YouTube while Twitch/Kick continue; recheck YouTube and verify its bitrate/timer restart. Repeat with a fast off→on during stopping, then global Stop and ensure nothing restarts later. Independently inspect the selected YouTube broadcast's Live Control Room preview, stream key and live state. This patch has source-level verification only; it does **not** claim an authenticated YouTube runtime check.
 
 ## Stage 19 — one broadcast profile, one Save (Windows runtime verification pending)
 

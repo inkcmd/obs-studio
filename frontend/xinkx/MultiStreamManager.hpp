@@ -75,6 +75,7 @@ private:
 		bool running = false;
 		bool stopping = false;
 		bool failed = false;
+		bool restartRequested = false;
 		QString description() const;
 	};
 
@@ -83,9 +84,11 @@ private:
 	QElapsedTimer clock;
 	std::vector<std::unique_ptr<Session>> sessions;
 	bool lastActive = false;
+	bool liveMode = false;
 	quint64 nextSerial = 0;
 	bool enabled(const StreamAccount &account) const;
 	void start(const StreamAccount &account);
+	void restart(Session &session);
 	void stop(Session &session, bool force);
 	void updateStatus();
 	static void outputStopped(void *data, calldata_t *params);
