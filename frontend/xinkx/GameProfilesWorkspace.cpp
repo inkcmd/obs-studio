@@ -23,6 +23,7 @@
 #include <QScrollArea>
 #include <QSettings>
 #include <QSignalBlocker>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <memory>
@@ -67,6 +68,18 @@ void refreshScenes(QComboBox *select)
 	obs_frontend_source_list_free(&scenes);
 	if (const int index = select->findData(previous); index >= 0) select->setCurrentIndex(index);
 }
+
+// OBS populates scene collections after XINKX installs its workspace. Refresh
+// at popup time as well as when the initial scene becomes available.
+class SceneSelector final : public QComboBox {
+public:
+	using QComboBox::QComboBox;
+	void showPopup() override
+	{
+		refreshScenes(this);
+		QComboBox::showPopup();
+	}
+};
 
 QString filePath()
 {
@@ -164,7 +177,7 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 	name->setMaxLength(120);
 	name->setPlaceholderText(QStringLiteral("Название профиля"));
 	form->addRow(QStringLiteral("Имя"), name);
-	auto *scene = new QComboBox(group);
+	auto *scene = new SceneSelector(group);
 	form->addRow(QStringLiteral("Сцена OBS"), scene);
 	layout->addLayout(form);
 	auto *actions = new QHBoxLayout();
@@ -227,6 +240,17 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 	QObject::connect(profiles, &QComboBox::currentIndexChanged, group, load);
 	reload();
 	load();
+	// At startup obs_frontend_get_scenes() can return an empty list while
+	// OBS is still loading the scene collection. Do not require "New profile".
+	auto *awaitScenes = new QTimer(group);
+	awaitScenes->setInterval(400);
+	auto *attempts = std::make_shared<int>(0);
+	QObject::connect(awaitScenes, &QTimer::timeout, group, [=] {
+		if (scene->count() > 1 || ++*attempts > 75) { awaitScenes->stop(); return; }
+		load();
+		if (scene->count() > 1) awaitScenes->stop();
+	});
+	awaitScenes->start();
 	QObject::connect(newProfile, &QPushButton::clicked, group, [=] {
 		profiles->setCurrentIndex(0);
 		name->clear();

@@ -37,6 +37,9 @@ struct StreamAccount {
 	QString label;
 	QString providerId;
 	QString providerName;
+	// Another output can use the same OAuth identity without storing a second
+	// set of credentials. RTMP key, stream ID and composition remain independent.
+	QString authorizationSourceId;
 	QString youtubeStreamId;
 	bool enabled = true;
 	bool primary = false;

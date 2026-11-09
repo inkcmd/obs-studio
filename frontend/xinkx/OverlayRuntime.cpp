@@ -53,6 +53,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 #include <utility>
 
 namespace xinkx {
@@ -231,6 +232,30 @@ QPixmap catalogPreview(const SourcePreset &item)
 			item.appearance == QStringLiteral("round") ? 65 : 20);
 		painter.setPen(QColor(QStringLiteral("#9baecc")));
 		painter.drawText(QRect(100, 150, 440, 40), Qt::AlignCenter, QStringLiteral("КАМЕРА"));
+	} else if (item.layer == QStringLiteral("timer")) {
+		painter.setPen(accent);
+		QFont font = painter.font(); font.setPointSize(66); font.setBold(true); painter.setFont(font);
+		painter.drawText(QRect(40, 65, 560, 210), Qt::AlignCenter, QStringLiteral("04:59"));
+		painter.setPen(Qt::NoPen);
+		painter.setBrush(QColor(QStringLiteral("#354760")));
+		painter.drawRoundedRect(QRect(110, 289, 420, 10), 5, 5);
+		painter.setBrush(accent);
+		painter.drawRoundedRect(QRect(110, 289, 315, 10), 5, 5);
+	} else if (item.layer == QStringLiteral("alerts")) {
+		painter.setPen(Qt::NoPen);
+		painter.setBrush(QColor(QStringLiteral("#1d2943")));
+		painter.drawRoundedRect(QRect(80, 105, 480, 175), 18, 18);
+		painter.setPen(accent);
+		QFont heading = painter.font(); heading.setPointSize(28); heading.setBold(true); painter.setFont(heading);
+		painter.drawText(QRect(95, 119, 450, 65), Qt::AlignCenter, QStringLiteral("✦ ДОНАТ · 500 ₽ ✦"));
+		painter.setPen(Qt::white);
+		QFont message = painter.font(); message.setPointSize(18); message.setBold(false); painter.setFont(message);
+		painter.drawText(QRect(100, 187, 440, 70), Qt::AlignCenter | Qt::TextWordWrap,
+			QStringLiteral("Зритель42: Удачного стрима!"));
+	} else if (item.layer == QStringLiteral("viewers")) {
+		painter.setPen(accent);
+		QFont font = painter.font(); font.setPointSize(32); font.setBold(true); painter.setFont(font);
+		painter.drawText(QRect(35, 90, 570, 180), Qt::AlignCenter, QStringLiteral("● 128 зрителей"));
 	} else {
 		painter.setPen(accent);
 		QFont font = painter.font(); font.setPointSize(38); font.setBold(true); painter.setFont(font);
@@ -668,94 +693,104 @@ bool OverlayRuntime::addToScene(OBSBasic *mainWindow, QString *message, const QS
 
 void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *parent)
 {
-	QDialog dialog(parent);
-	dialog.setWindowTitle(QStringLiteral("XINKX · Каталог источников"));
-	dialog.resize(940, 600);
-	auto *page = new QHBoxLayout(&dialog);
-	auto *items = new QListWidget(&dialog);
+	// A non-modal library: selecting an OBS source and changing the scene must
+	// remain possible while browsing presets.
+	if (auto *existing = mainWindow->findChild<QDialog *>(QStringLiteral("xinkxPresetCatalog"))) {
+		existing->show();
+		existing->raise();
+		existing->activateWindow();
+		return;
+	}
+	auto *dialog = new QDialog(mainWindow);
+	dialog->setObjectName(QStringLiteral("xinkxPresetCatalog"));
+	dialog->setAttribute(Qt::WA_DeleteOnClose);
+	dialog->setWindowTitle(QStringLiteral("XINKX · Библиотека источников"));
+	dialog->resize(940, 600);
+	dialog->setWindowModality(Qt::NonModal);
+	auto *page = new QHBoxLayout(dialog);
+	auto *items = new QListWidget(dialog);
 	items->setIconSize(QSize(128, 72));
 	items->setMinimumWidth(345);
 	page->addWidget(items, 1);
 	auto *detail = new QVBoxLayout();
-	auto *preview = new QLabel(&dialog);
+	auto *preview = new QLabel(dialog);
 	preview->setMinimumSize(430, 242);
 	preview->setAlignment(Qt::AlignCenter);
 	detail->addWidget(preview);
-	auto *description = new QLabel(&dialog);
+	auto *description = new QLabel(dialog);
 	description->setWordWrap(true);
 	detail->addWidget(description);
 	auto *form = new QFormLayout();
-	auto *name = new QLineEdit(&dialog);
+	auto *name = new QLineEdit(dialog);
 	name->setMaxLength(100);
 	form->addRow(QStringLiteral("Название источника"), name);
-	auto *width = new QSpinBox(&dialog);
+	auto *width = new QSpinBox(dialog);
 	width->setRange(80, 3840);
 	width->setSuffix(QStringLiteral(" px"));
-	auto *height = new QSpinBox(&dialog);
+	auto *height = new QSpinBox(dialog);
 	height->setRange(50, 2160);
 	height->setSuffix(QStringLiteral(" px"));
 	form->addRow(QStringLiteral("Ширина области"), width);
 	form->addRow(QStringLiteral("Высота области"), height);
-	auto *placement = new QComboBox(&dialog);
+	auto *placement = new QComboBox(dialog);
 	placement->addItem(QStringLiteral("Слева сверху"), QStringLiteral("top-left"));
 	placement->addItem(QStringLiteral("Справа сверху"), QStringLiteral("top-right"));
 	placement->addItem(QStringLiteral("По центру"), QStringLiteral("center"));
 	placement->addItem(QStringLiteral("Слева снизу"), QStringLiteral("bottom-left"));
 	placement->addItem(QStringLiteral("Справа снизу"), QStringLiteral("bottom-right"));
 	form->addRow(QStringLiteral("Размещение на сцене"), placement);
-	auto *caption = new QLineEdit(&dialog);
+	auto *caption = new QLineEdit(dialog);
 	caption->setMaxLength(64);
 	caption->setPlaceholderText(QStringLiteral("Свой текст эффекта (необязательно)"));
-	auto *captionLabel = new QLabel(QStringLiteral("Текст реакции"), &dialog);
+	auto *captionLabel = new QLabel(QStringLiteral("Текст реакции"), dialog);
 	form->addRow(captionLabel, caption);
-	auto *messageAlpha = new QSpinBox(&dialog);
+	auto *messageAlpha = new QSpinBox(dialog);
 	messageAlpha->setRange(0, 100);
 	messageAlpha->setSuffix(QStringLiteral(" %"));
-	auto *messageAlphaLabel = new QLabel(QStringLiteral("Фон сообщений"), &dialog);
+	auto *messageAlphaLabel = new QLabel(QStringLiteral("Фон сообщений"), dialog);
 	form->addRow(messageAlphaLabel, messageAlpha);
-	auto *panelAlpha = new QSpinBox(&dialog);
+	auto *panelAlpha = new QSpinBox(dialog);
 	panelAlpha->setRange(0, 100);
 	panelAlpha->setSuffix(QStringLiteral(" %"));
-	auto *panelAlphaLabel = new QLabel(QStringLiteral("Фон всей области"), &dialog);
+	auto *panelAlphaLabel = new QLabel(QStringLiteral("Фон всей области"), dialog);
 	form->addRow(panelAlphaLabel, panelAlpha);
 	detail->addLayout(form);
-	auto *help = new QLabel(QStringLiteral("После добавления выдели источник в предпросмотре OBS: "
-		"перетаскивай и меняй его ширину и высоту за маркеры. "
-		"Свойства источника открываются двойным щелчком."), &dialog);
+	auto *help = new QLabel(QStringLiteral("Выбери пресет и добавь его прямо на текущую сцену OBS. "
+		"Размер и размещение можно менять на холсте. Библиотека не блокирует OBS."), dialog);
 	help->setWordWrap(true);
 	detail->addWidget(help);
 	detail->addStretch();
 	auto *buttons = new QHBoxLayout();
-	auto *savePreset = new QPushButton(QStringLiteral("Запомнить выделенный источник"), &dialog);
-	savePreset->setToolTip(QStringLiteral("Сохранить оформление источника OBS как свой пресет в этом каталоге."));
+	auto *savePreset = new QPushButton(QStringLiteral("Сохранить вариант как мой пресет"), dialog);
+	savePreset->setToolTip(QStringLiteral("Сохраняет выбранный шаблон с изменениями из этой формы."));
 	buttons->addWidget(savePreset);
-	auto *removePreset = new QPushButton(QStringLiteral("Удалить мой"), &dialog);
+	auto *removePreset = new QPushButton(QStringLiteral("Удалить мой"), dialog);
 	buttons->addWidget(removePreset);
 	detail->addLayout(buttons);
-	auto *updateSelected = new QPushButton(QStringLiteral("Применить к выделенному источнику"), &dialog);
+	auto *updateSelected = new QPushButton(QStringLiteral("Применить к выделенному источнику"), dialog);
 	updateSelected->setToolTip(QStringLiteral("Обновить оформление выделенного источника XINKX на сцене без удаления и повторного добавления."));
 	detail->addWidget(updateSelected);
-	auto *add = new QPushButton(QStringLiteral("Добавить на сцену"), &dialog);
+	auto *add = new QPushButton(QStringLiteral("Добавить на сцену"), dialog);
 	add->setDefault(true);
 	detail->addWidget(add);
 	page->addLayout(detail, 2);
 
-	QList<SourcePreset> catalog;
+	auto catalog = std::make_shared<QList<SourcePreset>>();
 	const int builtinCount = 19;
-	const auto rebuild = [&] {
-		catalog = catalogPresets();
+	const auto rebuild = [=] {
+		*catalog = catalogPresets();
 		items->clear();
-		for (const auto &entry : std::as_const(catalog)) {
+		for (const auto &entry : std::as_const(*catalog)) {
 			auto *row = new QListWidgetItem(QIcon(catalogPreview(entry).scaled(128, 72, Qt::KeepAspectRatio,
 				Qt::SmoothTransformation)), entry.title, items);
 			row->setSizeHint(QSize(320, 82));
 			row->setToolTip(entry.description);
 		}
-		if (!catalog.isEmpty()) items->setCurrentRow(0);
+		if (!catalog->isEmpty()) items->setCurrentRow(0);
 	};
-	QObject::connect(items, &QListWidget::currentRowChanged, &dialog, [&](int index) {
-		if (index < 0 || index >= catalog.size()) return;
-		const auto &entry = catalog.at(index);
+	QObject::connect(items, &QListWidget::currentRowChanged, dialog, [=](int index) {
+		if (index < 0 || index >= catalog->size()) return;
+		const auto &entry = catalog->at(index);
 		preview->setPixmap(catalogPreview(entry).scaled(600, 340, Qt::KeepAspectRatio,
 			Qt::SmoothTransformation));
 		description->setText(entry.description);
@@ -783,10 +818,10 @@ void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *p
 			? QStringLiteral("top-right") : QStringLiteral("center")));
 		removePreset->setEnabled(index >= builtinCount);
 	});
-	const auto refreshPreview = [&] {
+	const auto refreshPreview = [=] {
 		const int index = items->currentRow();
-		if (index < 0 || index >= catalog.size()) return;
-		SourcePreset modified = catalog.at(index);
+		if (index < 0 || index >= catalog->size()) return;
+		SourcePreset modified = catalog->at(index);
 		if (modified.layer == QStringLiteral("effects"))
 			modified.settings.insert(QStringLiteral("customText"), caption->text());
 		if (modified.layer == QStringLiteral("chat")) {
@@ -801,10 +836,10 @@ void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *p
 		preview->setPixmap(catalogPreview(modified).scaled(600, 340,
 			Qt::KeepAspectRatio, Qt::SmoothTransformation));
 	};
-	QObject::connect(caption, &QLineEdit::textChanged, &dialog, refreshPreview);
-	QObject::connect(messageAlpha, &QSpinBox::valueChanged, &dialog, refreshPreview);
-	QObject::connect(panelAlpha, &QSpinBox::valueChanged, &dialog, refreshPreview);
-	const auto configurationFor = [&](const SourcePreset &entry, const QString &originalReaction = QString{}) {
+	QObject::connect(caption, &QLineEdit::textChanged, dialog, refreshPreview);
+	QObject::connect(messageAlpha, &QSpinBox::valueChanged, dialog, refreshPreview);
+	QObject::connect(panelAlpha, &QSpinBox::valueChanged, dialog, refreshPreview);
+	const auto configurationFor = [=](const SourcePreset &entry, const QString &originalReaction = QString{}) {
 		QJsonObject configuration = entry.settings;
 		configuration.insert(QStringLiteral("width"), width->value());
 		configuration.insert(QStringLiteral("height"), height->value());
@@ -827,13 +862,13 @@ void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *p
 		}
 		return configuration;
 	};
-	const auto customEntries = [&] {
+	const auto customEntries = [] {
 		const QString path = catalogPath();
 		if (path.isEmpty()) return QJsonArray{};
 		QSettings settings(path, QSettings::IniFormat);
 		return QJsonDocument::fromJson(settings.value(QStringLiteral("catalog/presets")).toByteArray()).array();
 	};
-	const auto writeCustom = [&](const QJsonArray &value) {
+	const auto writeCustom = [](const QJsonArray &value) {
 		const QString path = catalogPath();
 		if (path.isEmpty()) return false;
 		QSettings settings(path, QSettings::IniFormat);
@@ -841,54 +876,33 @@ void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *p
 		settings.sync();
 		return settings.status() == QSettings::NoError;
 	};
-	QObject::connect(savePreset, &QPushButton::clicked, &dialog, [&] {
-		OBSScene scene = mainWindow->GetCurrentScene();
-		if (!scene) return;
-		struct Selected { obs_source_t *source = nullptr; } selected;
-		obs_scene_enum_items(scene, [](obs_scene_t *, obs_sceneitem_t *item, void *data) {
-			if (!obs_sceneitem_selected(item)) return true;
-			auto *source = obs_sceneitem_get_source(item);
-			if (source && QString::fromUtf8(obs_source_get_id(source)).startsWith(QStringLiteral("xinkx_"))) {
-				static_cast<Selected *>(data)->source = source;
-				return false;
-			}
-			return true;
-		}, &selected);
-		if (!selected.source) {
-			QMessageBox::information(&dialog, QStringLiteral("Пресет"),
-				QStringLiteral("Сначала выдели источник XINKX в списке источников OBS."));
+	QObject::connect(savePreset, &QPushButton::clicked, dialog, [=] {
+		const int index = items->currentRow();
+		if (index < 0 || index >= catalog->size()) return;
+		const auto &selected = catalog->at(index);
+		bool ok = false;
+		const QString title = QInputDialog::getText(dialog, QStringLiteral("Мой пресет"),
+			QStringLiteral("Название"), QLineEdit::Normal, name->text().trimmed(), &ok).trimmed().left(80);
+		if (!ok || title.isEmpty()) return;
+		auto entries = customEntries();
+		if (entries.size() >= 100) {
+			QMessageBox::warning(dialog, QStringLiteral("Пресеты"), QStringLiteral("Достигнут предел 100 пользовательских пресетов"));
 			return;
 		}
-		bool ok = false;
-		const QString title = QInputDialog::getText(&dialog, QStringLiteral("Мой пресет"),
-			QStringLiteral("Название"), QLineEdit::Normal,
-			QString::fromUtf8(obs_source_get_name(selected.source)), &ok).trimmed().left(80);
-		if (!ok || title.isEmpty()) return;
-		const QString kind = QString::fromUtf8(obs_source_get_id(selected.source));
-		const QString layer = kind == QStringLiteral("xinkx_chat") ? QStringLiteral("chat") :
-			kind == QStringLiteral("xinkx_reactions") ? QStringLiteral("effects") :
-			kind == QStringLiteral("xinkx_frame") ? QStringLiteral("frame") :
-			kind == QStringLiteral("xinkx_alerts") ? QStringLiteral("alerts") :
-			kind == QStringLiteral("xinkx_timer") ? QStringLiteral("timer") : QStringLiteral("viewers");
-		OBSDataAutoRelease settings = obs_source_get_settings(selected.source);
-		const char *serialized = obs_data_get_json(settings);
-		const QJsonObject saved = QJsonDocument::fromJson(QByteArray(serialized ? serialized : "{}")).object();
-		auto entries = customEntries();
-		if (entries.size() >= 100) return;
-		entries.append(QJsonObject{{QStringLiteral("name"), title}, {QStringLiteral("layer"), layer},
-			{QStringLiteral("settings"), saved}});
-		if (writeCustom(entries)) {rebuild();items->setCurrentRow(catalog.size() - 1);}
+		entries.append(QJsonObject{{QStringLiteral("name"), title}, {QStringLiteral("layer"), selected.layer},
+			{QStringLiteral("settings"), configurationFor(selected)}});
+		if (writeCustom(entries)) { rebuild(); items->setCurrentRow(catalog->size() - 1); }
 	});
-	QObject::connect(removePreset, &QPushButton::clicked, &dialog, [&] {
+	QObject::connect(removePreset, &QPushButton::clicked, dialog, [=] {
 		const int index = items->currentRow() - builtinCount;
 		auto entries = customEntries();
 		if (index < 0 || index >= entries.size()) return;
 		entries.removeAt(index);
 		if (writeCustom(entries)) rebuild();
 	});
-	QObject::connect(updateSelected, &QPushButton::clicked, &dialog, [&] {
+	QObject::connect(updateSelected, &QPushButton::clicked, dialog, [=] {
 		const int index = items->currentRow();
-		if (index < 0 || index >= catalog.size()) return;
+		if (index < 0 || index >= catalog->size()) return;
 		OBSScene scene = mainWindow->GetCurrentScene();
 		if (!scene) return;
 		struct Selected { obs_sceneitem_t *item = nullptr; } selected;
@@ -898,22 +912,22 @@ void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *p
 			return false;
 		}, &selected);
 		if (!selected.item) {
-			QMessageBox::information(&dialog, QStringLiteral("Источник XINKX"),
+			QMessageBox::information(dialog, QStringLiteral("Источник XINKX"),
 				QStringLiteral("Выдели источник на сцене или в списке OBS."));
 			return;
 		}
 		obs_source_t *source = obs_sceneitem_get_source(selected.item);
 		const QString id = QString::fromUtf8(obs_source_get_id(source));
-		const QString expected = QStringLiteral("xinkx_") + (catalog.at(index).layer == QStringLiteral("effects")
-			? QStringLiteral("reactions") : catalog.at(index).layer);
+		const QString expected = QStringLiteral("xinkx_") + (catalog->at(index).layer == QStringLiteral("effects")
+			? QStringLiteral("reactions") : catalog->at(index).layer);
 		if (id != expected) {
-			QMessageBox::warning(&dialog, QStringLiteral("Источник XINKX"),
+			QMessageBox::warning(dialog, QStringLiteral("Источник XINKX"),
 				QStringLiteral("Выбранное оформление не соответствует типу выделенного источника."));
 			return;
 		}
 		OBSDataAutoRelease beforeSettings = obs_source_get_settings(source);
 		const QString oldReaction = QString::fromUtf8(obs_data_get_string(beforeSettings, "reaction"));
-		const QByteArray json = QJsonDocument(configurationFor(catalog.at(index), oldReaction))
+		const QByteArray json = QJsonDocument(configurationFor(catalog->at(index), oldReaction))
 			.toJson(QJsonDocument::Compact);
 		OBSDataAutoRelease changes = obs_data_create_from_json(json.constData());
 		OBSDataAutoRelease applied = obs_data_create();
@@ -924,12 +938,12 @@ void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *p
 		OBSData after = OBSBasic::BackupScene(scene);
 		mainWindow->CreateSceneUndoRedoAction(QStringLiteral("XINKX: изменить оформление источника"), before, after);
 		mainWindow->statusBar()->showMessage(QStringLiteral("Оформление источника обновлено"), 5000);
-		dialog.accept();
+		// Keep the library open for working with several OBS sources.
 	});
-	QObject::connect(add, &QPushButton::clicked, &dialog, [&] {
+	QObject::connect(add, &QPushButton::clicked, dialog, [=] {
 		const int index = items->currentRow();
-		if (index < 0 || index >= catalog.size()) return;
-		const auto &entry = catalog.at(index);
+		if (index < 0 || index >= catalog->size()) return;
+		const auto &entry = catalog->at(index);
 		QString desired = name->text().trimmed();
 		if (desired.isEmpty()) return;
 		if (!desired.startsWith(QStringLiteral("XINKX · "))) desired.prepend(QStringLiteral("XINKX · "));
@@ -945,13 +959,13 @@ void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *p
 		if (runtime->addToScene(mainWindow, &message, entry.layer, unique, configuration,
 				placement->currentData().toString())) {
 			mainWindow->statusBar()->showMessage(message, 7000);
-			dialog.accept();
+			// Stay in the library; the live OBS scene remains interactive.
 		} else {
-			QMessageBox::warning(&dialog, QStringLiteral("Источник XINKX"), message);
+			QMessageBox::warning(dialog, QStringLiteral("Источник XINKX"), message);
 		}
 	});
 	rebuild();
-	dialog.exec();
+	dialog->show();
 }
 
 void OverlayRuntime::showCatalog(OBSBasic *mainWindow, QWidget *parent)

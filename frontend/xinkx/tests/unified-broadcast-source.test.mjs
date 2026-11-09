@@ -15,13 +15,16 @@ assert.doesNotMatch(profiles, /new QPushButton\(QStringLiteral\("Примени�
 assert.doesNotMatch(profiles, /new QPushButton\(QStringLiteral\("Сохранить/);
 assert.match(profiles, /setProperty\("xinkxProfileReady", false\)/);
 assert.match(broadcast, /new QCompleter\(model, panel\)/);
-assert.match(broadcast, /combo->hide\(\)/);
-assert.match(broadcast, /youtubeEvent->hide\(\)/);
+assert.match(broadcast, /Категория YouTube/);
+assert.match(broadcast, /Эфир YouTube/);
+assert.doesNotMatch(broadcast, /youtubeEvent->hide\(\)/);
+assert.doesNotMatch(broadcast, /studio->connectChannel\(youtubeAccount\(\)\.providerId\)/);
 assert.match(broadcast, /setProperty\("xinkxYoutubeMid", id\)/);
 assert.match(broadcast, /pendingThumbnail->take\(id\)/);
-assert.match(api, /videoCategories.*\n.*QStringLiteral\("20"\)/);
+assert.match(api, /videoCategories.*\n.*regionCode/);
+assert.match(api, /youtube\/v3\/videos\?part=snippet/);
 assert.match(api, /uploadType"\), QStringLiteral\("media"\)/);
 assert.match(api, /thumbnails\/set/);
 assert.match(studio, /bool YouTubeStudioBridge::hasProfile\(\) const/);
 
-console.log('XINKX unified broadcast source contract: one Save, hidden mappings, YouTube category and thumbnails OK');
+console.log('XINKX broadcast source contract: one Save, explicit YouTube event/category and official thumbnail/video update');

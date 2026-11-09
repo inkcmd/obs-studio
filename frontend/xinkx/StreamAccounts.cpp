@@ -10,6 +10,7 @@
 #include <QSettings>
 #include <QUrl>
 
+#include <algorithm>
 #include <array>
 
 #ifdef _WIN32
@@ -164,6 +165,7 @@ QVector<StreamAccount> loadStreamAccounts(bool withSecrets)
 		account.label = settings.value(QStringLiteral("label"), platformTitle(account.platform)).toString();
 		account.providerId = settings.value(QStringLiteral("providerId")).toString();
 		account.providerName = settings.value(QStringLiteral("providerName")).toString();
+		account.authorizationSourceId = settings.value(QStringLiteral("authorizationSourceId")).toString();
 		account.youtubeStreamId = settings.value(QStringLiteral("youtubeStreamId")).toString();
 		account.primary = settings.value(QStringLiteral("primary"), false).toBool();
 		account.enabled = settings.value(QStringLiteral("enabled"), true).toBool();
@@ -190,6 +192,25 @@ QVector<StreamAccount> loadStreamAccounts(bool withSecrets)
 		accounts.push_back(account);
 	}
 	settings.endArray();
+	if (withSecrets) {
+		for (auto &account : accounts) {
+			if (account.authorizationSourceId.isEmpty()) continue;
+			const auto source = std::find_if(accounts.cbegin(), accounts.cend(), [&](const StreamAccount &item) {
+				return item.id == account.authorizationSourceId && item.platform == account.platform &&
+				       item.authorizationSourceId.isEmpty();
+			});
+			if (source == accounts.cend()) {
+				// A removed source may not be silently replaced with another channel.
+				account.oauth = {};
+				account.providerId.clear();
+				account.providerName.clear();
+				continue;
+			}
+			account.oauth = source->oauth;
+			account.providerId = source->providerId;
+			account.providerName = source->providerName;
+		}
+	}
 	return accounts;
 }
 
@@ -202,8 +223,11 @@ bool saveStreamAccounts(const QVector<StreamAccount> &accounts)
 	QVector<std::array<QString, 5>> encrypted;
 	encrypted.reserve(accounts.size());
 	for (const auto &account : accounts) {
-		const std::array secrets{account.oauth.clientSecret, account.oauth.accessToken,
-					 account.oauth.refreshToken, account.destination.streamKey, account.destination.ingestUrl};
+		const bool alias = !account.authorizationSourceId.isEmpty();
+		const std::array secrets{alias ? QString{} : account.oauth.clientSecret,
+				 alias ? QString{} : account.oauth.accessToken,
+				 alias ? QString{} : account.oauth.refreshToken,
+				 account.destination.streamKey, account.destination.ingestUrl};
 		std::array<QString, 5> values;
 		for (size_t i = 0; i < secrets.size(); ++i) {
 			values[i] = protect(secrets[i]);
@@ -226,9 +250,10 @@ bool saveStreamAccounts(const QVector<StreamAccount> &accounts)
 		settings.setValue(QStringLiteral("primary"), a.primary);
 		settings.setValue(QStringLiteral("providerId"), a.providerId);
 		settings.setValue(QStringLiteral("providerName"), a.providerName);
+		settings.setValue(QStringLiteral("authorizationSourceId"), a.authorizationSourceId);
 		settings.setValue(QStringLiteral("youtubeStreamId"), a.youtubeStreamId);
 		settings.setValue(QStringLiteral("ingestFromOAuth"), a.destination.fromOAuth);
-		settings.setValue(QStringLiteral("clientId"), a.oauth.clientId);
+		settings.setValue(QStringLiteral("clientId"), a.authorizationSourceId.isEmpty() ? a.oauth.clientId : QString{});
 		settings.setValue(QStringLiteral("clientSecret"), encrypted[i][0]);
 		settings.setValue(QStringLiteral("accessToken"), encrypted[i][1]);
 		settings.setValue(QStringLiteral("refreshToken"), encrypted[i][2]);

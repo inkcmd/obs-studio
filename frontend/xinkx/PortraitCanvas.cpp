@@ -15,16 +15,19 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QDockWidget>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
 #include <QListWidget>
+#include <QMainWindow>
 #include <QMouseEvent>
 #include <QPushButton>
 #include <QSettings>
 #include <QSignalBlocker>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -295,42 +298,54 @@ void PortraitCanvas::updateLayer(const QString &key, float x, float y, float wid
 
 void PortraitCanvas::edit(QWidget *parent)
 {
+	Q_UNUSED(parent);
+	auto *mainWindow = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+	if (!mainWindow) return;
+	if (auto *existing = mainWindow->findChild<QDockWidget *>(QStringLiteral("xinkxPortraitEditor"))) {
+		existing->show();
+		existing->raise();
+		return;
+	}
 	if (!ensure()) return;
 	sync();
 	editing = true;
-	QDialog dialog(parent);
-	dialog.setWindowTitle(QStringLiteral("XINKX · Вертикальная композиция · 1080×1920"));
-	dialog.resize(930, 680);
-	auto *content = new QHBoxLayout(&dialog);
-	auto *list = new QListWidget(&dialog);
+	auto *dock = new QDockWidget(QStringLiteral("XINKX · Вертикальный холст · 1080×1920"), mainWindow);
+	dock->setObjectName(QStringLiteral("xinkxPortraitEditor"));
+	dock->setAllowedAreas(Qt::RightDockWidgetArea | Qt::LeftDockWidgetArea);
+	dock->setAttribute(Qt::WA_DeleteOnClose);
+	auto *body = new QWidget(dock);
+	dock->setWidget(body);
+	auto *content = new QHBoxLayout(body);
+	content->setContentsMargins(6, 6, 6, 6);
+	auto *list = new QListWidget(body);
 	list->setMinimumWidth(220);
 	content->addWidget(list, 1);
-	auto *preview = new PortraitDisplay(obs_scene_get_source(scene), &dialog);
+	auto *preview = new PortraitDisplay(obs_scene_get_source(scene), body);
 	content->addWidget(preview, 2);
 	auto *properties = new QVBoxLayout();
 	properties->addWidget(new QLabel(QStringLiteral("Раскладка независима от основной сцены.\n"
-		"Перетаскивай выделенный слой на предпросмотре."), &dialog));
+		"Перетаскивай выделенный слой на предпросмотре."), body));
 	auto *form = new QFormLayout();
-	auto *x = dimension(&dialog, 4320, QStringLiteral(" px"));
-	auto *y = dimension(&dialog, 4320, QStringLiteral(" px"));
-	auto *w = dimension(&dialog, 4320, QStringLiteral(" px"));
-	auto *h = dimension(&dialog, 4320, QStringLiteral(" px"));
+	auto *x = dimension(body, 4320, QStringLiteral(" px"));
+	auto *y = dimension(body, 4320, QStringLiteral(" px"));
+	auto *w = dimension(body, 4320, QStringLiteral(" px"));
+	auto *h = dimension(body, 4320, QStringLiteral(" px"));
 	for (const auto &pair : {std::pair{QStringLiteral("X"), x}, std::pair{QStringLiteral("Y"), y},
 			std::pair{QStringLiteral("Ширина"), w}, std::pair{QStringLiteral("Высота"), h}})
 		form->addRow(pair.first, pair.second);
-	auto *fill = new QCheckBox(QStringLiteral("Заполнить область (с обрезкой)"), &dialog);
+	auto *fill = new QCheckBox(QStringLiteral("Заполнить область (с обрезкой)"), body);
 	form->addRow(fill);
-	auto *visible = new QCheckBox(QStringLiteral("Видимый слой"), &dialog);
+	auto *visible = new QCheckBox(QStringLiteral("Видимый слой"), body);
 	form->addRow(visible);
 	properties->addLayout(form);
 	properties->addStretch(1);
-	auto *close = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+	auto *close = new QDialogButtonBox(QDialogButtonBox::Close, body);
 	properties->addWidget(close);
 	content->addLayout(properties, 2);
 
 	for (const auto &layer : std::as_const(layers))
 		list->addItem(layer.name);
-	const auto loadCurrent = [&] {
+	const auto loadCurrent = [=, this] {
 		const int row = list->currentRow();
 		const bool good = row >= 0 && row < layers.size();
 		for (auto *field : {static_cast<QWidget *>(x), static_cast<QWidget *>(y),
@@ -345,7 +360,7 @@ void PortraitCanvas::edit(QWidget *parent)
 		fill->setChecked(info.bounds_type == OBS_BOUNDS_SCALE_OUTER);
 		visible->setChecked(obs_sceneitem_visible(layers.at(row).item));
 	};
-	const auto apply = [&] {
+	const auto apply = [=, this] {
 		const int row = list->currentRow();
 		if (row < 0 || row >= layers.size()) return;
 		const auto &layer = layers.at(row);
@@ -353,21 +368,40 @@ void PortraitCanvas::edit(QWidget *parent)
 		obs_sceneitem_set_visible(layer.item, visible->isChecked());
 		save();
 	};
-	QObject::connect(list, &QListWidget::currentRowChanged, &dialog, loadCurrent);
+	QObject::connect(list, &QListWidget::currentRowChanged, dock, loadCurrent);
 	for (auto *spin : {x, y, w, h})
-		QObject::connect(spin, &QDoubleSpinBox::valueChanged, &dialog, apply);
-	QObject::connect(fill, &QCheckBox::toggled, &dialog, apply);
-	QObject::connect(visible, &QCheckBox::toggled, &dialog, apply);
-	preview->moved = [&](float dx, float dy) {
+		QObject::connect(spin, &QDoubleSpinBox::valueChanged, dock, apply);
+	QObject::connect(fill, &QCheckBox::toggled, dock, apply);
+	QObject::connect(visible, &QCheckBox::toggled, dock, apply);
+	preview->moved = [=](float dx, float dy) {
 		if (list->currentRow() < 0) return;
 		x->setValue(std::clamp(x->value() + dx, 0., 4320.));
 		y->setValue(std::clamp(y->value() + dy, 0., 4320.));
 	};
-	QObject::connect(close, &QDialogButtonBox::rejected, &dialog, &QDialog::accept);
+	QObject::connect(close, &QDialogButtonBox::rejected, dock, &QDockWidget::close);
+	QObject::connect(dock, &QObject::destroyed, mainWindow, [this] { editing = false; });
+	// OBS scenes may change while the dock remains open. Rebuild the independent
+	// 9:16 canvas and its layer list without closing the main OBS preview.
+	auto *watchScene = new QTimer(dock);
+	watchScene->setInterval(600);
+	QObject::connect(watchScene, &QTimer::timeout, dock, [=, this] {
+		const QString before = signature;
+		editing = false;
+		sync();
+		editing = true;
+		if (before == signature) return;
+		{
+			const QSignalBlocker blocked(list);
+			list->clear();
+			for (const auto &layer : std::as_const(layers)) list->addItem(layer.name);
+		}
+		list->setCurrentRow(layers.isEmpty() ? -1 : 0);
+	});
+	watchScene->start();
 	if (!layers.isEmpty()) list->setCurrentRow(0);
-	dialog.exec();
-	editing = false;
-	sync();
+	mainWindow->addDockWidget(Qt::RightDockWidgetArea, dock);
+	mainWindow->resizeDocks({dock}, {720}, Qt::Horizontal);
+	dock->show();
 }
 
 void PortraitCanvas::shutdown()

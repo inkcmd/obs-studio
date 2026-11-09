@@ -357,6 +357,7 @@ void ChatGateway::refresh(const QString &id)
 void ChatGateway::saveRefreshed(const QString &id, const QJsonObject &json)
 {
 	auto account = known.value(id);
+	const QString credentialOwner = account.authorizationSourceId.isEmpty() ? id : account.authorizationSourceId;
 	const auto oldRefresh = account.oauth.refreshToken;
 	account.oauth.accessToken = json.value(QStringLiteral("access_token")).toString();
 	account.oauth.refreshToken = json.value(QStringLiteral("refresh_token")).toString(oldRefresh);
@@ -364,11 +365,15 @@ void ChatGateway::saveRefreshed(const QString &id, const QJsonObject &json)
 	account.oauth.expiresAt = expires > 0 ? QDateTime::currentSecsSinceEpoch() + expires : 0;
 	auto stored = loadStreamAccounts();
 	for (auto &entry : stored) {
-		if (entry.id != id) continue;
+		if (entry.id != credentialOwner) continue;
 		// Never overwrite a newer OAuth login or changes to the account editor.
 		if (entry.oauth.refreshToken != oldRefresh) return;
 		entry.oauth = account.oauth;
-		if (saveStreamAccounts(stored)) known[id].oauth = account.oauth;
+		if (saveStreamAccounts(stored)) {
+			for (auto it = known.begin(); it != known.end(); ++it)
+				if (it.key() == credentialOwner || it.value().authorizationSourceId == credentialOwner)
+					it.value().oauth = account.oauth;
+		}
 		else status(id, QStringLiteral("Не удалось сохранить обновлённые OAuth-токены"));
 		return;
 	}
@@ -539,7 +544,7 @@ void ChatGateway::searchCategories(const QString &id, const QString &query)
 		QStringLiteral("https://api.kick.com/public/v2/categories"),
 		{{QStringLiteral("name"), name}, {QStringLiteral("limit"), QStringLiteral("20")}});
 	else url = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/videoCategories"),
-		{{QStringLiteral("part"), QStringLiteral("snippet")}, {QStringLiteral("id"), QStringLiteral("20")},
+		{{QStringLiteral("part"), QStringLiteral("snippet")}, {QStringLiteral("regionCode"), QStringLiteral("US")},
 		 {QStringLiteral("hl"), QStringLiteral("ru")}});
 	authorized(id, url, {}, [this, id](const HttpResult &result) {
 		if (!result.ok) { emit broadcastResult(id, result.error, false); return; }
@@ -552,8 +557,7 @@ void ChatGateway::searchCategories(const QString &id, const QString &query)
 			const auto label = account.platform == QStringLiteral("youtube") ?
 				obj.value(QStringLiteral("snippet")).toObject().value(QStringLiteral("title")).toString()
 				: obj.value(QStringLiteral("name")).toString();
-			// In the shared *game* editor only the assignable Gaming category
-			// matters. The public API doesn't expose Studio's detailed game catalog.
+			// Public YouTube API returns video categories, not game titles.
 			const auto value = obj.value(QStringLiteral("id")).toVariant().toString();
 			if (!value.isEmpty() && !label.isEmpty()) categories.append(QJsonObject{
 				{QStringLiteral("id"), value}, {QStringLiteral("name"), label}});
@@ -676,19 +680,36 @@ void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
 					emit youtubeMetadataUpdated(id, true);
 					return;
 				}
-				// A 2xx update alone does not prove that the actual video has
-				// the intended category (in particular, Gaming = 20).
-				const QString verify = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/videos"),
+				// liveBroadcasts.update does not reliably update the underlying
+				// video category. videos.update is the documented category API.
+				const QString readVideo = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/videos"),
 					{{QStringLiteral("part"), QStringLiteral("snippet")}, {QStringLiteral("id"), broadcastId}});
-				authorized(id, verify, {}, [this, id, category](const HttpResult &check) {
+				authorized(id, readVideo, {}, [this, id, category, broadcastId](const HttpResult &check) {
 					const auto videos = check.json.value(QStringLiteral("items")).toArray();
-					const QString actual = videos.isEmpty() ? QString{} : videos.first().toObject()
-						.value(QStringLiteral("snippet")).toObject().value(QStringLiteral("categoryId")).toString();
-					const bool verified = check.ok && actual == category;
-					emit broadcastResult(id, verified ? QStringLiteral("YouTube: категория и параметры проверены через videos.list")
-						: QStringLiteral("YouTube: категория не подтверждена на видео (ожидали %1, получили %2); %3")
-							.arg(category, actual, check.error), verified);
-					emit youtubeMetadataUpdated(id, verified);
+					if (!check.ok || videos.isEmpty()) {
+						emit broadcastResult(id, QStringLiteral("YouTube: не удалось получить видео для категории: ") + check.error, false);
+						emit youtubeMetadataUpdated(id, false);
+						return;
+					}
+					QJsonObject videoSnippet = videos.first().toObject().value(QStringLiteral("snippet")).toObject();
+					videoSnippet.insert(QStringLiteral("categoryId"), category);
+					// videos.update requires title and categoryId; preserving other
+					// fields avoids clearing description, tags and language.
+					if (videoSnippet.value(QStringLiteral("title")).toString().isEmpty()) {
+						emit broadcastResult(id, QStringLiteral("YouTube: у видео отсутствует заголовок"), false);
+						emit youtubeMetadataUpdated(id, false);
+						return;
+					}
+					jsonApi(id, QStringLiteral("https://www.googleapis.com/youtube/v3/videos?part=snippet"),
+						QByteArray("PUT"), {{QStringLiteral("id"), broadcastId}, {QStringLiteral("snippet"), videoSnippet}},
+						[this, id, category](const HttpResult &saved) {
+							const QString actual = saved.json.value(QStringLiteral("snippet")).toObject()
+								.value(QStringLiteral("categoryId")).toString();
+							const bool verified = saved.ok && actual == category;
+							emit broadcastResult(id, verified ? QStringLiteral("YouTube: категория сохранена через videos.update")
+								: QStringLiteral("YouTube: категория не подтверждена: %1").arg(saved.error), verified);
+							emit youtubeMetadataUpdated(id, verified);
+						});
 				});
 			});
 		});

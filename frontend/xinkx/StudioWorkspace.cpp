@@ -9,6 +9,7 @@
 #include "DonationGateway.hpp"
 #include "StudioAutomation.hpp"
 #include "WheelFocusGuard.hpp"
+#include "PortraitCanvas.hpp"
 
 #include <OBSApp.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -526,6 +527,12 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	auto *studioPages = new QTabWidget(studio);
 	studioPages->setObjectName(QStringLiteral("xinkxStudioTabs"));
 	studioPages->setDocumentMode(true);
+	auto *portraitEditor = new QPushButton(QStringLiteral("9:16 холст"), studioPages);
+	portraitEditor->setToolTip(QStringLiteral("Открыть вертикальный редактор рядом с основным холстом OBS"));
+	studioPages->setCornerWidget(portraitEditor, Qt::TopRightCorner);
+	QObject::connect(portraitEditor, &QPushButton::clicked, mainWindow, [mainWindow] {
+		PortraitCanvas::instance().edit(mainWindow);
+	});
 	studio->setWidget(studioPages);
 	mainWindow->AddDockWidget(studio, Qt::RightDockWidgetArea);
 	new StudioAutomation(mainWindow);
