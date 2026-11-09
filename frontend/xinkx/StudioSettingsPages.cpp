@@ -4,6 +4,7 @@
 #include "PresentationSettings.hpp"
 #include "StudioAutomation.hpp"
 #include "StudioDiagnostics.hpp"
+#include "WheelFocusGuard.hpp"
 
 #include <widgets/OBSBasic.hpp>
 
@@ -30,9 +31,13 @@
 #include <QScrollArea>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QSignalBlocker>
+#include <QTimer>
 #include <QUuid>
 #include <QVBoxLayout>
 #include <QUrl>
+
+#include <memory>
 
 namespace xinkx {
 namespace {
@@ -100,6 +105,7 @@ QWidget *chatPage(QWidget *parent, PresentationSettings *settings, const QString
 		form->addRow(dragMode);
 	}
 	auto *font = new QLineEdit(chat.value(QStringLiteral("font")).toString(), page);
+	font->setMaxLength(80);
 	form->addRow(QStringLiteral("Шрифт"), font);
 	auto *fontSize = number(page, 10, 90, chat.value(QStringLiteral("fontSize")).toInt(), QStringLiteral(" px"));
 	form->addRow(QStringLiteral("Размер текста"), fontSize);
@@ -115,22 +121,24 @@ QWidget *chatPage(QWidget *parent, PresentationSettings *settings, const QString
 	form->addRow(QStringLiteral("Отступ внутри"), padding);
 	auto *radius = number(page, 0, 64, chat.value(QStringLiteral("radius")).toInt(), QStringLiteral(" px"));
 	form->addRow(QStringLiteral("Скругление"), radius);
-	auto *opacity = number(page, 10, 100, chat.value(QStringLiteral("opacity")).toInt(), QStringLiteral(" %"));
-	form->addRow(QStringLiteral("Непрозрачность"), opacity);
+	auto *opacity = number(page, 0, 100, chat.value(QStringLiteral("opacity")).toInt(), QStringLiteral(" %"));
+	form->addRow(QStringLiteral("Фон сообщения · непрозрачность"), opacity);
+	auto *panelOpacity = number(page, 0, 100, chat.value(QStringLiteral("panelOpacity")).toInt(), QStringLiteral(" %"));
+	form->addRow(QStringLiteral("Вся область чата · непрозрачность"), panelOpacity);
 	auto *width = number(page, 10, 100, chat.value(QStringLiteral("widthPercent")).toInt(), QStringLiteral(" %"));
-	form->addRow(QStringLiteral("Ширина чата"), width);
+	if (streamer) form->addRow(QStringLiteral("Ширина чата"), width);
 	auto *position = new QComboBox(page);
 	position->addItem(QStringLiteral("Слева"), QStringLiteral("left"));
 	position->addItem(QStringLiteral("По центру"), QStringLiteral("center"));
 	position->addItem(QStringLiteral("Справа"), QStringLiteral("right"));
 	position->setCurrentIndex(qMax(0, position->findData(chat.value(QStringLiteral("horizontal")).toString())));
-	form->addRow(QStringLiteral("Положение"), position);
+	if (streamer) form->addRow(QStringLiteral("Положение"), position);
 	auto *vertical = new QComboBox(page);
 	vertical->addItem(QStringLiteral("Сверху"), QStringLiteral("top"));
 	vertical->addItem(QStringLiteral("По центру"), QStringLiteral("center"));
 	vertical->addItem(QStringLiteral("Снизу"), QStringLiteral("bottom"));
 	vertical->setCurrentIndex(qMax(0, vertical->findData(chat.value(QStringLiteral("vertical")).toString())));
-	form->addRow(QStringLiteral("По вертикали"), vertical);
+	if (streamer) form->addRow(QStringLiteral("По вертикали"), vertical);
 	auto *showPlatform = new QCheckBox(QStringLiteral("Иконка площадки"), page);
 	showPlatform->setChecked(chat.value(QStringLiteral("showPlatform")).toBool());
 	form->addRow(showPlatform);
@@ -153,29 +161,43 @@ QWidget *chatPage(QWidget *parent, PresentationSettings *settings, const QString
 	auto *textColor = colorRow(QStringLiteral("textColor"), QStringLiteral("Текст"));
 	auto *nameColor = colorRow(QStringLiteral("nameColor"), QStringLiteral("Имя"));
 	auto *background = colorRow(QStringLiteral("backgroundColor"), QStringLiteral("Фон сообщения"));
+	auto *panelColor = colorRow(QStringLiteral("panelColor"), QStringLiteral("Фон всей области чата"));
+	if (panelColor->text().isEmpty()) panelColor->setText(QStringLiteral("#09152c"));
 	layout->addLayout(form);
 	auto *preview = new QFrame(page);
 	preview->setObjectName(QStringLiteral("xinkxChatPreview"));
 	auto *previewLayout = new QVBoxLayout(preview);
 	previewLayout->setContentsMargins(14, 12, 14, 12);
 	previewLayout->setSpacing(5);
+	auto *bubble = new QFrame(preview);
+	bubble->setObjectName(QStringLiteral("xinkxMessagePreview"));
+	auto *bubbleLayout = new QVBoxLayout(bubble);
+	bubbleLayout->setContentsMargins(10, 8, 10, 8);
+	bubbleLayout->setSpacing(4);
 	auto *previewTitle = new QLabel(QStringLiteral("Предпросмотр сообщения"), page);
 	layout->addWidget(previewTitle);
-	auto *previewName = new QLabel(QStringLiteral("Twitch · x_ink_x"), preview);
-	auto *previewText = new QLabel(QStringLiteral("Привет! Так сообщение будет выглядеть в эфире."), preview);
+	auto *previewName = new QLabel(QStringLiteral("Twitch · x_ink_x"), bubble);
+	auto *previewText = new QLabel(QStringLiteral("Привет! Так сообщение будет выглядеть в эфире."), bubble);
 	previewText->setWordWrap(true);
-	previewLayout->addWidget(previewName);
-	previewLayout->addWidget(previewText);
+	bubbleLayout->addWidget(previewName);
+	bubbleLayout->addWidget(previewText);
+	previewLayout->addWidget(bubble);
 	layout->addWidget(preview);
 	const auto updatePreview = [=] {
 		const auto valid = [](const QString &color, const QString &fallback) {
 			const QColor value(color);
 			return value.isValid() ? value.name() : fallback;
 		};
-		const QString bg = valid(background->text(), QStringLiteral("#09152c"));
-		preview->setStyleSheet(QStringLiteral("QFrame#xinkxChatPreview {background-color:%1; "
-			"border-radius:%2px;} QFrame#xinkxChatPreview QLabel {background:transparent;}")
-			.arg(bg).arg(radius->value()));
+		const auto rgba = [](const QString &hex, int opacity) {
+			const QColor value(hex);
+			const QColor color = value.isValid() ? value : QColor(QStringLiteral("#09152c"));
+			return QStringLiteral("rgba(%1,%2,%3,%4)").arg(color.red()).arg(color.green())
+				.arg(color.blue()).arg(qBound(0, opacity, 100) * 255 / 100);
+		};
+		preview->setStyleSheet(QStringLiteral("QFrame#xinkxChatPreview {background-color:%1; border-radius:%2px;}")
+			.arg(rgba(panelColor->text(), panelOpacity->value())).arg(radius->value()));
+		bubble->setStyleSheet(QStringLiteral("QFrame#xinkxMessagePreview {background-color:%1; border-radius:%2px;}")
+			.arg(rgba(background->text(), opacity->value())).arg(radius->value()));
 		QFont chatFont(font->text());
 		chatFont.setPixelSize(fontSize->value());
 		chatFont.setWeight(static_cast<QFont::Weight>(weight->value()));
@@ -186,13 +208,14 @@ QWidget *chatPage(QWidget *parent, PresentationSettings *settings, const QString
 		preview->setMaximumWidth(qMax(240, width->value() * 6));
 	};
 	QObject::connect(font, &QLineEdit::textChanged, page, updatePreview);
-	for (auto *field : {fontSize, weight, radius, width})
+	for (auto *field : {fontSize, weight, radius, width, opacity, panelOpacity})
 		QObject::connect(field, QOverload<int>::of(&QSpinBox::valueChanged), page, updatePreview);
-	for (auto *button : {textColor, nameColor, background})
+	for (auto *button : {textColor, nameColor, background, panelColor})
 		QObject::connect(button, &QPushButton::clicked, page, updatePreview);
 	updatePreview();
 	auto *save = new QPushButton(QStringLiteral("Сохранить оформление"), page);
-	layout->addWidget(save);
+	auto *saveStatus = new QLabel(QStringLiteral("Изменения сохраняются автоматически"), page);
+	layout->addWidget(saveStatus);
 	layout->addStretch();
 	QObject::connect(save, &QPushButton::clicked, page, [=] {
 		QJsonObject document = settings->snapshot();
@@ -207,6 +230,7 @@ QWidget *chatPage(QWidget *parent, PresentationSettings *settings, const QString
 		value.insert(QStringLiteral("padding"), padding->value());
 		value.insert(QStringLiteral("radius"), radius->value());
 		value.insert(QStringLiteral("opacity"), opacity->value());
+		value.insert(QStringLiteral("panelOpacity"), panelOpacity->value());
 		value.insert(QStringLiteral("widthPercent"), width->value());
 		value.insert(QStringLiteral("horizontal"), position->currentData().toString());
 		value.insert(QStringLiteral("vertical"), vertical->currentData().toString());
@@ -216,10 +240,30 @@ QWidget *chatPage(QWidget *parent, PresentationSettings *settings, const QString
 		value.insert(QStringLiteral("textColor"), textColor->text());
 		value.insert(QStringLiteral("nameColor"), nameColor->text());
 		value.insert(QStringLiteral("backgroundColor"), background->text());
+		value.insert(QStringLiteral("panelColor"), panelColor->text());
 		profile.insert(QStringLiteral("chat"), value);
 		document.insert(surface, profile);
-		commit(settings, document, page);
+		if (commit(settings, document, page))
+			saveStatus->setText(QStringLiteral("Сохранено автоматически"));
 	});
+	auto *saveDelay = new QTimer(page);
+	saveDelay->setSingleShot(true);
+	saveDelay->setInterval(350);
+	QObject::connect(saveDelay, &QTimer::timeout, save, &QPushButton::click);
+	QObject::connect(page, &QObject::destroyed, settings, [saveDelay, save] {
+		if (saveDelay->isActive()) { saveDelay->stop(); save->click(); }
+	});
+	const auto schedule = [saveDelay] { saveDelay->start(); };
+	QObject::connect(font, &QLineEdit::textChanged, page, schedule);
+	for (auto *field : page->findChildren<QSpinBox *>())
+		QObject::connect(field, &QSpinBox::valueChanged, page, schedule);
+	for (auto *check : page->findChildren<QCheckBox *>())
+		QObject::connect(check, &QCheckBox::toggled, page, schedule);
+	for (auto *combo : {position, vertical})
+		QObject::connect(combo, &QComboBox::currentIndexChanged, page, schedule);
+	for (auto *button : {textColor, nameColor, background, panelColor})
+		QObject::connect(button, &QPushButton::clicked, page, schedule);
+	guardWheelFields(page);
 	return page;
 }
 
@@ -241,8 +285,23 @@ void editRule(QWidget *page, PresentationSettings *settings, bool bot, int index
 		// A line edit, not a fabricated effect: sends a real chat message through the gateway.
 	} else {
 		for (const auto &effect : {"gg", "boom", "low-hp", "confetti"})
-			target->addItem(QString::fromLatin1(effect));
-		target->setCurrentIndex(qMax(0, target->findText(rule.value(QStringLiteral("effect")).toString())));
+			target->addItem(QString::fromLatin1(effect), QString::fromLatin1(effect));
+		obs_enum_sources([](void *data, obs_source_t *source) {
+			if (QString::fromUtf8(obs_source_get_id(source)) != QStringLiteral("xinkx_reactions"))
+				return true;
+			OBSDataAutoRelease sourceSettings = obs_source_get_settings(source);
+			const QString id = QString::fromUtf8(obs_data_get_string(sourceSettings, "reaction"));
+			if (id.startsWith(QStringLiteral("custom-"))) {
+				auto *combo = static_cast<QComboBox *>(data);
+				if (combo->findData(id) < 0)
+					combo->addItem(QString::fromUtf8(obs_source_get_name(source)), id);
+			}
+			return true;
+		}, target);
+		const QString selected = rule.value(QStringLiteral("effect")).toString();
+		if (!selected.isEmpty() && target->findData(selected) < 0)
+			target->addItem(QStringLiteral("Недоступно · ") + selected, selected);
+		target->setCurrentIndex(qMax(0, target->findData(selected)));
 		form->addRow(QStringLiteral("Эффект"), target);
 	}
 	auto *reply = bot ? new QLineEdit(rule.value(QStringLiteral("reply")).toString(), &editor) : nullptr;
@@ -275,7 +334,7 @@ void editRule(QWidget *page, PresentationSettings *settings, bool bot, int index
 			if (index < 0) rule.insert(QStringLiteral("id"), QStringLiteral("r-") +
 				QUuid::createUuid().toString(QUuid::WithoutBraces).left(18));
 			rule.insert(QStringLiteral("phrase"), phrase->text().trimmed());
-			rule.insert(QStringLiteral("effect"), target->currentText());
+			rule.insert(QStringLiteral("effect"), target->currentData().toString());
 			rule.insert(QStringLiteral("match"), match->currentData().toString());
 			if (!rule.contains(QStringLiteral("durationMs"))) rule.insert(QStringLiteral("durationMs"), 5000);
 		}
@@ -288,6 +347,7 @@ void editRule(QWidget *page, PresentationSettings *settings, bool bot, int index
 		document.insert(key, entries);
 		if (commit(settings, document, &editor)) editor.accept();
 	});
+	guardWheelFields(&editor);
 	editor.exec();
 }
 
@@ -333,14 +393,13 @@ QWidget *reactionsPage(QWidget *parent, PresentationSettings *settings)
 		maxConcurrent->setValue(effects.value(QStringLiteral("maxConcurrent")).toInt(2));
 		duration->setValue(effects.value(QStringLiteral("durationMs")).toInt(5000));
 	};
-	QObject::connect(surface, &QComboBox::currentIndexChanged, page, fillEffects);
 	fillEffects();
 	auto *saveEffects = new QPushButton(QStringLiteral("Сохранить параметры эффектов"), page);
-	layout->addWidget(saveEffects);
+	auto *status = new QLabel(QStringLiteral("Изменения сохраняются автоматически"), page);
+	layout->addWidget(status);
 	QObject::connect(saveEffects, &QPushButton::clicked, page, [=] {
 		if (minParticles->value() > maxParticles->value()) {
-			QMessageBox::warning(page, QStringLiteral("Эффекты"),
-				QStringLiteral("Частиц от должно быть не больше, чем частиц до"));
+			status->setText(QStringLiteral("Не сохранено: частиц от больше, чем частиц до"));
 			return;
 		}
 		QJsonObject document = settings->snapshot();
@@ -357,7 +416,32 @@ QWidget *reactionsPage(QWidget *parent, PresentationSettings *settings)
 		profile.insert(QStringLiteral("effects"), effects);
 		document.insert(surfaceName, profile);
 		document.insert(QStringLiteral("globalCooldownMs"), globalCooldown->value());
-		commit(settings, document, page);
+		if (commit(settings, document, page)) status->setText(QStringLiteral("Сохранено автоматически"));
+	});
+	auto *saveDelay = new QTimer(page);
+	saveDelay->setSingleShot(true);
+	saveDelay->setInterval(350);
+	QObject::connect(saveDelay, &QTimer::timeout, saveEffects, &QPushButton::click);
+	QObject::connect(page, &QObject::destroyed, settings, [saveDelay, saveEffects] {
+		if (saveDelay->isActive()) { saveDelay->stop(); saveEffects->click(); }
+	});
+	const auto scheduleSave = [saveDelay] { saveDelay->start(); };
+	for (auto *field : page->findChildren<QSpinBox *>())
+		QObject::connect(field, &QSpinBox::valueChanged, page, scheduleSave);
+	QObject::connect(enabledEffects, &QCheckBox::toggled, page, scheduleSave);
+	QObject::connect(position, &QComboBox::currentIndexChanged, page, scheduleSave);
+	auto previousSurface = std::make_shared<QString>(surface->currentData().toString());
+	QObject::connect(surface, &QComboBox::currentIndexChanged, page, [=] {
+		const QString next = surface->currentData().toString();
+		if (saveDelay->isActive()) {
+			const QSignalBlocker blocker(surface);
+			surface->setCurrentIndex(surface->findData(*previousSurface));
+			saveDelay->stop();
+			saveEffects->click();
+			surface->setCurrentIndex(surface->findData(next));
+		}
+		*previousSurface = next;
+		fillEffects();
 	});
 	for (const bool bot : {false, true}) {
 		layout->addWidget(new QLabel(bot ? QStringLiteral("<b>Команды бота</b>") :
@@ -404,6 +488,7 @@ QWidget *reactionsPage(QWidget *parent, PresentationSettings *settings)
 		populate();
 	}
 	layout->addStretch();
+	guardWheelFields(page);
 	return page;
 }
 

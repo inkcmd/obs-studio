@@ -9,6 +9,7 @@
 
 class QTcpSocket;
 class QDockWidget;
+class QWidget;
 class OBSBasic;
 
 namespace xinkx {
@@ -36,7 +37,10 @@ public:
 	void resetTimer();
 	void setPosition(const QString &position);
 	void setPaused(bool paused);
-	bool addToScene(OBSBasic *mainWindow, QString *message, const QString &layer = QStringLiteral("all"));
+	bool addToScene(OBSBasic *mainWindow, QString *message, const QString &layer = QStringLiteral("all"),
+			const QString &sourceName = {}, const QJsonObject &presetSettings = {},
+			const QString &placement = {});
+	void showCatalog(OBSBasic *mainWindow, QWidget *parent);
 
 signals:
 	void eventDispatched(const QString &label);

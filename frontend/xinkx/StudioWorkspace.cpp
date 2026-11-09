@@ -8,6 +8,7 @@
 #include "PresentationSettings.hpp"
 #include "DonationGateway.hpp"
 #include "StudioAutomation.hpp"
+#include "WheelFocusGuard.hpp"
 
 #include <OBSApp.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -283,16 +284,14 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	auto *openProperties = new QPushButton(QStringLiteral("Свойства источника"), content);
 	openProperties->setEnabled(false);
 	layout->addWidget(openProperties);
-	auto *overlaySource = new QPushButton(QStringLiteral("Добавить / выделить чат и эффекты"), content);
-	overlaySource->setToolTip(QStringLiteral("XINKX-слой добавляется в текущую сцену как обычный источник OBS. Размер и положение редактируются в предпросмотре."));
+	auto *overlaySource = new QPushButton(QStringLiteral("Открыть каталог источников XINKX"), content);
+	overlaySource->setToolTip(QStringLiteral("Выбрать чат, рамку, реакцию или свой пресет с предпросмотром."));
 	layout->addWidget(overlaySource);
 	QObject::connect(overlaySource, &QPushButton::clicked, mainWindow, [mainWindow] {
 		auto *runtime = mainWindow->findChild<OverlayRuntime *>(QStringLiteral("xinkxOverlayRuntime"));
-		QString message;
-		if (runtime) runtime->addToScene(mainWindow, &message);
-		else message = QStringLiteral("Слой XINKX недоступен");
-		mainWindow->statusBar()->showMessage(message, 7000);
+		if (runtime) runtime->showCatalog(mainWindow, mainWindow);
 	});
+	guardWheelFields(content);
 	scroll->setWidget(content);
 	inspector->setWidget(scroll);
 	mainWindow->AddDockWidget(inspector, Qt::RightDockWidgetArea);

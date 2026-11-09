@@ -7,6 +7,7 @@
 #include <obs.h>
 
 #include <QComboBox>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QFormLayout>

@@ -3,6 +3,7 @@
 #include "ChatGateway.hpp"
 #include "OverlayRuntime.hpp"
 #include "StudioWorkspace.hpp"
+#include "WheelFocusGuard.hpp"
 
 #include <widgets/OBSBasic.hpp>
 
@@ -33,6 +34,7 @@
 #include <QRegion>
 #include <QScrollArea>
 #include <QScreen>
+#include <QSignalBlocker>
 #include <QSpinBox>
 #include <QTabWidget>
 #include <QTimer>
@@ -102,7 +104,7 @@ public:
 		syncMouseMode();
 	}
 
-	void setOffsetWriter(std::function<void(int, int)> writer) { saveOffset = std::move(writer); }
+	void setLayoutWriter(std::function<void(const QJsonObject &)> writer) { saveLayout = std::move(writer); }
 
 	void setEditing(bool value)
 	{
@@ -201,8 +203,12 @@ protected:
 	void mousePressEvent(QMouseEvent *event) override
 	{
 		if (editing && event->button() == Qt::LeftButton) {
-			dragging = true;
+			const QRect bounds = chatBounds();
+			resizing = QRect(bounds.right() - 28, bounds.bottom() - 28, 40, 40)
+				.contains(event->position().toPoint());
+			dragging = !resizing;
 			press = event->globalPosition().toPoint();
+			startSize = bounds.size();
 			const auto chat = profile.value(QStringLiteral("chat")).toObject();
 			origin = QPoint(chat.value(QStringLiteral("offsetX")).toInt(), chat.value(QStringLiteral("offsetY")).toInt());
 			event->accept();
@@ -211,11 +217,17 @@ protected:
 
 	void mouseMoveEvent(QMouseEvent *event) override
 	{
-		if (!dragging) return;
+		if (!dragging && !resizing) return;
 		const QPoint delta = event->globalPosition().toPoint() - press;
 		auto chat = profile.value(QStringLiteral("chat")).toObject();
-		chat.insert(QStringLiteral("offsetX"), qBound(-3840, origin.x() + delta.x(), 3840));
-		chat.insert(QStringLiteral("offsetY"), qBound(-2160, origin.y() + delta.y(), 2160));
+		if (resizing) {
+			chat.insert(QStringLiteral("widthPercent"), qBound(10,
+				(startSize.width() + delta.x()) * 100 / std::max(1, width()), 100));
+			chat.insert(QStringLiteral("heightPx"), qBound(100, startSize.height() + delta.y(), 4320));
+		} else {
+			chat.insert(QStringLiteral("offsetX"), qBound(-3840, origin.x() + delta.x(), 3840));
+			chat.insert(QStringLiteral("offsetY"), qBound(-2160, origin.y() + delta.y(), 2160));
+		}
 		profile.insert(QStringLiteral("chat"), chat);
 		setMask(QRegion(chatBounds().adjusted(-12, -12, 12, 12)));
 		update();
@@ -223,11 +235,11 @@ protected:
 
 	void mouseReleaseEvent(QMouseEvent *event) override
 	{
-		if (!dragging || event->button() != Qt::LeftButton) return;
+		if ((!dragging && !resizing) || event->button() != Qt::LeftButton) return;
 		dragging = false;
+		resizing = false;
 		const auto chat = profile.value(QStringLiteral("chat")).toObject();
-		if (saveOffset) saveOffset(chat.value(QStringLiteral("offsetX")).toInt(),
-			chat.value(QStringLiteral("offsetY")).toInt());
+		if (saveLayout) saveLayout(chat);
 	}
 
 	QRect chatBounds() const
@@ -238,7 +250,10 @@ protected:
 		const int padding = chat.value(QStringLiteral("padding")).toInt(10);
 		const int gap = chat.value(QStringLiteral("gap")).toInt(7);
 		const int width = std::max(150, this->width() * chat.value(QStringLiteral("widthPercent")).toInt(60) / 100);
-		const int height = std::max(120, int(messages.size()) * (QFontMetrics(font).height() * 2 + padding * 2 + 4 + gap));
+		const int automatic = std::max(120, int(messages.size()) *
+			(QFontMetrics(font).height() * 2 + padding * 2 + 4 + gap));
+		const int height = chat.value(QStringLiteral("heightPx")).toInt() > 0
+			? chat.value(QStringLiteral("heightPx")).toInt() : automatic;
 		const QString vertical = chat.value(QStringLiteral("vertical")).toString();
 		const QString horizontal = chat.value(QStringLiteral("horizontal")).toString();
 		const int x = (horizontal == QStringLiteral("right") ? this->width() - width - 36 :
@@ -282,19 +297,28 @@ protected:
 		const int width = std::max(150, this->width() * chat.value(QStringLiteral("widthPercent")).toInt(60) / 100);
 		const int rowHeight = metric.height() * 2 + padding * 2 + 4;
 		const QRect bounds = chatBounds();
-		int y = bounds.y();
+		const int usedHeight = int(messages.size()) * (rowHeight + gap) - (messages.isEmpty() ? 0 : gap);
+		int y = bounds.bottom() + 1 - std::min(bounds.height(), std::max(0, usedHeight));
 		const int x = bounds.x();
 		QColor bg(chat.value(QStringLiteral("backgroundColor")).toString(QStringLiteral("#09152c")));
 		bg.setAlphaF(chat.value(QStringLiteral("opacity")).toDouble(88) / 100.0);
+		QColor panelBg(chat.value(QStringLiteral("panelColor")).toString(QStringLiteral("#09152c")));
+		panelBg.setAlphaF(chat.value(QStringLiteral("panelOpacity")).toDouble(0) / 100.0);
 		const QColor nameColor(chat.value(QStringLiteral("nameColor")).toString(QStringLiteral("#8de9fb")));
 		const QColor textColor(chat.value(QStringLiteral("textColor")).toString(QStringLiteral("#f6faff")));
+		if (panelBg.alpha() > 0) {
+			painter.setPen(Qt::NoPen);
+			painter.setBrush(panelBg);
+			painter.drawRoundedRect(bounds, chat.value(QStringLiteral("radius")).toInt(6),
+				chat.value(QStringLiteral("radius")).toInt(6));
+		}
 		if (editing) {
 			painter.setPen(QPen(QColor(QStringLiteral("#69d8ea")), 2, Qt::DashLine));
 			painter.setBrush(QColor(30, 43, 66, 110));
 			painter.drawRoundedRect(bounds, 7, 7);
 			painter.setPen(Qt::white);
 			painter.drawText(bounds.adjusted(14, 10, -14, -10), Qt::AlignTop,
-				QStringLiteral("Перетащи чат мышью · отключи режим в настройках"));
+				QStringLiteral("Перетащи чат · потяни за угол для изменения размеров"));
 		}
 		for (const auto &row : messages) {
 			const QRect rect(x, y, width, rowHeight);
@@ -318,6 +342,11 @@ protected:
 			painter.drawText(QRect(x + padding, y + padding + metric.height(), width - padding * 2, metric.height()),
 				Qt::AlignVCenter, metric.elidedText(row.text, Qt::ElideRight, width - padding * 2));
 			y += rowHeight + gap;
+		}
+		if (editing) {
+			painter.setPen(Qt::NoPen);
+			painter.setBrush(QColor(QStringLiteral("#69d8ea")));
+			painter.drawRect(QRect(bounds.right() - 13, bounds.bottom() - 13, 13, 13));
 		}
 		const auto effects = profile.value(QStringLiteral("effects")).toObject();
 		QFont effectFont(QStringLiteral("Segoe UI"));
@@ -358,11 +387,13 @@ private:
 	QVector<Chat> messages;
 	QVector<Effect> events;
 	QHash<QString, int> viewers;
-	std::function<void(int, int)> saveOffset;
+	std::function<void(const QJsonObject &)> saveLayout;
 	bool editing = false;
 	bool dragging = false;
+	bool resizing = false;
 	QPoint press;
 	QPoint origin;
+	QSize startSize;
 };
 
 QSpinBox *numeric(QWidget *parent, int min, int max, const QString &suffix = {})
@@ -385,12 +416,13 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 	auto *streamer = new StreamerOverlay(mainWindow);
 	streamer->setObjectName(QStringLiteral("xinkxStreamerOverlay"));
 	streamer->configure(settings->snapshot());
-	streamer->setOffsetWriter([settings](int x, int y) {
+	streamer->setLayoutWriter([settings](const QJsonObject &layout) {
 		QJsonObject document = settings->snapshot();
 		auto profile = document.value(QStringLiteral("streamer")).toObject();
 		auto chat = profile.value(QStringLiteral("chat")).toObject();
-		chat.insert(QStringLiteral("offsetX"), x);
-		chat.insert(QStringLiteral("offsetY"), y);
+		for (const auto &key : {QStringLiteral("offsetX"), QStringLiteral("offsetY"),
+				       QStringLiteral("widthPercent"), QStringLiteral("heightPx")})
+			if (layout.contains(key)) chat.insert(key, layout.value(key));
 		profile.insert(QStringLiteral("chat"), chat);
 		document.insert(QStringLiteral("streamer"), profile);
 		QString error;
@@ -441,8 +473,10 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 	form->addRow(QStringLiteral("Внутренний отступ"), padding);
 	auto *radius = numeric(panel, 0, 64, QStringLiteral(" px"));
 	form->addRow(QStringLiteral("Скругление"), radius);
-	auto *opacity = numeric(panel, 10, 100, QStringLiteral(" %"));
-	form->addRow(QStringLiteral("Непрозрачность"), opacity);
+	auto *opacity = numeric(panel, 0, 100, QStringLiteral(" %"));
+	form->addRow(QStringLiteral("Фон сообщения · непрозрачность"), opacity);
+	auto *panelOpacity = numeric(panel, 0, 100, QStringLiteral(" %"));
+	form->addRow(QStringLiteral("Фон всей области · непрозрачность"), panelOpacity);
 	auto *widthPercent = numeric(panel, 10, 100, QStringLiteral(" %"));
 	form->addRow(QStringLiteral("Ширина чата"), widthPercent);
 	auto *horizontal = new QComboBox(panel);
@@ -468,6 +502,7 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 	auto *textColor = colorButton(QStringLiteral("Цвет текста"));
 	auto *nameColor = colorButton(QStringLiteral("Цвет имени"));
 	auto *backgroundColor = colorButton(QStringLiteral("Фон сообщений"));
+	auto *panelColor = colorButton(QStringLiteral("Фон всей области чата"));
 	auto *showPlatform = new QCheckBox(QStringLiteral("Площадка"), panel);
 	form->addRow(QStringLiteral("Показывать"), showPlatform);
 	auto *showTime = new QCheckBox(QStringLiteral("Время сообщений"), panel);
@@ -675,12 +710,14 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 		padding->setValue(chat.value(QStringLiteral("padding")).toInt());
 		radius->setValue(chat.value(QStringLiteral("radius")).toInt());
 		opacity->setValue(chat.value(QStringLiteral("opacity")).toInt());
+		panelOpacity->setValue(chat.value(QStringLiteral("panelOpacity")).toInt());
 		widthPercent->setValue(chat.value(QStringLiteral("widthPercent")).toInt());
 		horizontal->setCurrentIndex(horizontal->findData(chat.value(QStringLiteral("horizontal")).toString()));
 		vertical->setCurrentIndex(vertical->findData(chat.value(QStringLiteral("vertical")).toString()));
 		textColor->setText(chat.value(QStringLiteral("textColor")).toString());
 		nameColor->setText(chat.value(QStringLiteral("nameColor")).toString());
 		backgroundColor->setText(chat.value(QStringLiteral("backgroundColor")).toString());
+		panelColor->setText(chat.value(QStringLiteral("panelColor")).toString(QStringLiteral("#09152c")));
 		showPlatform->setChecked(chat.value(QStringLiteral("showPlatform")).toBool());
 		showTime->setChecked(chat.value(QStringLiteral("showTime")).toBool());
 		showViewers->setChecked(chat.value(QStringLiteral("showViewers")).toBool());
@@ -693,7 +730,6 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 		duration->setValue(effects.value(QStringLiteral("durationMs")).toInt());
 		cooldown->setValue(draft->value(QStringLiteral("globalCooldownMs")).toInt());
 	};
-	QObject::connect(surface, &QComboBox::currentIndexChanged, dock, refresh);
 	QObject::connect(fontName, &QPushButton::clicked, dock, [=] {
 		bool ok = false;
 		const auto choice = QFontDialog::getFont(&ok, QFont(*selectedFont), dock);
@@ -701,7 +737,10 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 	});
 	refresh();
 	auto *save = new QPushButton(QStringLiteral("Сохранить оформление"), panel);
-	layout->addWidget(save);
+	// Keep the save action internal: edits persist automatically, including before profile changes.
+	auto *saveStatus = new QLabel(QStringLiteral("Все изменения сохраняются автоматически"), panel);
+	saveStatus->setWordWrap(true);
+	layout->addWidget(saveStatus);
 	auto *jsonButton = new QPushButton(QStringLiteral("Редактировать все правила и стили JSON…"), panel);
 	layout->addWidget(jsonButton);
 	auto *info = new QLabel(QStringLiteral("Реакции: GG, !boom, low hp, !hype. В JSON можно задать каждому правилу cooldownMs:0, durationMs:0, perViewer:true; отдельно настроить viewer/streamer, позиции и количество частиц."), panel);
@@ -723,12 +762,14 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 		chat.insert(QStringLiteral("padding"), padding->value());
 		chat.insert(QStringLiteral("radius"), radius->value());
 		chat.insert(QStringLiteral("opacity"), opacity->value());
+		chat.insert(QStringLiteral("panelOpacity"), panelOpacity->value());
 		chat.insert(QStringLiteral("widthPercent"), widthPercent->value());
 		chat.insert(QStringLiteral("horizontal"), horizontal->currentData().toString());
 		chat.insert(QStringLiteral("vertical"), vertical->currentData().toString());
 		chat.insert(QStringLiteral("textColor"), textColor->text());
 		chat.insert(QStringLiteral("nameColor"), nameColor->text());
 		chat.insert(QStringLiteral("backgroundColor"), backgroundColor->text());
+		chat.insert(QStringLiteral("panelColor"), panelColor->text());
 		chat.insert(QStringLiteral("showPlatform"), showPlatform->isChecked());
 		chat.insert(QStringLiteral("showTime"), showTime->isChecked());
 		chat.insert(QStringLiteral("showViewers"), showViewers->isChecked());
@@ -746,7 +787,40 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 		draft->insert(QStringLiteral("reactions"), *rules);
 		draft->insert(QStringLiteral("botCommands"), *botCommands);
 		QString error;
-		if (!settings->save(*draft, &error)) QMessageBox::warning(dock, QStringLiteral("Оформление"), error);
+		if (!settings->save(*draft, &error))
+			saveStatus->setText(QStringLiteral("Не сохранено: ") + error);
+		else
+			saveStatus->setText(QStringLiteral("Сохранено автоматически"));
+	});
+	auto *saveDelay = new QTimer(panel);
+	saveDelay->setSingleShot(true);
+	saveDelay->setInterval(350);
+	QObject::connect(saveDelay, &QTimer::timeout, save, &QPushButton::click);
+	const auto scheduleSave = [saveDelay] { saveDelay->start(); };
+	for (auto *field : panel->findChildren<QSpinBox *>())
+		QObject::connect(field, &QSpinBox::valueChanged, panel, scheduleSave);
+	for (auto *field : panel->findChildren<QCheckBox *>())
+		QObject::connect(field, &QCheckBox::toggled, panel, scheduleSave);
+	for (auto *field : {horizontal, vertical, effectPosition})
+		QObject::connect(field, &QComboBox::currentIndexChanged, panel, scheduleSave);
+	for (auto *button : {fontName, textColor, nameColor, backgroundColor, panelColor,
+			      ruleAdd, ruleEdit, ruleRemove, botAdd, botEdit, botRemove})
+		QObject::connect(button, &QPushButton::clicked, panel, scheduleSave);
+	QObject::connect(rulesList, &QListWidget::itemDoubleClicked, panel, scheduleSave);
+	QObject::connect(botList, &QListWidget::itemDoubleClicked, panel, scheduleSave);
+	auto previousSurface = std::make_shared<QString>(surface->currentData().toString());
+	QObject::connect(surface, &QComboBox::currentIndexChanged, panel, [=] {
+		const QString next = surface->currentData().toString();
+		if (saveDelay->isActive()) {
+			// Persist the fields that are still displaying the previous profile.
+			const QSignalBlocker blocker(surface);
+			surface->setCurrentIndex(surface->findData(*previousSurface));
+			saveDelay->stop();
+			save->click();
+			surface->setCurrentIndex(surface->findData(next));
+		}
+		*previousSurface = next;
+		refresh();
 	});
 	QObject::connect(jsonButton, &QPushButton::clicked, dock, [=] {
 		QDialog dialog(dock);
@@ -791,6 +865,7 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 	auto *dialogLayout = new QVBoxLayout(dialog);
 	auto *scroll = new QScrollArea(dialog);
 	scroll->setWidgetResizable(true);
+	guardWheelFields(panel);
 	scroll->setWidget(panel);
 	dialogLayout->addWidget(scroll);
 }

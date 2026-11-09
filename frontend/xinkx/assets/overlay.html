@@ -50,11 +50,11 @@
     font-size:clamp(40px,4.5vw,84px); font-weight:800; font-variant-numeric:tabular-nums; letter-spacing:.04em;
     transition:opacity .35s,transform .35s; }
   #timer.hidden { opacity:0; transform:translate(-50%,-30px); }
-  #chat { position:absolute; bottom:5%; left:3%; display:flex; flex-direction:column; align-items:flex-start;
+  #chat { position:absolute; bottom:5%; left:3%; display:flex; flex-direction:column; align-items:stretch;
     gap:8px; width:min(660px,70vw); }
   #viewers { position:absolute; top:3%; left:3%; font-size:19px; font-weight:650;
     color:var(--cyan); text-shadow:0 2px 5px #000a; }
-  .chat-line { max-width:100%; background:#08152bdc; border-left:4px solid var(--cyan);
+  .chat-line { width:100%; min-width:0; background:#08152bdc; border-left:4px solid var(--cyan);
     border-radius:6px 12px 12px 6px; padding:9px 14px; font-size:clamp(17px,1.5vw,29px);
     box-shadow:0 4px 28px #0008; overflow-wrap:anywhere; animation:chatIn .28s both; }
   .chat-line .who { color:var(--cyan); font-weight:850; margin-right:10px; }
@@ -84,7 +84,15 @@
   body[data-layer="timer"] #timer.hidden { transform:translateY(-20px); }
   body[data-layer="viewers"] #viewers { top:12px; left:12px; }
   body[data-layer="chat"] #chat { top:auto;bottom:5px;left:5px;right:auto;
-    transform:none;width:calc(100% - 10px); }
+    transform:none;width:calc(100% - 10px);height:calc(100% - 10px);justify-content:flex-end; }
+  body[data-preset="compact"] .chat-line { box-shadow:none; border-radius:2px; }
+  body[data-preset="glass"] .chat-line { backdrop-filter:blur(12px); border:1px solid #ffffff3a; }
+  body[data-preset="neon"] .chat-line { border-left-width:5px;box-shadow:0 0 18px #6be4ef5e; }
+  body[data-preset="minimal"] .chat-line { border:0;box-shadow:none; }
+  body[data-preset="gold"] #frame { border-color:#fbd37a;box-shadow:0 0 22px #f8bc5c99,inset 0 0 18px #fff1a155; }
+  body[data-preset="round"] #frame { border-radius:80px;border-width:12px; }
+  body[data-preset="minimal"] #frame { border-width:3px;border-radius:0;box-shadow:none; }
+  body[data-preset="neon"] #frame { border-color:#b66fff;box-shadow:0 0 30px #975aff,inset 0 0 22px #975aff; }
   body[data-layer="alerts"] .effect.alert { left:50%;right:auto;top:50%;transform:translate(-50%,-50%); }
 </style>
 </head>
@@ -101,6 +109,11 @@
   document.body.dataset.layer = layer;
   // Appearance is stored on the OBS source, independently of other XINKX layers.
   const sourceOptions = new URLSearchParams(location.search);
+  const selectedPreset = sourceOptions.get('preset') || 'default';
+  if (['compact','glass','neon','minimal','gold','round'].includes(selectedPreset))
+    document.body.dataset.preset = selectedPreset;
+  const selectedReaction = sourceOptions.get('reaction') || 'all';
+  const customCaption = String(sourceOptions.get('customText') || '').slice(0,64);
   const accent = sourceOptions.get('accent') || '';
   if (/^#[0-9a-fA-F]{6}$/.test(accent))
     document.documentElement.style.setProperty('--cyan', accent);
@@ -117,6 +130,12 @@
   };
   const customBackground=sourceColor('background','--source-background');
   const customText=sourceColor('text','--source-text');
+  const chatColor=(key) => {
+    const value=sourceOptions.get(key) || '';
+    return /^#[0-9a-fA-F]{8}$/.test(value) ? value : '';
+  };
+  const messageColor=chatColor('messageColor');
+  const panelColor=chatColor('panelColor');
   if (customText) document.body.style.color=customText;
   const fontSize=Number(sourceOptions.get('fontSize'));
   if (sourceOptions.has('fontSize') && Number.isFinite(fontSize))
@@ -179,7 +198,7 @@
     const type = String(event.type || '');
     const card = node('div', 'effect' + (event.kind==='alert'?' alert':'') +
       (type==='low-hp'||type==='gg'||type==='confetti'?' full':''));
-    const where=String(style.effects.position||'random');
+    const where=String(layer==='effects' && selectedReaction!=='all' ? 'center' : (style.effects.position||'random'));
     const coordinates={'top-left':[16,16],'top-right':[84,16],'center':[50,46],
       'bottom-left':[16,78],'bottom-right':[84,78]};
     const center=coordinates[where]||[15+Math.random()*70,15+Math.random()*70];
@@ -192,11 +211,19 @@
       const line = [event.amount,event.message].filter(Boolean).join(' · ');
       if (line) alert.append(node('div','detail',line));
       card.append(alert);
-    } else if (type==='boom') card.append(node('div','impact boom','BOOM!'));
+    } else if (type==='boom') card.append(node('div','impact boom',customCaption||'BOOM!'));
     else if (type==='low-hp') {
-      const vignette=node('div','vignette'); vignette.append(node('strong','', 'LOW HP'));
+      const vignette=node('div','vignette'); vignette.append(node('strong','',customCaption||'LOW HP'));
       card.append(vignette);
-    } else if (type==='gg'||type==='confetti') card.append(particles(type==='gg'));
+    } else if (/^custom-[a-z0-9]{8}$/.test(type)) {
+      const text=node('div','impact',customCaption||'МОЯ РЕАКЦИЯ');
+      text.style.fontSize='clamp(40px,8vw,150px)';
+      card.append(text);
+    } else if (type==='gg'||type==='confetti') {
+      card.append(particles(type==='gg'));
+      if (customCaption) {const caption=node('div','impact',customCaption);caption.style.position='absolute';
+        caption.style.left='50%';caption.style.top='35%';caption.style.transform='translateX(-50%)';card.append(caption);}
+    }
     else return;
     surface.append(card);
     const task = {card,timeout:null}; active.push(task);
@@ -220,9 +247,10 @@
     }
   }
   function effect(event) {
-    if (!event || paused || !durations[event.type]) return;
+    if (!event || paused || (!durations[event.type] && !/^custom-[a-z0-9]{8}$/.test(event.type))) return;
     if (layer==='alerts' && event.kind!=='alert') return;
     if (layer==='effects' && event.kind!=='reaction') return;
+    if (layer==='effects' && selectedReaction!=='all' && event.type!==selectedReaction) return;
     if (['chat','timer','viewers','frame'].includes(layer)) return;
     if (queue.length>=20) queue.shift();
     queue.push(event); drain();
@@ -254,17 +282,23 @@
     chat.style.bottom=c.vertical==='bottom'?'5%':'auto';
     chat.style.transform=(c.horizontal==='center'?'translateX(-50%)':'')+
       (c.vertical==='center'?' translateY(-50%)':'');
-    chat.style.alignItems=c.horizontal==='right'?'flex-end':c.horizontal==='center'?'center':'flex-start';
+    chat.style.alignItems='stretch';
+    chat.style.background=panelColor || String(c.panelColor||'#09152c')+
+      Math.round(Math.max(0,Math.min(100,Number(c.panelOpacity??0)))*2.55).toString(16).padStart(2,'0');
+    chat.style.borderRadius=(Number(c.radius)||0)+'px';
+    chat.style.padding=(Number(c.panelPadding??0))+'px';
     if (layer==='chat') {
       chat.style.left='5px';chat.style.right='auto';chat.style.top='auto';chat.style.bottom='5px';
-      chat.style.width='calc(100% - 10px)';chat.style.transform='none';
+      chat.style.width='calc(100% - 10px)';chat.style.height='calc(100% - 10px)';chat.style.transform='none';
+      chat.style.justifyContent=c.vertical==='top'?'flex-start':c.vertical==='center'?'center':'flex-end';
     }
     for (const line of chat.children) updateLine(line);
   }
   function updateLine(line) {
     const c=style.chat||{};
-    line.style.background=customBackground || String(c.backgroundColor||'#09152c')+
-      Math.round((Number(c.opacity)||88)*2.55).toString(16).padStart(2,'0');
+    line.style.background=messageColor || customBackground || String(c.backgroundColor||'#09152c')+
+      Math.round(Math.max(0,Math.min(100,Number(c.opacity??88)))*2.55).toString(16).padStart(2,'0');
+    if (selectedPreset==='minimal' && !messageColor && !customBackground) line.style.background='transparent';
     line.style.color=customText || String(c.textColor||'#f6faff');
     line.style.padding=(Number(c.padding)||0)+'px';
     line.style.borderRadius=sourceOptions.has('radius') ? Math.max(0,Math.min(60,radius))+'px' : (Number(c.radius)||0)+'px';

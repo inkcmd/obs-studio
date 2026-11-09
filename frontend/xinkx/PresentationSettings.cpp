@@ -36,6 +36,8 @@ QJsonObject profile(bool streamer)
 			{QStringLiteral("textColor"), QStringLiteral("#f6faff")},
 			{QStringLiteral("nameColor"), QStringLiteral("#8de9fb")},
 			{QStringLiteral("backgroundColor"), QStringLiteral("#09152c")},
+			{QStringLiteral("panelColor"), QStringLiteral("#09152c")},
+			{QStringLiteral("panelOpacity"), 0},
 			{QStringLiteral("showPlatform"), true},
 			{QStringLiteral("showTime"), false},
 			{QStringLiteral("showViewers"), true},
@@ -134,11 +136,17 @@ bool PresentationSettings::validate(const QJsonObject &value, QString *error)
 			else if (key == QStringLiteral("fontWeight")) { minimum = 100; maximum = 900; }
 			else if (key == QStringLiteral("maxMessages")) { minimum = 1; maximum = 20; }
 			else if (key == QStringLiteral("messageDurationMs")) maximum = 300000;
-			else if (key == QStringLiteral("opacity") || key == QStringLiteral("widthPercent")) {
-				minimum = 10; maximum = 100;
-			}
+			else if (key == QStringLiteral("opacity")) { minimum = 0; maximum = 100; }
+			else if (key == QStringLiteral("widthPercent")) { minimum = 10; maximum = 100; }
 			if (!within(chat, key, minimum, maximum)) return invalid(surface + QStringLiteral("/chat/") + key);
 		}
+		// Optional for presentation.json files created before panel backgrounds existed.
+		if (chat.contains(QStringLiteral("panelOpacity")) &&
+		    !within(chat, QStringLiteral("panelOpacity"), 0, 100))
+			return invalid(surface + QStringLiteral("/chat/panelOpacity"));
+		if (chat.contains(QStringLiteral("heightPx")) &&
+		    !within(chat, QStringLiteral("heightPx"), 0, 4320))
+			return invalid(surface + QStringLiteral("/chat/heightPx"));
 		if (!chat.value(QStringLiteral("font")).isString() ||
 		    chat.value(QStringLiteral("font")).toString().size() > 80 ||
 		    !oneOf(chat.value(QStringLiteral("horizontal")).toString(),
@@ -151,6 +159,10 @@ bool PresentationSettings::validate(const QJsonObject &value, QString *error)
 			if (!QRegularExpression(QStringLiteral("^#[a-fA-F0-9]{6}$"))
 					.match(chat.value(key).toString()).hasMatch()) return invalid(surface + QStringLiteral("/chat/") + key);
 		}
+		if (chat.contains(QStringLiteral("panelColor")) &&
+		    !QRegularExpression(QStringLiteral("^#[a-fA-F0-9]{6}$"))
+			.match(chat.value(QStringLiteral("panelColor")).toString()).hasMatch())
+			return invalid(surface + QStringLiteral("/chat/panelColor"));
 		for (const auto &key : {QStringLiteral("showPlatform"), QStringLiteral("showTime"), QStringLiteral("showViewers")}) {
 			if (!chat.value(key).isBool()) return invalid(surface + QStringLiteral("/chat/") + key);
 		}
@@ -183,9 +195,11 @@ bool PresentationSettings::validate(const QJsonObject &value, QString *error)
 		    used.contains(id) || phrase.trimmed().isEmpty() || phrase.size() > 40 ||
 		    !oneOf(item.value(QStringLiteral("match")).toString(),
 			   {QStringLiteral("exact"), QStringLiteral("word"), QStringLiteral("contains")}) ||
-		    !oneOf(item.value(QStringLiteral("effect")).toString(),
+		    !(oneOf(item.value(QStringLiteral("effect")).toString(),
 			   {QStringLiteral("gg"), QStringLiteral("boom"), QStringLiteral("low-hp"),
 			    QStringLiteral("confetti")}) ||
+			QRegularExpression(QStringLiteral("^custom-[a-z0-9]{8}$"))
+				.match(item.value(QStringLiteral("effect")).toString()).hasMatch()) ||
 		    !within(item, QStringLiteral("cooldownMs"), 0, 300000) ||
 		    !within(item, QStringLiteral("durationMs"), 0, 60000) ||
 		    !item.value(QStringLiteral("enabled")).isBool() ||

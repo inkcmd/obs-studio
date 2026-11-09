@@ -9,6 +9,7 @@
 
 #include <array>
 #include <cstring>
+#include <utility>
 
 namespace xinkx {
 namespace {
@@ -60,13 +61,18 @@ void update(void *data, obs_data_t *settings)
 	QUrl url(QStringLiteral("http://127.0.0.1:8766/overlay"));
 	QUrlQuery query;
 	query.addQueryItem(QStringLiteral("layer"), QString::fromLatin1(source->type->layer));
+	query.addQueryItem(QStringLiteral("preset"), QString::fromUtf8(obs_data_get_string(settings, "preset")));
+	query.addQueryItem(QStringLiteral("reaction"), QString::fromUtf8(obs_data_get_string(settings, "reaction")));
+	query.addQueryItem(QStringLiteral("customText"), QString::fromUtf8(obs_data_get_string(settings, "customText")));
 	if (obs_data_get_bool(settings, "customize")) {
-	const auto rgb = [settings](const char *key) {
+	const auto rgb = [settings](const char *key, bool alpha = false) {
 		const uint32_t value = static_cast<uint32_t>(obs_data_get_int(settings, key));
-		return QStringLiteral("#%1%2%3")
+		QString color = QStringLiteral("#%1%2%3")
 			.arg(static_cast<int>(value & 0xff), 2, 16, QLatin1Char('0'))
 			.arg(static_cast<int>((value >> 8) & 0xff), 2, 16, QLatin1Char('0'))
 			.arg(static_cast<int>((value >> 16) & 0xff), 2, 16, QLatin1Char('0'));
+		if (alpha) color += QStringLiteral("%1").arg(static_cast<int>((value >> 24) & 0xff), 2, 16, QLatin1Char('0'));
+		return color;
 	};
 	query.addQueryItem(QStringLiteral("accent"), rgb("accent"));
 	query.addQueryItem(QStringLiteral("opacity"), QString::number(obs_data_get_int(settings, "opacity")));
@@ -75,6 +81,8 @@ void update(void *data, obs_data_t *settings)
 	query.addQueryItem(QStringLiteral("text"), rgb("text"));
 	query.addQueryItem(QStringLiteral("fontSize"), QString::number(obs_data_get_int(settings, "fontSize")));
 	query.addQueryItem(QStringLiteral("radius"), QString::number(obs_data_get_int(settings, "radius")));
+	query.addQueryItem(QStringLiteral("panelColor"), rgb("panelColor", true));
+	query.addQueryItem(QStringLiteral("messageColor"), rgb("messageColor", true));
 	}
 	url.setQuery(query);
 
@@ -146,6 +154,11 @@ void defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "customize", false);
 	obs_data_set_default_int(settings, "opacity", 100);
 	obs_data_set_default_int(settings, "scale", 100);
+	obs_data_set_default_string(settings, "preset", "default");
+	obs_data_set_default_string(settings, "reaction", "all");
+	obs_data_set_default_string(settings, "customText", "");
+	obs_data_set_default_int(settings, "panelColor", 0x000a152c);
+	obs_data_set_default_int(settings, "messageColor", 0xdc2b1508);
 }
 
 void defaultsForType(void *type_data, obs_data_t *settings)
@@ -159,12 +172,39 @@ void defaultsForType(void *type_data, obs_data_t *settings)
 obs_properties_t *properties(void *data)
 {
 	auto *properties = obs_properties_create();
-	(void)data;
+	const auto *source = static_cast<NativeSource *>(data);
+	const QString layer = source && source->type ? QString::fromLatin1(source->type->layer) : QString{};
 	obs_properties_add_int(properties, "width", "Ширина элемента (пиксели)", 80, 3840, 1);
 	obs_properties_add_int(properties, "height", "Высота элемента (пиксели)", 50, 2160, 1);
 	obs_properties_add_bool(properties, "customize", "Своё оформление для этого источника (иначе настройки по умолчанию)");
+	if (layer == QStringLiteral("chat") || layer == QStringLiteral("frame") || layer == QStringLiteral("effects")) {
+		auto *preset = obs_properties_add_list(properties, "preset", "Оформление",
+			OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+		for (const auto &entry : {std::pair{"default", "Стандартное"}, {"compact", "Компактное"},
+			{"glass", "Стекло"}, {"neon", "Неон"}, {"minimal", "Минимализм"},
+			{"gold", "Золотое"}, {"round", "Скруглённое"}})
+			obs_property_list_add_string(preset, entry.second, entry.first);
+	}
+	if (layer == QStringLiteral("effects")) {
+		auto *reaction = obs_properties_add_list(properties, "reaction", "Показывать реакцию",
+			OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+		for (const auto &entry : {std::pair{"all", "Все реакции"}, {"gg", "GG"}, {"boom", "BOOM"},
+			{"low-hp", "LOW HP"}, {"confetti", "Конфетти"}})
+			obs_property_list_add_string(reaction, entry.second, entry.first);
+		if (source && source->parent) {
+			OBSDataAutoRelease saved = obs_source_get_settings(source->parent);
+			const QString current = QString::fromUtf8(obs_data_get_string(saved, "reaction"));
+			if (current.startsWith(QStringLiteral("custom-")))
+				obs_property_list_add_string(reaction, "Своя реакция", current.toUtf8().constData());
+		}
+		obs_properties_add_text(properties, "customText", "Свой текст поверх реакции", OBS_TEXT_DEFAULT);
+	}
 	obs_properties_add_color(properties, "accent", "Акцентный цвет");
 	obs_properties_add_color(properties, "background", "Фон уведомлений");
+	if (layer == QStringLiteral("chat")) {
+		obs_properties_add_color_alpha(properties, "panelColor", "Фон всей области чата (с прозрачностью)");
+		obs_properties_add_color_alpha(properties, "messageColor", "Фон сообщений (с прозрачностью)");
+	}
 	obs_properties_add_color(properties, "text", "Цвет текста");
 	obs_properties_add_int_slider(properties, "fontSize", "Размер текста (px)", 10, 100, 1);
 	obs_properties_add_int_slider(properties, "radius", "Скругление рамки (px)", 0, 60, 1);
