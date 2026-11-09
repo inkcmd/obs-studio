@@ -1,20 +1,23 @@
 #include "OAuthLogin.hpp"
 #include "PlatformApi.hpp"
 
+#include <utility/RemoteTextThread.hpp>
+
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonDocument>
-#include <QNetworkReply>
-#include <QNetworkRequest>
 #include <QRandomGenerator>
 #include <QTcpSocket>
+#include <QThread>
 #include <QTimer>
 #include <QUrlQuery>
 
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace xinkx {
 
@@ -65,9 +68,15 @@ QString OAuthLogin::redirectUri(const QString &platform)
 QString OAuthLogin::Response::error(const QString &operation) const
 {
 	if (!status) {
-		return u"%1: соединение не удалось или истекло время ожидания"_s.arg(operation);
+		return u"%1: %2"_s.arg(operation, transportError.isEmpty()
+						      ? u"сетевое соединение не удалось"_s
+						      : transportError);
 	}
-	return u"%1: HTTP %2"_s.arg(operation).arg(status);
+	const auto providerError = json.value(u"error"_s).toString();
+	const auto providerMessage = json.value(u"message"_s).toString();
+	const auto detail = !providerError.isEmpty() ? providerError : providerMessage;
+	return detail.isEmpty() ? u"%1: HTTP %2"_s.arg(operation).arg(status)
+				: u"%1: HTTP %2 (%3)"_s.arg(operation).arg(status).arg(detail.left(160));
 }
 
 bool OAuthLogin::begin(const StreamAccount &account, QString *error)
@@ -160,8 +169,11 @@ void OAuthLogin::receiveCallback()
 			const auto code = params.queryItemValue(u"code"_s, QUrl::FullyDecoded);
 			const auto providerError = params.queryItemValue(u"error"_s);
 			const bool accepted = valid && !code.isEmpty() && providerError.isEmpty();
-			const QByteArray body = accepted ? "Return to XINKX Studio to complete authorization."
-							  : "Authorization request was rejected.";
+			// The browser confirms only receipt of the OAuth code. Token exchange
+			// happens afterwards and can still fail (TLS, revoked client, timeout).
+			const QByteArray body = accepted
+						 ? u"Код OAuth получен. Результат подключения смотри в XINKX Studio."_s.toUtf8()
+						 : u"Запрос OAuth отклонён. Вернись в XINKX Studio."_s.toUtf8();
 			socket->write((accepted ? QByteArray("HTTP/1.1 200 OK\r\n") : QByteArray("HTTP/1.1 400 Bad Request\r\n")) +
 				      "Content-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\n"
 				      "Connection: close\r\nContent-Length: " + QByteArray::number(body.size()) +
@@ -186,35 +198,44 @@ void OAuthLogin::receiveCallback()
 
 void OAuthLogin::request(const QUrl &url, const QUrlQuery *form, bool authorized, const Done &done)
 {
-	QNetworkRequest req(url);
-	req.setTransferTimeout(15000);
-	req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
-	req.setRawHeader("Accept", "application/json");
+	// OBS already ships a working libcurl HTTP/TLS stack. QtNetwork's optional
+	// TLS backend is not reliably deployed in all portable Windows builds.
+	// Run all provider REST calls off the UI thread and keep tokens out of logs.
+	const auto address = url.toString(QUrl::FullyEncoded).toStdString();
+	const std::string body = form ? encodeForm(*form).toStdString() : std::string{};
+	std::vector<std::string> headers{ "Accept: application/json" };
 	if (authorized) {
-		req.setRawHeader("Authorization", QByteArray("Bearer ") + current.oauth.accessToken.toUtf8());
+		headers.push_back("Authorization: Bearer " + current.oauth.accessToken.toStdString());
 		if (current.platform == u"twitch"_s) {
-			req.setRawHeader("Client-Id", current.oauth.clientId.toUtf8());
+			headers.push_back("Client-Id: " + current.oauth.clientId.toStdString());
 		}
 	}
-	QNetworkReply *reply;
-	if (form) {
-		req.setHeader(QNetworkRequest::ContentTypeHeader, u"application/x-www-form-urlencoded"_s);
-		reply = network.post(req, encodeForm(*form));
-	} else {
-		reply = network.get(req);
-	}
+	struct Transfer {
+		std::string body;
+		std::string error;
+		long status = 0;
+		bool sent = false;
+	};
+	const auto transfer = std::make_shared<Transfer>();
 	const auto thisAttempt = attempt;
-	connect(reply, &QNetworkReply::finished, this, [this, reply, done, thisAttempt] {
+	auto *worker = QThread::create([transfer, address, body, headers = std::move(headers), post = form != nullptr] {
+		transfer->sent = GetRemoteFile(address.c_str(), transfer->body, transfer->error, &transfer->status,
+					      post ? "application/x-www-form-urlencoded" : nullptr,
+					      post ? "POST" : "GET", post ? body.c_str() : nullptr, headers,
+					      nullptr, 25, false, static_cast<int>(body.size()));
+	});
+	connect(worker, &QThread::finished, this, [this, transfer, done, thisAttempt] {
 		if (thisAttempt != attempt) {
-			reply->deleteLater();
 			return;
 		}
-		const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-		const bool ok = status >= 200 && status < 300 && reply->error() == QNetworkReply::NoError;
-		const auto json = QJsonDocument::fromJson(reply->readAll()).object();
-		reply->deleteLater();
-		done({json, status, ok});
+		const int status = static_cast<int>(transfer->status);
+		const bool ok = transfer->sent && status >= 200 && status < 300;
+		const auto json = QJsonDocument::fromJson(QByteArray::fromStdString(transfer->body)).object();
+		const auto error = QString::fromStdString(transfer->error);
+		done({json, status, ok, error});
 	});
+	connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+	worker->start();
 }
 
 void OAuthLogin::exchangeCode(const QString &code)
@@ -474,9 +495,8 @@ void OAuthLogin::cancel()
 	}
 	++attempt;
 	callback.close();
-	for (auto *reply : network.findChildren<QNetworkReply *>()) {
-		reply->abort();
-	}
+	// In-flight libcurl workers finish independently; their stale result is
+	// discarded using the incremented attempt generation.
 	pendingAuthorizationUrl.clear();
 	state.clear();
 	verifier.clear();

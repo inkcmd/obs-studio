@@ -9,10 +9,12 @@
 #include <QDir>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QDockWidget>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QFrame>
 #include <QGuiApplication>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -20,6 +22,7 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -27,6 +30,7 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 
@@ -79,7 +83,10 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	inspector->setObjectName(QStringLiteral("xinkxSourceInspector"));
 	inspector->setAllowedAreas(Qt::RightDockWidgetArea);
 
-	auto *content = new QWidget(inspector);
+	auto *scroll = new QScrollArea(inspector);
+	scroll->setWidgetResizable(true);
+	scroll->setFrameShape(QFrame::NoFrame);
+	auto *content = new QWidget(scroll);
 	auto *layout = new QVBoxLayout(content);
 	layout->setContentsMargins(14, 16, 14, 14);
 	layout->setSpacing(12);
@@ -169,6 +176,25 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	alignmentGrid->addWidget(hCenter, 1, 0);
 	alignmentGrid->addWidget(vCenter, 1, 1);
 	layout->addLayout(alignmentGrid);
+	auto *presetTitle = new QLabel(QStringLiteral("Готовые композиции"), content);
+	presetTitle->setStyleSheet(QStringLiteral("font-weight: 600;"));
+	layout->addWidget(presetTitle);
+	auto *preset = new QComboBox(content);
+	preset->addItems({QStringLiteral("Камера · снизу справа"), QStringLiteral("Камера · снизу слева"),
+			  QStringLiteral("Камера · сверху справа"), QStringLiteral("Камера · сверху слева"),
+			  QStringLiteral("Половина холста · слева"), QStringLiteral("Половина холста · справа")});
+	layout->addWidget(preset);
+	auto *margin = new QSpinBox(content);
+	margin->setRange(0, 300);
+	margin->setValue(32);
+	margin->setSuffix(QStringLiteral(" px"));
+	margin->setKeyboardTracking(false);
+	auto *presetOptions = new QFormLayout();
+	presetOptions->addRow(QStringLiteral("Отступ"), margin);
+	layout->addLayout(presetOptions);
+	auto *applyPreset = new QPushButton(QStringLiteral("Применить композицию"), content);
+	applyPreset->setEnabled(false);
+	layout->addWidget(applyPreset);
 	auto *copyLayout = new QPushButton(QStringLiteral("Копировать размещение"), content);
 	auto *pasteLayout = new QPushButton(QStringLiteral("Вставить размещение"), content);
 	copyLayout->setEnabled(false);
@@ -186,12 +212,56 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	auto *openProperties = new QPushButton(QStringLiteral("Свойства источника"), content);
 	openProperties->setEnabled(false);
 	layout->addWidget(openProperties);
-	layout->addStretch();
-	inspector->setWidget(content);
+	scroll->setWidget(content);
+	inspector->setWidget(scroll);
 	mainWindow->AddDockWidget(inspector, Qt::RightDockWidgetArea);
 	inspector->setFeatures(inspector->features() & ~QDockWidget::DockWidgetFloatable);
 
 	auto editor = std::make_shared<InspectorState>();
+	QObject::connect(applyPreset, &QPushButton::clicked, mainWindow,
+			 [controller, editor, preset, margin, mainWindow] {
+				 const auto &item = editor->current;
+				 if (item.itemId < 0 || item.locked || !item.resizable || item.height <= 0) {
+					 return;
+				 }
+				 obs_video_info video{};
+				 if (!obs_get_video_info(&video) || !video.base_width || !video.base_height) {
+					 return;
+				 }
+				 const double canvasW = video.base_width;
+				 const double canvasH = video.base_height;
+				 const double inset = margin->value();
+				 const double ratio = std::clamp(item.width / item.height, 0.25, 4.0);
+				 const int choice = preset->currentIndex();
+				 const bool pip = choice < 4;
+				 const double maxW = pip ? std::min(canvasW * 0.29, canvasW - 2 * inset)
+							 : canvasW / 2 - 2 * inset;
+				 const double maxH = pip ? std::min(canvasH * 0.35, canvasH - 2 * inset)
+							 : canvasH - 2 * inset;
+				 if (maxW <= 0 || maxH <= 0) {
+					 return;
+				 }
+				 const double targetW = std::min(maxW, maxH * ratio);
+				 const double targetH = targetW / ratio;
+				 double targetX;
+				 double targetY;
+				 if (pip) {
+					 const bool right = choice == 0 || choice == 2;
+					 const bool bottom = choice == 0 || choice == 1;
+					 targetX = right ? canvasW - inset - targetW : inset;
+					 targetY = bottom ? canvasH - inset - targetH : inset;
+				 } else {
+					 const double halfX = choice == 5 ? canvasW / 2 : 0;
+					 targetX = halfX + (canvasW / 2 - targetW) / 2;
+					 targetY = (canvasH - targetH) / 2;
+				 }
+				 const bool applied = controller->applySelectedTransform(item.itemId, targetX, targetY,
+									 targetW, targetH);
+				 if (applied) {
+					 mainWindow->statusBar()->showMessage(
+						 QStringLiteral("Композиция применена; отмена через Ctrl+Z"), 4000);
+				 }
+			 });
 	const QString transformPrefix = QStringLiteral("XINKX_TRANSFORM:");
 	QObject::connect(copyLayout, &QPushButton::clicked, mainWindow, [editor, transformPrefix] {
 		const auto &value = editor->current;
@@ -293,7 +363,7 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 
 	QObject::connect(controller, &StudioController::selectedTransformChanged, mainWindow,
 		[editor, x, y, width, height, rotate, cropLeft, cropTop, cropRight, cropBottom, fit, center,
-		 hCenter, vCenter, copyLayout, pasteLayout, lockedHint, openProperties](const SelectedTransform &transform) {
+		 hCenter, vCenter, applyPreset, copyLayout, pasteLayout, lockedHint, openProperties](const SelectedTransform &transform) {
 			const bool selectedChanged = editor->itemId != transform.itemId;
 			if (selectedChanged) {
 				editor->itemId = -1;
@@ -303,6 +373,7 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 			const bool resize = editable && transform.resizable;
 			openProperties->setEnabled(transform.itemId >= 0);
 			copyLayout->setEnabled(transform.itemId >= 0);
+			applyPreset->setEnabled(resize);
 			pasteLayout->setEnabled(editable);
 			for (auto *field : {x, y}) {
 				field->setEnabled(editable);

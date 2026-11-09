@@ -3,13 +3,11 @@
 #include "StreamAccounts.hpp"
 
 #include <QJsonObject>
-#include <QNetworkAccessManager>
 #include <QObject>
 #include <QTcpServer>
 
 #include <functional>
 
-class QNetworkReply;
 class QUrlQuery;
 
 namespace xinkx {
@@ -37,13 +35,13 @@ private:
 		QJsonObject json;
 		int status = 0;
 		bool ok = false;
+		QString transportError;
 		QString error(const QString &operation) const;
 	};
 	using Done = std::function<void(const Response &)>;
 
 	StreamAccount current;
 	QTcpServer callback;
-	QNetworkAccessManager network;
 	QString state;
 	QString verifier;
 	QString pendingAuthorizationUrl;

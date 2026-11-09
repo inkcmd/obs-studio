@@ -1,4 +1,4 @@
-# XINKX Studio — Stage 7 (0.15-dev)
+# XINKX Studio — Stage 8 (0.15-dev)
 
 The Qt frontend uses the OBS scene graph, video pipeline and output handlers. The source inspector edits OBS scene items and uses the native undo/redo stack.
 
@@ -42,5 +42,7 @@ Enter the credentials for your developer app in the account editor and apply the
 **Stage 6 history:** OBS RTMP/RTMPS service catalog and its ingest server selector were added for named destinations. Stage 7 supersedes the Stage 6 primary-output selection; every saved catalog destination now operates independently. Verify `windows-x64` build, add/reload/edit/save of named services, parallel outputs, and the returned service's actual protocol before a live platform test.
 
 **Stage 7 changes (Windows verification still required):** Independent broadcast outputs replace the managed-primary model. The OBS frontend streaming-active flag and aggregate status-bar counters work without a native stock stream output. OAuth moves to localhost:8765 with exact provider paths, a copyable authorization link and cancellation. The XINKX source inspector gains a switch for OBS's existing native magnetic snapping plus **Копировать размещение / Вставить размещение**, which copies position, dimensions, rotation and crop between real OBS scene items through the system clipboard and OBS undo stack. It does not introduce a second scene implementation. Test start/stop and failure of one destination while others remain active, background recording, all output counters, hotkeys, OAuth cancellation/timeout/retry, chosen-browser callback, scene transform paste and undo. An MSVC build and live platform check are pending.
+
+**Stage 8 changes (Windows verification still required):** Provider OAuth REST requests use OBS's existing libcurl HTTP/TLS stack in background workers instead of relying on the optional QtNetwork TLS backend. The settings panel now reports the actual transport error or OAuth HTTP error; the browser callback only confirms receipt of the authorization code, not successful token issuance. The scene source inspector is scrollable and adds native composition presets: four camera picture-in-picture corners and left/right half-canvas placement, with adjustable margins. These presets edit OBS scene items directly and retain the standard OBS undo stack. Check Twitch token exchange, refresh/revoke, multiple provider accounts, scene layout presets, all stream outputs and recording in the Windows build.
 
 Use private test channels for the remaining provider sign-in, refresh, revocation and ingest checks. Multichat and YouTube event provisioning are separate work.
