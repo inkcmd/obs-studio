@@ -238,7 +238,7 @@ protected:
 		const int padding = chat.value(QStringLiteral("padding")).toInt(10);
 		const int gap = chat.value(QStringLiteral("gap")).toInt(7);
 		const int width = std::max(150, this->width() * chat.value(QStringLiteral("widthPercent")).toInt(60) / 100);
-		const int height = std::max(120, messages.size() * (QFontMetrics(font).height() * 2 + padding * 2 + 4 + gap));
+		const int height = std::max(120, int(messages.size()) * (QFontMetrics(font).height() * 2 + padding * 2 + 4 + gap));
 		const QString vertical = chat.value(QStringLiteral("vertical")).toString();
 		const QString horizontal = chat.value(QStringLiteral("horizontal")).toString();
 		const int x = (horizontal == QStringLiteral("right") ? this->width() - width - 36 :

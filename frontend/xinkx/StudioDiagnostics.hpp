@@ -3,6 +3,7 @@
 #include "StreamAccounts.hpp"
 
 #include <QDateTime>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QMutex>
