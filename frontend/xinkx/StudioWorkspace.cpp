@@ -4,6 +4,8 @@
 #include "MultiStreamManager.hpp"
 #include "OverlayRuntime.hpp"
 #include "ChatGateway.hpp"
+#include "PresentationSettings.hpp"
+#include "DonationGateway.hpp"
 
 #include <OBSApp.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -37,6 +39,10 @@
 #include <utility>
 
 namespace xinkx {
+
+void installBroadcastWorkspace(OBSBasic *mainWindow);
+void installGameProfilesWorkspace(OBSBasic *mainWindow);
+void installSceneJsonWorkspace(OBSBasic *mainWindow);
 
 namespace {
 
@@ -443,6 +449,11 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	});
 	installOverlayWorkspace(mainWindow, inspector);
 	installChatWorkspace(mainWindow);
+	installPresentationWorkspace(mainWindow);
+	installBroadcastWorkspace(mainWindow);
+	installGameProfilesWorkspace(mainWindow);
+	installSceneJsonWorkspace(mainWindow);
+	installDonationWorkspace(mainWindow);
 }
 
 void shutdownStudioOutputs(OBSBasic *mainWindow)

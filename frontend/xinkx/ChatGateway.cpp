@@ -3,6 +3,7 @@
 #include "NativeWebSocket.hpp"
 #include "OverlayRuntime.hpp"
 #include "PlatformApi.hpp"
+#include "PresentationSettings.hpp"
 
 #include <widgets/OBSBasic.hpp>
 #include <utility/RemoteTextThread.hpp>
@@ -10,9 +11,12 @@
 #include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QRegularExpression>
+#include <QSettings>
 #include <QThread>
 #include <QUrl>
 #include <QUrlQuery>
+#include <QUuid>
 
 #include <algorithm>
 #include <memory>
@@ -66,6 +70,8 @@ ChatGateway::~ChatGateway()
 {
 	for (auto *socket : twitch) delete socket;
 	twitch.clear();
+	for (auto *socket : kickSockets) delete socket;
+	kickSockets.clear();
 }
 
 QVector<StreamAccount> ChatGateway::accounts() const
@@ -107,13 +113,31 @@ void ChatGateway::reloadAccounts()
 		    updated[it.key()].providerId != known.value(it.key()).providerId) it = youtube.erase(it);
 		else ++it;
 	}
+	for (auto it = kickSockets.begin(); it != kickSockets.end();) {
+		if (!updated.contains(it.key()) ||
+		    updated[it.key()].providerName != known.value(it.key()).providerName) {
+			delete it.value();
+			it = kickSockets.erase(it);
+		} else ++it;
+	}
+	for (auto it = kick.begin(); it != kick.end();) {
+		if (!updated.contains(it.key())) it = kick.erase(it);
+		else ++it;
+	}
 	known = updated;
 	for (const auto &account : updated) {
 		if (account.platform == QStringLiteral("youtube") && !youtube.contains(account.id)) {
 			youtube.insert(account.id, {});
 		}
-		if (account.platform == QStringLiteral("kick")) {
-			status(account.id, QStringLiteral("Отправка работает; получение Kick требует отдельного канала событий"));
+		if (account.platform == QStringLiteral("kick") && !kick.contains(account.id)) {
+			KickState state;
+			state.slug = account.providerName.toLower().trimmed();
+			const auto config = studioSettingsPath();
+			if (!config.isEmpty()) {
+				QSettings settings(config, QSettings::IniFormat);
+				state.roomId = settings.value(QStringLiteral("chat/kickRoom-%1").arg(account.id)).toString();
+			}
+			kick.insert(account.id, state);
 		}
 	}
 	nextReloadAt = QDateTime::currentMSecsSinceEpoch() + 30000;
@@ -129,14 +153,98 @@ void ChatGateway::schedule()
 	for (const auto &account : known) {
 		if (account.platform == QStringLiteral("twitch") && !twitch.contains(account.id) &&
 		    now >= nextTwitchAt.value(account.id)) startTwitch(account.id);
+		if (now >= nextViewerPoll.value(account.id)) {
+			nextViewerPoll[account.id] = now + 60000;
+			pollViewers(account.id);
+		}
+	}
+	for (auto it = kick.begin(); it != kick.end(); ++it) {
+		if (!it->pending && !kickSockets.contains(it.key()) && now >= it->nextAt) startKick(it.key());
+		if (kickSockets.contains(it.key()) && it->subscribed && !it->pending &&
+		    now >= it->tokenExpiresAt - 90000) {
+			const auto id = it.key();
+			kickGuestToken(id, [this, id](const QString &token) {
+				if (!token.isEmpty() && kickSockets.contains(id)) {
+					kickSockets[id]->send(QJsonDocument(QJsonObject{
+						{QStringLiteral("id"), 3},
+						{QStringLiteral("refresh"), QJsonObject{{QStringLiteral("token"), token}}}})
+						.toJson(QJsonDocument::Compact));
+				}
+			});
+		}
+	}
+}
+
+void ChatGateway::pollViewers(const QString &id)
+{
+	const auto account = known.value(id);
+	if (account.id.isEmpty()) return;
+	const auto report = [this, id, platform = account.platform](int count) {
+		emit viewersReceived(id, count);
+		viewerSnapshot[id] = count;
+		int sum = 0;
+		bool knownValue = false;
+		for (const auto &account : known) {
+			if (account.platform != platform || !viewerSnapshot.contains(account.id)) continue;
+			const int value = viewerSnapshot.value(account.id);
+			if (value >= 0) { sum += value; knownValue = true; }
+		}
+		if (auto *overlay = mainWindow->findChild<OverlayRuntime *>(QStringLiteral("xinkxOverlayRuntime")))
+			overlay->publishViewers(platform, knownValue ? sum : -1);
+	};
+	if (account.platform == QStringLiteral("twitch")) {
+		if (account.providerId.isEmpty()) { report(-1); return; }
+		authorized(id, apiUrl(QStringLiteral("https://api.twitch.tv/helix/streams"),
+			{{QStringLiteral("user_id"), account.providerId}}), {}, [report](const HttpResult &result) {
+			if (!result.ok) { report(-1); return; }
+			const auto entries = result.json.value(QStringLiteral("data")).toArray();
+			report(entries.isEmpty() ? 0 : entries.first().toObject().value(QStringLiteral("viewer_count")).toInt());
+		});
+	} else if (account.platform == QStringLiteral("youtube")) {
+		const QString url = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts"),
+			{{QStringLiteral("part"), QStringLiteral("id")}, {QStringLiteral("broadcastStatus"), QStringLiteral("active")}});
+		authorized(id, url, {}, [this, id, report](const HttpResult &result) {
+			if (!result.ok) { report(-1); return; }
+			const auto items = result.json.value(QStringLiteral("items")).toArray();
+			if (items.isEmpty()) { report(0); return; }
+			const auto videoId = items.first().toObject().value(QStringLiteral("id")).toString();
+			if (videoId.isEmpty()) { report(-1); return; }
+			const QString videoUrl = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/videos"),
+				{{QStringLiteral("part"), QStringLiteral("liveStreamingDetails")},
+				 {QStringLiteral("id"), videoId}});
+			authorized(id, videoUrl, {}, [report](const HttpResult &response) {
+				if (!response.ok || response.json.value(QStringLiteral("items")).toArray().isEmpty()) {
+					report(-1); return;
+				}
+				const auto details = response.json.value(QStringLiteral("items")).toArray().first().toObject()
+					.value(QStringLiteral("liveStreamingDetails")).toObject();
+				const auto count = details.value(QStringLiteral("concurrentViewers"));
+				report(count.isUndefined() ? -1 : count.toVariant().toInt());
+			});
+		});
+	} else if (account.platform == QStringLiteral("kick")) {
+		const auto slug = account.providerName;
+		if (slug.isEmpty()) { report(-1); return; }
+		const QString url = apiUrl(QStringLiteral("https://api.kick.com/public/v1/channels"),
+			{{QStringLiteral("slug"), slug}});
+		authorized(id, url, {}, [report](const HttpResult &result) {
+			if (!result.ok || result.json.value(QStringLiteral("data")).toArray().isEmpty()) {
+				report(-1); return;
+			}
+			const auto stream = result.json.value(QStringLiteral("data")).toArray().first().toObject()
+				.value(QStringLiteral("stream")).toObject();
+			report(stream.isEmpty() ? 0 : stream.value(QStringLiteral("viewer_count")).toInt());
+		});
 	}
 }
 
 void ChatGateway::request(const QString &id, const QString &url, const QByteArray &body,
-			  const QByteArray &contentType, const RequestDone &done, bool useToken)
+			  const QByteArray &contentType, const RequestDone &done, bool useToken,
+			  const QStringList &extraHeaders, const QByteArray &verb)
 {
 	if (!known.contains(id)) return;
 	std::vector<std::string> headers{"Accept: application/json"};
+	for (const auto &header : extraHeaders) headers.push_back(header.toStdString());
 	if (useToken) {
 		const auto &account = known[id];
 		headers.push_back("Authorization: Bearer " + account.oauth.accessToken.toStdString());
@@ -147,6 +255,8 @@ void ChatGateway::request(const QString &id, const QString &url, const QByteArra
 	const auto address = url.toStdString();
 	const auto payload = body.toStdString();
 	const auto mime = contentType.toStdString();
+	const auto method = verb.isEmpty() ? (contentType.isEmpty() ? std::string("GET") : std::string("POST"))
+					      : verb.toStdString();
 	struct Transfer {
 		std::string response;
 		std::string error;
@@ -154,11 +264,11 @@ void ChatGateway::request(const QString &id, const QString &url, const QByteArra
 		bool ok = false;
 	};
 	const auto transfer = std::make_shared<Transfer>();
-	auto *worker = QThread::create([transfer, address, payload, mime, headers = std::move(headers)] {
-		const bool post = !mime.empty();
+	auto *worker = QThread::create([transfer, address, payload, mime, method, headers = std::move(headers)] {
+		const bool hasBody = method != "GET";
 		transfer->ok = GetRemoteFile(address.c_str(), transfer->response, transfer->error, &transfer->status,
-					     post ? mime.c_str() : nullptr, post ? "POST" : "GET",
-					     post ? payload.c_str() : nullptr, headers, nullptr, 20, false,
+					     hasBody ? mime.c_str() : nullptr, method.c_str(),
+					     hasBody ? payload.c_str() : nullptr, headers, nullptr, 20, false,
 					     static_cast<int>(payload.size()));
 	});
 	connect(worker, &QThread::finished, this, [this, transfer, id, done] {
@@ -258,6 +368,281 @@ void ChatGateway::authorized(const QString &id, const QString &url, const QByteA
 				done(response);
 			});
 	});
+}
+
+void ChatGateway::jsonApi(const QString &id, const QString &url, const QByteArray &verb,
+			 const QJsonObject &body, const RequestDone &done, bool retry)
+{
+	tokenFor(id, [this, id, url, verb, body, done, retry](const QString &token) {
+		if (token.isEmpty()) { done({{}, 0, false, QStringLiteral("OAuth недоступен")}); return; }
+		const QByteArray payload = body.isEmpty() ? QByteArray{} : QJsonDocument(body).toJson(QJsonDocument::Compact);
+		request(id, url, payload, QByteArray("application/json"),
+			[this, id, url, verb, body, done, retry](const HttpResult &result) {
+				if (result.status == 401 && !retry) {
+					tokenFor(id, [this, id, url, verb, body, done](const QString &token) {
+						if (token.isEmpty()) done({{}, 401, false, QStringLiteral("OAuth отклонён")});
+						else jsonApi(id, url, verb, body, done, true);
+					}, true);
+					return;
+				}
+				done(result);
+			}, true, {}, verb);
+	});
+}
+
+void ChatGateway::inspectBroadcast(const QString &id, const QString &youtubeBroadcastId)
+{
+	const auto account = known.value(id);
+	if (account.id.isEmpty()) return;
+	if (account.platform == QStringLiteral("twitch")) {
+		if (account.providerId.isEmpty()) { emit broadcastResult(id, QStringLiteral("Нет Twitch ID"), false); return; }
+		const auto url = apiUrl(QStringLiteral("https://api.twitch.tv/helix/channels"),
+			{{QStringLiteral("broadcaster_id"), account.providerId}});
+		authorized(id, url, {}, [this, id](const HttpResult &result) {
+			if (!result.ok) { emit broadcastResult(id, result.error, false); return; }
+			const auto data = result.json.value(QStringLiteral("data")).toArray();
+			if (data.isEmpty()) { emit broadcastResult(id, QStringLiteral("Канал не найден"), false); return; }
+			const auto item = data.first().toObject();
+			emit broadcastInfo(id, {{QStringLiteral("platform"), QStringLiteral("twitch")},
+				{QStringLiteral("title"), item.value(QStringLiteral("title"))},
+				{QStringLiteral("categoryId"), item.value(QStringLiteral("game_id"))},
+				{QStringLiteral("categoryName"), item.value(QStringLiteral("game_name"))}});
+		});
+	} else if (account.platform == QStringLiteral("kick")) {
+		authorized(id, QStringLiteral("https://api.kick.com/public/v1/channels"), {},
+			[this, id](const HttpResult &result) {
+				if (!result.ok) { emit broadcastResult(id, result.error, false); return; }
+				const auto data = result.json.value(QStringLiteral("data")).toArray();
+				if (data.isEmpty()) { emit broadcastResult(id, QStringLiteral("Канал Kick не найден"), false); return; }
+				const auto item = data.first().toObject();
+				emit broadcastInfo(id, {{QStringLiteral("platform"), QStringLiteral("kick")},
+					{QStringLiteral("title"), item.value(QStringLiteral("stream_title"))},
+					{QStringLiteral("categoryId"), item.value(QStringLiteral("category")).toObject().value(QStringLiteral("id"))},
+					{QStringLiteral("categoryName"), item.value(QStringLiteral("category")).toObject().value(QStringLiteral("name"))}});
+			});
+	} else if (account.platform == QStringLiteral("youtube")) {
+		const auto url = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts"),
+			{{QStringLiteral("part"), QStringLiteral("id,snippet,status,contentDetails")},
+			 {QStringLiteral("mine"), QStringLiteral("true")},
+			 {QStringLiteral("broadcastType"), QStringLiteral("all")},
+			 {QStringLiteral("maxResults"), QStringLiteral("50")}});
+		authorized(id, url, {}, [this, id, youtubeBroadcastId](const HttpResult &result) {
+			if (!result.ok) { emit broadcastResult(id, result.error, false); return; }
+			QJsonArray broadcasts;
+			QJsonObject selected;
+			for (const auto &entry : result.json.value(QStringLiteral("items")).toArray()) {
+				const auto item = entry.toObject();
+				const auto status = item.value(QStringLiteral("status")).toObject();
+				if (status.value(QStringLiteral("lifeCycleStatus")) == QStringLiteral("complete")) continue;
+				const auto snippet = item.value(QStringLiteral("snippet")).toObject();
+				const QJsonObject value{{QStringLiteral("id"), item.value(QStringLiteral("id"))},
+					{QStringLiteral("title"), snippet.value(QStringLiteral("title"))},
+					{QStringLiteral("description"), snippet.value(QStringLiteral("description"))},
+					{QStringLiteral("categoryId"), snippet.value(QStringLiteral("categoryId"))},
+					{QStringLiteral("boundStreamId"), item.value(QStringLiteral("contentDetails")).toObject()
+						.value(QStringLiteral("boundStreamId"))}};
+				broadcasts.append(value);
+				if (selected.isEmpty() || value.value(QStringLiteral("id")) == youtubeBroadcastId) selected = value;
+			}
+			const auto streamsUrl = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveStreams"),
+				{{QStringLiteral("part"), QStringLiteral("id,snippet,status")},
+				 {QStringLiteral("mine"), QStringLiteral("true")}, {QStringLiteral("maxResults"), QStringLiteral("50")}});
+			authorized(id, streamsUrl, {}, [this, id, selected, broadcasts](const HttpResult &streamsResult) {
+				QJsonArray streams;
+				if (streamsResult.ok) for (const auto &entry : streamsResult.json.value(QStringLiteral("items")).toArray()) {
+					const auto item = entry.toObject();
+					streams.append(QJsonObject{{QStringLiteral("id"), item.value(QStringLiteral("id"))},
+						{QStringLiteral("title"), item.value(QStringLiteral("snippet")).toObject()
+						 .value(QStringLiteral("title"))}});
+				}
+				QJsonObject output = selected;
+				output.insert(QStringLiteral("platform"), QStringLiteral("youtube"));
+				output.insert(QStringLiteral("broadcasts"), broadcasts);
+				output.insert(QStringLiteral("streams"), streams);
+				emit broadcastInfo(id, output);
+			});
+		});
+	}
+}
+
+void ChatGateway::searchCategories(const QString &id, const QString &query)
+{
+	const auto account = known.value(id);
+	if (account.id.isEmpty()) return;
+	const auto name = query.trimmed().left(90);
+	if (name.size() < 2 && account.platform != QStringLiteral("youtube")) return;
+	QString url;
+	if (account.platform == QStringLiteral("twitch")) url = apiUrl(
+		QStringLiteral("https://api.twitch.tv/helix/search/categories"),
+		{{QStringLiteral("query"), name}, {QStringLiteral("first"), QStringLiteral("20")}});
+	else if (account.platform == QStringLiteral("kick")) url = apiUrl(
+		QStringLiteral("https://api.kick.com/public/v2/categories"),
+		{{QStringLiteral("name"), name}, {QStringLiteral("limit"), QStringLiteral("20")}});
+	else url = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/videoCategories"),
+		{{QStringLiteral("part"), QStringLiteral("snippet")}, {QStringLiteral("regionCode"), QStringLiteral("US")},
+		 {QStringLiteral("hl"), QStringLiteral("ru")}});
+	authorized(id, url, {}, [this, id, name](const HttpResult &result) {
+		if (!result.ok) { emit broadcastResult(id, result.error, false); return; }
+		QJsonArray categories;
+		const auto account = known.value(id);
+		const auto items = account.platform == QStringLiteral("youtube") ?
+			result.json.value(QStringLiteral("items")).toArray() : result.json.value(QStringLiteral("data")).toArray();
+		for (const auto &entry : items) {
+			const auto obj = entry.toObject();
+			const auto label = account.platform == QStringLiteral("youtube") ?
+				obj.value(QStringLiteral("snippet")).toObject().value(QStringLiteral("title")).toString()
+				: obj.value(QStringLiteral("name")).toString();
+			if (account.platform == QStringLiteral("youtube") && !label.contains(name, Qt::CaseInsensitive)) continue;
+			const auto value = obj.value(QStringLiteral("id")).toVariant().toString();
+			if (!value.isEmpty() && !label.isEmpty()) categories.append(QJsonObject{
+				{QStringLiteral("id"), value}, {QStringLiteral("name"), label}});
+			if (categories.size() >= 50) break;
+		}
+		emit categoryResults(id, categories);
+	});
+}
+
+void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
+				  const QString &title, const QString &description, const QString &categoryId)
+{
+	const auto account = known.value(id);
+	if (account.id.isEmpty()) return;
+	const QString heading = title.trimmed().left(100);
+	const QString category = categoryId.trimmed().left(40);
+	QJsonObject body;
+	QString url;
+	QByteArray method("PATCH");
+	if (account.platform == QStringLiteral("twitch")) {
+		url = apiUrl(QStringLiteral("https://api.twitch.tv/helix/channels"),
+			{{QStringLiteral("broadcaster_id"), account.providerId}});
+		if (!heading.isEmpty()) body.insert(QStringLiteral("title"), heading);
+		if (!category.isEmpty()) body.insert(QStringLiteral("game_id"), category);
+	} else if (account.platform == QStringLiteral("kick")) {
+		url = QStringLiteral("https://api.kick.com/public/v1/channels");
+		if (!heading.isEmpty()) body.insert(QStringLiteral("stream_title"), heading);
+		bool ok = false;
+		const int number = category.toInt(&ok);
+		if (!category.isEmpty() && (!ok || number <= 0)) {
+			emit broadcastResult(id, QStringLiteral("Kick: категория должна быть числовым ID"), false); return;
+		}
+		if (number > 0) body.insert(QStringLiteral("category_id"), number);
+	} else if (account.platform == QStringLiteral("youtube")) {
+		if (broadcastId.isEmpty()) {
+			emit broadcastResult(id, QStringLiteral("YouTube: выбери эфир"), false); return;
+		}
+		const auto readUrl = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts"),
+			{{QStringLiteral("part"), QStringLiteral("snippet")}, {QStringLiteral("id"), broadcastId}});
+		authorized(id, readUrl, {}, [this, id, broadcastId, heading, description, category](const HttpResult &result) {
+			if (!result.ok || result.json.value(QStringLiteral("items")).toArray().isEmpty()) {
+				emit broadcastResult(id, QStringLiteral("YouTube: не удалось прочитать эфир: ") + result.error, false); return;
+			}
+			auto snippet = result.json.value(QStringLiteral("items")).toArray().first().toObject()
+				.value(QStringLiteral("snippet")).toObject();
+			if (!heading.isEmpty()) snippet.insert(QStringLiteral("title"), heading);
+			if (!description.isEmpty()) snippet.insert(QStringLiteral("description"), description.left(5000));
+			if (!category.isEmpty()) snippet.insert(QStringLiteral("categoryId"), category);
+			jsonApi(id, QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts?part=snippet"),
+				QByteArray("PUT"), {{QStringLiteral("id"), broadcastId}, {QStringLiteral("snippet"), snippet}},
+				[this, id](const HttpResult &reply) {
+					emit broadcastResult(id, reply.ok ? QStringLiteral("YouTube: параметры эфира сохранены") : reply.error, reply.ok);
+				});
+		});
+		return;
+	} else return;
+	if (body.isEmpty()) { emit broadcastResult(id, QStringLiteral("Для этой площадки укажи название или категорию"), false); return; }
+	jsonApi(id, url, method, body, [this, id, account](const HttpResult &result) {
+		const auto label = platformTitle(account.platform);
+		emit broadcastResult(id, result.ok ? label + QStringLiteral(": данные обновлены") : label + QStringLiteral(": ") + result.error,
+			result.ok);
+	});
+}
+
+void ChatGateway::saveYouTubeStream(const QString &id, const QString &streamId, const QString &broadcastId)
+{
+	const auto url = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveStreams"),
+		{{QStringLiteral("part"), QStringLiteral("id,cdn")}, {QStringLiteral("id"), streamId}});
+	authorized(id, url, {}, [this, id, streamId, broadcastId](const HttpResult &result) {
+		if (!result.ok || result.json.value(QStringLiteral("items")).toArray().isEmpty()) {
+			emit broadcastResult(id, QStringLiteral("YouTube: не удалось получить параметры видеопотока: ") + result.error, false);
+			return;
+		}
+		const auto ingest = result.json.value(QStringLiteral("items")).toArray().first().toObject()
+			.value(QStringLiteral("cdn")).toObject().value(QStringLiteral("ingestionInfo")).toObject();
+		const QString address = ingest.value(QStringLiteral("rtmpsIngestionAddress")).toString(
+			ingest.value(QStringLiteral("ingestionAddress")).toString());
+		const QString key = ingest.value(QStringLiteral("streamName")).toString();
+		if (key.isEmpty() || !validIngestUrl(address)) {
+			emit broadcastResult(id, QStringLiteral("YouTube: API не вернул RTMP(S)-адрес и ключ"), false); return;
+		}
+		auto stored = loadStreamAccounts();
+		bool saved = false;
+		for (auto &account : stored) {
+			if (account.id != id) continue;
+			account.youtubeStreamId = streamId;
+			account.destination.ingestUrl = address;
+			account.destination.streamKey = key;
+			account.destination.fromOAuth = true;
+			account.destination.serviceName.clear();
+			account.destination.serviceServer.clear();
+			saved = saveStreamAccounts(stored);
+			break;
+		}
+		if (saved) reloadAccounts();
+		emit broadcastResult(id, saved
+			? QStringLiteral("YouTube: поток %1 для эфира %2 сохранён в защищённых настройках").arg(streamId, broadcastId)
+			: QStringLiteral("YouTube: не удалось сохранить RTMP-конфигурацию"), saved);
+	});
+}
+
+void ChatGateway::bindYouTubeStream(const QString &id, const QString &broadcastId, const QString &streamId)
+{
+	if (known.value(id).platform != QStringLiteral("youtube") || broadcastId.isEmpty() || streamId.isEmpty()) return;
+	const auto url = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts/bind"),
+		{{QStringLiteral("id"), broadcastId}, {QStringLiteral("streamId"), streamId},
+		 {QStringLiteral("part"), QStringLiteral("id,contentDetails")}});
+	jsonApi(id, url, QByteArray("POST"), {}, [this, id, streamId, broadcastId](const HttpResult &result) {
+		if (!result.ok) { emit broadcastResult(id, QStringLiteral("YouTube bind: ") + result.error, false); return; }
+		saveYouTubeStream(id, streamId, broadcastId);
+	});
+}
+
+void ChatGateway::createYouTubeBroadcast(const QString &id, const QString &title,
+					const QString &description, const QString &categoryId)
+{
+	if (known.value(id).platform != QStringLiteral("youtube") || title.trimmed().isEmpty()) return;
+	const QJsonObject snippet{{QStringLiteral("title"), title.trimmed().left(100)},
+		{QStringLiteral("description"), description.left(5000)},
+		{QStringLiteral("scheduledStartTime"), QDateTime::currentDateTimeUtc().addSecs(600).toString(Qt::ISODate)}};
+	auto create = snippet;
+	if (!categoryId.trimmed().isEmpty()) create.insert(QStringLiteral("categoryId"), categoryId.trimmed());
+	jsonApi(id, QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts?part=id,snippet,status,contentDetails"),
+		QByteArray("POST"), {{QStringLiteral("snippet"), create},
+			{QStringLiteral("status"), QJsonObject{{QStringLiteral("privacyStatus"), QStringLiteral("unlisted")},
+				{QStringLiteral("selfDeclaredMadeForKids"), false}}},
+			{QStringLiteral("contentDetails"), QJsonObject{{QStringLiteral("enableAutoStart"), true},
+				{QStringLiteral("enableAutoStop"), true}}}},
+		[this, id, title](const HttpResult &result) {
+			const QString broadcastId = result.json.value(QStringLiteral("id")).toString();
+			if (!result.ok || broadcastId.isEmpty()) {
+				emit broadcastResult(id, QStringLiteral("Создание YouTube эфира: ") + result.error, false); return;
+			}
+			jsonApi(id, QStringLiteral("https://www.googleapis.com/youtube/v3/liveStreams?part=id,snippet,cdn,contentDetails"),
+				QByteArray("POST"), {{QStringLiteral("snippet"), QJsonObject{
+					{QStringLiteral("title"), title.left(100) + QStringLiteral(" · XINKX")}}},
+					{QStringLiteral("cdn"), QJsonObject{{QStringLiteral("ingestionType"), QStringLiteral("rtmp")},
+						{QStringLiteral("resolution"), QStringLiteral("variable")},
+						{QStringLiteral("frameRate"), QStringLiteral("variable")}}},
+					{QStringLiteral("contentDetails"), QJsonObject{{QStringLiteral("isReusable"), true}}}},
+				[this, id, broadcastId](const HttpResult &reply) {
+					const QString streamId = reply.json.value(QStringLiteral("id")).toString();
+					if (!reply.ok || streamId.isEmpty()) {
+						emit broadcastResult(id, QStringLiteral("Эфир %1 создан, но поток создать не удалось: %2")
+							.arg(broadcastId, reply.error), false); return;
+					}
+					bindYouTubeStream(id, broadcastId, streamId);
+					inspectBroadcast(id);
+				});
+		});
 }
 
 void ChatGateway::pollYouTube(const QString &id)
@@ -392,6 +777,226 @@ void ChatGateway::startTwitch(const QString &id)
 		});
 }
 
+QString ChatGateway::kickRoomId(const QString &accountId) const
+{
+	return kick.value(accountId).roomId;
+}
+
+void ChatGateway::setKickRoomId(const QString &accountId, const QString &roomId)
+{
+	if (!known.contains(accountId) || known.value(accountId).platform != QStringLiteral("kick")) return;
+	const QString value = roomId.trimmed();
+	if (!value.isEmpty() && !QRegularExpression(QStringLiteral("^[0-9]{1,15}$")).match(value).hasMatch()) {
+		status(accountId, QStringLiteral("Kick: ID комнаты должен содержать 1–15 цифр"));
+		return;
+	}
+	const auto path = studioSettingsPath();
+	if (!path.isEmpty()) {
+		QSettings settings(path, QSettings::IniFormat);
+		settings.setValue(QStringLiteral("chat/kickRoom-%1").arg(accountId), value);
+	}
+	delete kickSockets.take(accountId);
+	auto &state = kick[accountId];
+	state.roomId = value;
+	state.pending = false;
+	state.subscribed = false;
+	state.nextAt = 0;
+	state.attempts = 0;
+	status(accountId, value.isEmpty() ? QStringLiteral("Kick: автоопределение комнаты") :
+		QStringLiteral("Kick: комната %1 сохранена").arg(value));
+}
+
+void ChatGateway::startKick(const QString &id)
+{
+	if (!kick.contains(id)) return;
+	auto &state = kick[id];
+	state.nextAt = QDateTime::currentMSecsSinceEpoch() + 30000;
+	if (!state.roomId.isEmpty()) kickDiscover(id);
+	else kickResolveRoom(id);
+}
+
+void ChatGateway::kickResolveRoom(const QString &id)
+{
+	if (!kick.contains(id)) return;
+	auto &state = kick[id];
+	const auto slug = state.slug;
+	if (!QRegularExpression(QStringLiteral("^[a-z0-9_]{1,40}$")).match(slug).hasMatch()) {
+		status(id, QStringLiteral("Kick: укажи chatroom ID или обнови имя канала OAuth"));
+		state.nextAt = QDateTime::currentMSecsSinceEpoch() + 60000;
+		return;
+	}
+	state.pending = true;
+	const auto url = apiUrl(QStringLiteral("https://kick.com/api/v2/channels/%1").arg(slug), {});
+	request(id, url, {}, {}, [this, id](const HttpResult &result) {
+		if (!kick.contains(id)) return;
+		kick[id].pending = false;
+		const QString room = result.json.value(QStringLiteral("chatroom")).toObject()
+					.value(QStringLiteral("id")).toVariant().toString();
+		if (!result.ok || !QRegularExpression(QStringLiteral("^[0-9]{1,15}$")).match(room).hasMatch()) {
+			status(id, QStringLiteral("Kick: не удалось определить комнату, введи её ID вручную"));
+			kick[id].nextAt = QDateTime::currentMSecsSinceEpoch() + 60000;
+			return;
+		}
+		kick[id].roomId = room;
+		status(id, QStringLiteral("Kick: найдена комната %1").arg(room));
+		kickDiscover(id);
+	}, false, {QStringLiteral("User-Agent: Mozilla/5.0")});
+}
+
+void ChatGateway::kickDiscover(const QString &id)
+{
+	if (!kick.contains(id) || kick[id].pending) return;
+	auto &state = kick[id];
+	state.pending = true;
+	if (state.guestId.isEmpty()) state.guestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+	const QJsonObject body{
+		{QStringLiteral("client"), QJsonObject{{QStringLiteral("id"), state.guestId},
+						{QStringLiteral("type"), QStringLiteral("web")}}},
+		{QStringLiteral("capabilities"), QJsonObject{{QStringLiteral("accepted_providers"), QJsonArray{
+			QJsonObject{{QStringLiteral("provider"), QStringLiteral("centrifugo")}}}}}},
+	};
+	request(id, QStringLiteral("https://web.kick.com/api/v1/realtime/connection"),
+		QJsonDocument(body).toJson(QJsonDocument::Compact), QByteArray("application/json"),
+		[this, id](const HttpResult &result) {
+			if (!kick.contains(id)) return;
+			if (!result.ok) {
+				kick[id].pending = false;
+				status(id, QStringLiteral("Kick discovery: ") + result.error);
+				return;
+			}
+			QString address;
+			const auto connections = result.json.value(QStringLiteral("data")).toObject()
+						 .value(QStringLiteral("connections")).toArray();
+			for (const auto &candidate : connections) {
+				const auto item = candidate.toObject();
+				if (item.value(QStringLiteral("provider")) == QStringLiteral("centrifugo")) {
+					address = item.value(QStringLiteral("credentials")).toObject()
+							.value(QStringLiteral("url")).toString();
+					break;
+				}
+			}
+			const QUrl socketUrl(address, QUrl::StrictMode);
+			const bool valid = socketUrl.isValid() && socketUrl.scheme() == QStringLiteral("wss") &&
+				QRegularExpression(QStringLiteral("^realtime\\.[a-z0-9-]+\\.platform\\.kick\\.com$"))
+					.match(socketUrl.host()).hasMatch() &&
+				socketUrl.path() == QStringLiteral("/connection/websocket");
+			if (!valid) {
+				kick[id].pending = false;
+				status(id, QStringLiteral("Kick: неожиданный адрес WSS"));
+				return;
+			}
+			kick[id].socketUrl = socketUrl;
+			kick[id].pending = false;
+			kickGuestToken(id, [this, id](const QString &token) {
+				if (token.isEmpty() || !kick.contains(id)) return;
+				const auto url = kick[id].socketUrl;
+				status(id, QStringLiteral("Kick: соединяемся с комнатой %1").arg(kick[id].roomId));
+				kickSockets[id] = new NativeWebSocket(this, url,
+					[this, id](const QByteArray &frame) { handleKickFrame(id, frame); },
+					[this, id](const QString &error) {
+						delete kickSockets.take(id);
+						if (!kick.contains(id)) return;
+						auto &state = kick[id];
+						state.subscribed = false;
+						state.attempts = std::min(6, state.attempts + 1);
+						state.nextAt = QDateTime::currentMSecsSinceEpoch() +
+							std::min(60000, 2000 * (1 << state.attempts));
+						status(id, QStringLiteral("Kick: %1 · повторное соединение").arg(error));
+					},
+					[this, id, token] {
+						if (kickSockets.contains(id)) kickSockets[id]->send(QJsonDocument(QJsonObject{
+							{QStringLiteral("id"), 1},
+							{QStringLiteral("connect"), QJsonObject{
+								{QStringLiteral("token"), token},
+								{QStringLiteral("name"), QStringLiteral("js")}}}})
+							.toJson(QJsonDocument::Compact));
+					}, QByteArray("https://kick.com"));
+			});
+		}, false, {QStringLiteral("Origin: https://kick.com")});
+}
+
+void ChatGateway::kickGuestToken(const QString &id, const std::function<void(const QString &)> &done)
+{
+	if (!kick.contains(id) || kick[id].pending) return;
+	auto &state = kick[id];
+	state.pending = true;
+	const QJsonObject body{{QStringLiteral("client_id"), state.guestId}};
+	request(id, QStringLiteral("https://web.kick.com/api/v1/realtime/auth/connection"),
+		QJsonDocument(body).toJson(QJsonDocument::Compact), QByteArray("application/json"),
+		[this, id, done](const HttpResult &result) {
+			if (!kick.contains(id)) return;
+			auto &state = kick[id];
+			state.pending = false;
+			const QString token = result.json.value(QStringLiteral("data")).toObject()
+						.value(QStringLiteral("token")).toString();
+			if (!result.ok || token.isEmpty()) {
+				status(id, QStringLiteral("Kick guest token: ") + result.error);
+				state.nextAt = QDateTime::currentMSecsSinceEpoch() + 30000;
+				done({});
+				return;
+			}
+			state.guestToken = token;
+			state.tokenExpiresAt = QDateTime::currentMSecsSinceEpoch() + 35 * 60 * 1000LL;
+			done(token);
+		}, false, {QStringLiteral("Origin: https://kick.com")});
+}
+
+void ChatGateway::handleKickFrame(const QString &id, const QByteArray &frame)
+{
+	if (!kick.contains(id) || !kickSockets.contains(id)) return;
+	for (const auto &lineBytes : frame.split('\n')) {
+		if (lineBytes.isEmpty()) continue;
+		const auto value = QJsonDocument::fromJson(lineBytes).object();
+		if (value.isEmpty()) {
+			kickSockets[id]->send(QByteArray("{}"));
+			continue;
+		}
+		if (value.value(QStringLiteral("error")).isObject()) {
+			const auto error = value.value(QStringLiteral("error")).toObject();
+			status(id, QStringLiteral("Kick: код %1 · %2")
+				.arg(error.value(QStringLiteral("code")).toVariant().toString(),
+				     error.value(QStringLiteral("message")).toString()));
+			delete kickSockets.take(id);
+			kick[id].nextAt = QDateTime::currentMSecsSinceEpoch() + 30000;
+			return;
+		}
+		const int messageId = value.value(QStringLiteral("id")).toInt();
+		if (messageId == 1 && value.value(QStringLiteral("connect")).isObject()) {
+			kickSockets[id]->send(QJsonDocument(QJsonObject{
+				{QStringLiteral("id"), 2},
+				{QStringLiteral("subscribe"), QJsonObject{{QStringLiteral("channel"),
+					QStringLiteral("chatrooms.%1.v2").arg(kick[id].roomId)}}}})
+				.toJson(QJsonDocument::Compact));
+		}
+		if (messageId == 2 && value.value(QStringLiteral("subscribe")).isObject()) {
+			kick[id].subscribed = true;
+			kick[id].attempts = 0;
+			status(id, QStringLiteral("Kick: чат подключён · комната %1 (Centrifugo)").arg(kick[id].roomId));
+		}
+		const auto publication = value.value(QStringLiteral("push")).toObject()
+						.value(QStringLiteral("pub")).toObject();
+		if (publication.isEmpty()) continue;
+		const auto envelope = publication.value(QStringLiteral("data")).toObject();
+		const QString event = envelope.value(QStringLiteral("event")).toString(
+			publication.value(QStringLiteral("tags")).toObject().value(QStringLiteral("event")).toString());
+		if (event != QStringLiteral("App\\Events\\ChatMessageEvent") && event != QStringLiteral("ChatMessageEvent")) continue;
+		const auto messageValue = envelope.value(QStringLiteral("data"));
+		const auto message = messageValue.isString()
+					? QJsonDocument::fromJson(messageValue.toString().toUtf8()).object()
+					: messageValue.toObject();
+		const QString content = message.value(QStringLiteral("content")).toString();
+		if (content.trimmed().isEmpty()) continue;
+		ChatLine chat;
+		chat.platform = QStringLiteral("kick");
+		chat.accountId = id;
+		chat.messageId = message.value(QStringLiteral("id")).toVariant().toString();
+		chat.name = message.value(QStringLiteral("sender")).toObject()
+				.value(QStringLiteral("username")).toString(QStringLiteral("Зритель"));
+		chat.text = content;
+		dispatch(std::move(chat));
+	}
+}
+
 void ChatGateway::subscribeTwitch(const QString &id, const QString &sessionId)
 {
 	const QString userId = known.value(id).providerId;
@@ -409,11 +1014,12 @@ void ChatGateway::subscribeTwitch(const QString &id, const QString &sessionId)
 			QJsonDocument(body).toJson(QJsonDocument::Compact),
 			[this, id, type](const HttpResult &result) {
 				if (!result.ok) {
-					status(id, QStringLiteral("Twitch %1: %2").arg(type, result.error));
+					const QString message = QStringLiteral("Twitch %1: %2").arg(type, result.error);
 					if (type == QStringLiteral("channel.chat.message")) {
+						status(id, message);
 						nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() + 60000;
 						delete twitch.take(id);
-					}
+					} else emit providerWarning(id, message);
 				}
 				else if (type == QStringLiteral("channel.chat.message")) {
 					status(id, QStringLiteral("Twitch: чат подключён · EventSub"));
@@ -500,6 +1106,27 @@ void ChatGateway::dispatch(ChatLine line)
 		if (line.type == QStringLiteral("chat")) overlay->publishChat(line.platform, line.name, line.text);
 		else overlay->publishAlert(line.type, line.platform, line.name, line.amount, line.text);
 	}
+	if (line.type != QStringLiteral("chat")) return;
+	const auto account = known.value(line.accountId);
+	if (line.name.compare(account.providerName, Qt::CaseInsensitive) == 0) return;
+	const auto settings = mainWindow->findChild<PresentationSettings *>(QStringLiteral("xinkxPresentationSettings"));
+	if (!settings) return;
+	const QString normalized = line.text.trimmed().toCaseFolded();
+	const qint64 now = QDateTime::currentMSecsSinceEpoch();
+	for (const auto &value : settings->snapshot().value(QStringLiteral("botCommands")).toArray()) {
+		const auto command = value.toObject();
+		if (!command.value(QStringLiteral("enabled")).toBool()) continue;
+		const auto trigger = command.value(QStringLiteral("trigger")).toString().toCaseFolded();
+		if (normalized != trigger && !normalized.startsWith(trigger + QLatin1Char(' '))) continue;
+		const QString key = line.accountId + trigger +
+			(command.value(QStringLiteral("perViewer")).toBool() ? line.name.toCaseFolded() : QString{});
+		const int wait = command.value(QStringLiteral("cooldownMs")).toInt();
+		if (wait > 0 && botCooldowns.contains(key) && now - botCooldowns.value(key) < wait) break;
+		botCooldowns[key] = now;
+		sendMessage(command.value(QStringLiteral("reply")).toString(), {line.accountId});
+		break;
+	}
+	if (botCooldowns.size() > 2048) botCooldowns.clear();
 }
 
 void ChatGateway::sendMessage(const QString &message, const QStringList &accountIds)

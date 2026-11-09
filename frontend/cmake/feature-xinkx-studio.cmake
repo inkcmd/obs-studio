@@ -21,6 +21,15 @@ target_sources(
     xinkx/ChatGateway.cpp
     xinkx/ChatGateway.hpp
     xinkx/ChatWorkspace.cpp
+	 xinkx/PresentationSettings.cpp
+	 xinkx/PresentationSettings.hpp
+	 xinkx/PresentationWorkspace.cpp
+	 xinkx/BroadcastWorkspace.cpp
+	 xinkx/GameProfilesWorkspace.cpp
+	 xinkx/SceneJsonWorkspace.cpp
+	 xinkx/DonationGateway.cpp
+	 xinkx/DonationGateway.hpp
+	 xinkx/DonationsWorkspace.cpp
     xinkx/NativeWebSocket.cpp
     xinkx/NativeWebSocket.hpp
     xinkx/assets/overlay.qrc

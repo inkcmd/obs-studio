@@ -51,6 +51,8 @@
   #timer.hidden { opacity:0; transform:translate(-50%,-30px); }
   #chat { position:absolute; bottom:5%; left:3%; display:flex; flex-direction:column; align-items:flex-start;
     gap:8px; width:min(660px,70vw); }
+  #viewers { position:absolute; top:3%; left:3%; font-size:19px; font-weight:650;
+    color:var(--cyan); text-shadow:0 2px 5px #000a; }
   .chat-line { max-width:100%; background:#08152bdc; border-left:4px solid var(--cyan);
     border-radius:6px 12px 12px 6px; padding:9px 14px; font-size:clamp(17px,1.5vw,29px);
     box-shadow:0 4px 28px #0008; overflow-wrap:anywhere; animation:chatIn .28s both; }
@@ -65,14 +67,18 @@
 <div id="surface"></div>
 <div id="timer" class="hidden" aria-label="Таймер">00:00</div>
 <div id="chat"></div>
+<div id="viewers"></div>
 <script>
 (() => {
   'use strict';
   const surface = document.getElementById('surface');
   const timer = document.getElementById('timer');
   const chat = document.getElementById('chat');
+  const viewers = document.getElementById('viewers');
   const queue = [], active = [];
   let paused = false, timerVisible = false, deadline = 0, remaining = 0;
+  let style = {chat:{maxMessages:8,showPlatform:true},effects:{position:'random',maxConcurrent:2,
+    durationMs:5000,particleMin:25,particleMax:65,scalePercent:100}};
   const palette = ['#66ebfd','#8175ff','#f4e96c','#ff7799','#76f5bb'];
   const durations = {gg:4700,boom:2700,'low-hp':4000,confetti:5500,follow:5200,sub:5200,donation:6000,raid:6000};
   const labels = {follow:'НОВЫЙ ФОЛЛОВЕР',sub:'НОВАЯ ПОДПИСКА',donation:'ДОНАТ',raid:'РЕЙД'};
@@ -83,7 +89,10 @@
   }
   function particles(gg) {
     const root = node('div','particles');
-    for (let i = 0; i < (gg ? 46 : 75); ++i) {
+    const config = style.effects;
+    const min=Math.max(0,Number(config.particleMin)||0),max=Math.max(min,Number(config.particleMax)||0);
+    const count=Math.min(200,Math.floor(min+Math.random()*(max-min+1)));
+    for (let i = 0; i < count; ++i) {
       const bit = node('span', 'particle'+(gg?' gg':''),gg?'GG':undefined);
       bit.style.left = (Math.random()*100)+'%';
       bit.style.setProperty('--fall', (2+Math.random()*3.5)+'s');
@@ -99,6 +108,12 @@
     const type = String(event.type || '');
     const card = node('div', 'effect' + (event.kind==='alert'?' alert':'') +
       (type==='low-hp'||type==='gg'||type==='confetti'?' full':''));
+    const where=String(style.effects.position||'random');
+    const coordinates={'top-left':[16,16],'top-right':[84,16],'center':[50,46],
+      'bottom-left':[16,78],'bottom-right':[84,78]};
+    const center=coordinates[where]||[15+Math.random()*70,15+Math.random()*70];
+    if (!card.classList.contains('full')) {card.style.left=center[0]+'%';card.style.top=center[1]+'%';}
+    card.style.zoom=(Math.max(30,Math.min(200,Number(style.effects.scalePercent)||100))/100);
     if (event.kind==='alert' && labels[type]) {
       const alert = node('div','alert-card');
       alert.append(node('div','kind',labels[type]));
@@ -114,14 +129,24 @@
     else return;
     surface.append(card);
     const task = {card,timeout:null}; active.push(task);
-    task.timeout = setTimeout(() => {
+    const finish=() => {
       card.classList.add('leave');
       setTimeout(() => {card.remove(); const i=active.indexOf(task);if(i>=0)active.splice(i,1);drain();},350);
-    }, Math.min(15000,Math.max(500,durations[type]||4500)));
+    };
+    const duration=event.durationMs===0?0:(Number.isFinite(Number(event.durationMs))?
+      Number(event.durationMs):Number(style.effects.durationMs));
+    if (duration>0) task.timeout=setTimeout(finish,Math.min(60000,Math.max(200,duration)));
   }
   function drain() {
-    if (paused) return;
-    while (queue.length && active.length<2) render(queue.shift());
+    if (paused || style.effects.enabled===false) return;
+    const limit=Number(style.effects.maxConcurrent)||2;
+    while (queue.length) {
+      if (active.length>=limit) {
+        if (active[0].timeout) break;
+        const old=active.shift();old.card.remove();
+      }
+      render(queue.shift());
+    }
   }
   function effect(event) {
     if (!event || paused || !durations[event.type]) return;
@@ -131,12 +156,42 @@
   function showChat(event) {
     if (!event || paused || !event.message) return;
     const line=node('div','chat-line');
-    line.append(node('span','badge',String(event.platform||'').toUpperCase()));
+    if (style.chat.showPlatform) line.append(node('span','badge',String(event.platform||'').toUpperCase()));
     line.append(node('span','who',event.name||'Зритель'));
+    if (style.chat.showTime) line.append(node('span','badge',new Date().toLocaleTimeString()));
     line.append(node('span','message',event.message));
+    updateLine(line);
     chat.append(line);
-    while (chat.children.length>4) chat.firstChild.remove();
-    setTimeout(() => {line.classList.add('leave');setTimeout(()=>line.remove(),400);},12000);
+    while (chat.children.length>(Number(style.chat.maxMessages)||8)) chat.firstChild.remove();
+    const timeout=Number(style.chat.messageDurationMs);
+    if (timeout>0) setTimeout(() => {line.classList.add('leave');setTimeout(()=>line.remove(),400);},timeout);
+  }
+  function applyAppearance(profile) {
+    if (!profile||typeof profile!=='object') return;
+    style=profile;
+    const c=profile.chat||{};
+    chat.style.fontFamily=JSON.stringify(String(c.font||'Segoe UI'))+',sans-serif';
+    chat.style.width=(Number(c.widthPercent)||60)+'%';
+    chat.style.gap=(Number(c.gap)||0)+'px';
+    chat.style.left=c.horizontal==='left'?'3%':c.horizontal==='right'?'auto':'50%';
+    chat.style.right=c.horizontal==='right'?'3%':'auto';
+    chat.style.top=c.vertical==='top'?'5%':c.vertical==='center'?'50%':'auto';
+    chat.style.bottom=c.vertical==='bottom'?'5%':'auto';
+    chat.style.transform=(c.horizontal==='center'?'translateX(-50%)':'')+
+      (c.vertical==='center'?' translateY(-50%)':'');
+    chat.style.alignItems=c.horizontal==='right'?'flex-end':c.horizontal==='center'?'center':'flex-start';
+    for (const line of chat.children) updateLine(line);
+  }
+  function updateLine(line) {
+    const c=style.chat||{};
+    line.style.background=String(c.backgroundColor||'#09152c')+
+      Math.round((Number(c.opacity)||88)*2.55).toString(16).padStart(2,'0');
+    line.style.color=String(c.textColor||'#f6faff');
+    line.style.padding=(Number(c.padding)||0)+'px';
+    line.style.borderRadius=(Number(c.radius)||0)+'px';
+    line.style.fontSize=(Number(c.fontSize)||26)+'px';
+    line.style.fontWeight=String(Number(c.fontWeight)||600);
+    const who=line.querySelector('.who');if(who)who.style.color=String(c.nameColor||'#8de9fb');
   }
   function clock() {
     const seconds=Math.max(0,Math.ceil((deadline>0 ? deadline-Date.now() : remaining*1000)/1000));
@@ -145,6 +200,9 @@
     timer.classList.toggle('hidden',!visible);
   }
   function state(value) {
+    if (value.presentation&&value.presentation.viewer) applyAppearance(value.presentation.viewer);
+    const counts=value.viewers||{};
+    viewers.textContent=style.chat.showViewers ? Object.entries(counts).map(([p,v])=>p+': '+v).join('   ') : '';
     paused=Boolean(value.paused);
     const where=String(value.position||'top-right');
     document.body.dataset.position=['top-right','top-left','center'].includes(where)?where:'top-right';
@@ -158,6 +216,8 @@
   source.addEventListener('state',e=>{try{state(JSON.parse(e.data));}catch{}});
   source.addEventListener('effect',e=>{try{effect(JSON.parse(e.data));}catch{}});
   source.addEventListener('chat',e=>{try{showChat(JSON.parse(e.data));}catch{}});
+  source.addEventListener('clear',()=>{queue.length=0;for(const task of active.splice(0)){
+    clearTimeout(task.timeout);task.card.remove();}});
   setInterval(clock,250);
 })();
 </script>

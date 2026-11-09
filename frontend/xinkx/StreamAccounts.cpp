@@ -67,6 +67,9 @@ QString unprotect(const QString &encrypted)
 
 } // namespace
 
+QString protectStudioSecret(const QString &clear) { return protect(clear); }
+QString unprotectStudioSecret(const QString &encrypted) { return unprotect(encrypted); }
+
 QString studioSettingsPath()
 {
 	char path[512]{};

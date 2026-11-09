@@ -14,11 +14,13 @@
 
 namespace xinkx {
 
-NativeWebSocket::NativeWebSocket(QObject *receiver, const QUrl &url, MessageHandler onMessage, CloseHandler onClose)
+NativeWebSocket::NativeWebSocket(QObject *receiver, const QUrl &url, MessageHandler onMessage, CloseHandler onClose,
+				 OpenHandler onOpen, const QByteArray &origin)
 	: state(std::make_shared<State>())
 {
 	const auto shared = state;
-	worker = QThread::create([receiver, url, onMessage = std::move(onMessage), onClose = std::move(onClose), shared] {
+	worker = QThread::create([receiver, url, onMessage = std::move(onMessage), onClose = std::move(onClose),
+				 onOpen = std::move(onOpen), origin, shared] {
 		QString result = QStringLiteral("Соединение завершено");
 #ifdef _WIN32
 		HINTERNET session = nullptr;
@@ -48,6 +50,14 @@ NativeWebSocket::NativeWebSocket(QObject *receiver, const QUrl &url, MessageHand
 			request = WinHttpOpenRequest(connection, L"GET", object.c_str(), nullptr,
 						 WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
 			if (!request) { failure(QStringLiteral("WinHttpOpenRequest")); break; }
+			if (!origin.isEmpty()) {
+				const std::wstring header = (QStringLiteral("Origin: ") + QString::fromLatin1(origin) +
+					QStringLiteral("\r\n")).toStdWString();
+				if (!WinHttpAddRequestHeaders(request, header.c_str(), static_cast<DWORD>(-1),
+							 WINHTTP_ADDREQ_FLAG_ADD)) {
+					failure(QStringLiteral("WebSocket Origin")); break;
+				}
+			}
 			if (!WinHttpSetOption(request, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0) ||
 			    !WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
 						  WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
@@ -64,6 +74,7 @@ NativeWebSocket::NativeWebSocket(QObject *receiver, const QUrl &url, MessageHand
 			shared->socket.store(websocket);
 			WinHttpCloseHandle(request);
 			request = nullptr;
+			if (onOpen) QMetaObject::invokeMethod(receiver, [onOpen] { onOpen(); }, Qt::QueuedConnection);
 			QByteArray message;
 			char buffer[8192];
 			while (!shared->stopping.load()) {
@@ -105,6 +116,21 @@ NativeWebSocket::NativeWebSocket(QObject *receiver, const QUrl &url, MessageHand
 		}
 	});
 	worker->start();
+}
+
+bool NativeWebSocket::send(const QByteArray &message)
+{
+#ifdef _WIN32
+	if (message.isEmpty() || message.size() > 8192 || state->stopping.load()) return false;
+	const auto handle = state->socket.load();
+	if (!handle) return false;
+	return WinHttpWebSocketSend(static_cast<HINTERNET>(handle),
+				    WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+				    const_cast<char *>(message.constData()), static_cast<DWORD>(message.size())) == NO_ERROR;
+#else
+	Q_UNUSED(message);
+	return false;
+#endif
 }
 
 NativeWebSocket::~NativeWebSocket()

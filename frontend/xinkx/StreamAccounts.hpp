@@ -45,6 +45,8 @@ struct StreamAccount {
 };
 
 QString studioSettingsPath();
+QString protectStudioSecret(const QString &clear);
+QString unprotectStudioSecret(const QString &encrypted);
 QVector<StreamAccount> loadStreamAccounts(bool withSecrets = true);
 bool saveStreamAccounts(const QVector<StreamAccount> &accounts);
 QString platformTitle(const QString &platform);

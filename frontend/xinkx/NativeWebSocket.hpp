@@ -18,8 +18,11 @@ class NativeWebSocket final {
 public:
 	using MessageHandler = std::function<void(const QByteArray &)>;
 	using CloseHandler = std::function<void(const QString &)>;
-	NativeWebSocket(QObject *receiver, const QUrl &url, MessageHandler onMessage, CloseHandler onClose);
+	using OpenHandler = std::function<void()>;
+	NativeWebSocket(QObject *receiver, const QUrl &url, MessageHandler onMessage, CloseHandler onClose,
+			OpenHandler onOpen = {}, const QByteArray &origin = {});
 	~NativeWebSocket();
+	bool send(const QByteArray &message);
 	NativeWebSocket(const NativeWebSocket &) = delete;
 	NativeWebSocket &operator=(const NativeWebSocket &) = delete;
 

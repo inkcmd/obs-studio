@@ -24,10 +24,13 @@ public:
 	QString error() const;
 	QString sourceUrl() const;
 	void reaction(const QString &type);
+	void clearEffects();
 	void testAlert(const QString &type);
 	void publishChat(const QString &platform, const QString &name, const QString &message);
 	void publishAlert(const QString &type, const QString &platform, const QString &name,
 			  const QString &amount, const QString &message);
+	void setPresentation(const QJsonObject &value);
+	void publishViewers(const QString &platform, int count);
 	void startTimer(int seconds);
 	void pauseTimer();
 	void resetTimer();
@@ -37,6 +40,8 @@ public:
 
 signals:
 	void eventDispatched(const QString &label);
+	void effectGenerated(const QJsonObject &event);
+	void effectsCleared();
 	void timerChanged(int seconds, bool running);
 
 private:
@@ -44,6 +49,8 @@ private:
 	QSet<QTcpSocket *> clients;
 	QTimer tick;
 	QHash<QString, qint64> cooldowns;
+	QJsonObject presentation;
+	QHash<QString, int> viewers;
 	qint64 lastReactionAt = 0;
 	qint64 deadlineMs = 0;
 	int remaining = 0;

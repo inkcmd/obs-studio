@@ -1,4 +1,5 @@
 #include "OverlayRuntime.hpp"
+#include "PresentationSettings.hpp"
 
 #include <OBSApp.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -60,6 +61,7 @@ QString shortText(const QString &text, int maximum = 240)
 OverlayRuntime::OverlayRuntime(QObject *parent) : QObject(parent)
 {
 	connect(&listener, &QTcpServer::newConnection, this, &OverlayRuntime::acceptConnections);
+	presentation = PresentationSettings::defaults();
 	listener.listen(QHostAddress::LocalHost, kPort);
 	tick.setInterval(250);
 	connect(&tick, &QTimer::timeout, this, [this] {
@@ -150,12 +152,16 @@ void OverlayRuntime::handleRequest(QTcpSocket *socket, const QByteArray &header)
 			      "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
 			      "Transfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n");
 		clients.insert(socket);
+		QJsonObject currentViewers;
+		for (auto it = viewers.cbegin(); it != viewers.cend(); ++it) currentViewers.insert(it.key(), it.value());
 		sendEvent(socket, "state", {{QStringLiteral("position"), position},
 						    {QStringLiteral("paused"), effectsPaused},
 						    {QStringLiteral("visible"), timerVisible},
 						    {QStringLiteral("running"), deadlineMs > 0},
 						    {QStringLiteral("remaining"), secondsRemaining()},
-						    {QStringLiteral("deadline"), deadlineMs}});
+						    {QStringLiteral("deadline"), deadlineMs},
+						    {QStringLiteral("presentation"), presentation},
+						    {QStringLiteral("viewers"), currentViewers}});
 		return;
 	}
 	if (requestLine == "GET /overlay HTTP/1.1") {
@@ -203,12 +209,32 @@ int OverlayRuntime::secondsRemaining() const
 
 void OverlayRuntime::stateChanged()
 {
+	QJsonObject currentViewers;
+	for (auto it = viewers.cbegin(); it != viewers.cend(); ++it) currentViewers.insert(it.key(), it.value());
 	broadcast("state", {{QStringLiteral("position"), position},
 			    {QStringLiteral("paused"), effectsPaused},
 			    {QStringLiteral("visible"), timerVisible},
 			    {QStringLiteral("running"), deadlineMs > 0},
 			    {QStringLiteral("remaining"), secondsRemaining()},
-			    {QStringLiteral("deadline"), deadlineMs}});
+			    {QStringLiteral("deadline"), deadlineMs},
+			    {QStringLiteral("presentation"), presentation},
+			    {QStringLiteral("viewers"), currentViewers}});
+}
+
+void OverlayRuntime::setPresentation(const QJsonObject &value)
+{
+	if (!PresentationSettings::validate(value)) return;
+	presentation = value;
+	cooldowns.clear();
+	lastReactionAt = 0;
+	stateChanged();
+}
+
+void OverlayRuntime::publishViewers(const QString &platform, int count)
+{
+	if (count < 0) viewers.remove(platform);
+	else viewers.insert(platform.left(24), count);
+	stateChanged();
 }
 
 void OverlayRuntime::dispatch(QJsonObject event)
@@ -218,6 +244,7 @@ void OverlayRuntime::dispatch(QJsonObject event)
 	}
 	event.insert(QStringLiteral("at"), QDateTime::currentMSecsSinceEpoch());
 	broadcast("effect", event);
+	emit effectGenerated(event);
 	emit eventDispatched(QStringLiteral("%1 · %2")
 				     .arg(event.value(QStringLiteral("kind")).toString(),
 					  event.value(QStringLiteral("type")).toString()));
@@ -230,6 +257,12 @@ void OverlayRuntime::reaction(const QString &type)
 		return;
 	}
 	dispatch({{QStringLiteral("kind"), QStringLiteral("reaction")}, {QStringLiteral("type"), type}});
+}
+
+void OverlayRuntime::clearEffects()
+{
+	broadcast("clear", {});
+	emit effectsCleared();
 }
 
 void OverlayRuntime::testAlert(const QString &type)
@@ -261,35 +294,34 @@ void OverlayRuntime::publishChat(const QString &platform, const QString &name, c
 			    {QStringLiteral("message"), text}});
 	emit eventDispatched(QStringLiteral("chat · %1").arg(shortText(platform, 24)));
 	const QString normalized = text.toCaseFolded().trimmed();
-	QString reactionType;
-	int cooldownMs = 0;
-	if (normalized == QStringLiteral("!boom")) {
-		reactionType = QStringLiteral("boom");
-		cooldownMs = 12000;
-	} else if (normalized.contains(QStringLiteral("low hp"))) {
-		reactionType = QStringLiteral("low-hp");
-		cooldownMs = 30000;
-	} else if (normalized == QStringLiteral("!hype")) {
-		reactionType = QStringLiteral("confetti");
-		cooldownMs = 30000;
-	} else {
-		const QStringList words = normalized.split(QRegularExpression(QStringLiteral("[^\\p{L}\\p{N}_]+")),
-								       Qt::SkipEmptyParts);
-		if (words.contains(QStringLiteral("gg"))) {
-			reactionType = QStringLiteral("gg");
-			cooldownMs = 20000;
-		}
-	}
-	if (reactionType.isEmpty()) {
-		return;
-	}
+	const auto words = normalized.split(QRegularExpression(QStringLiteral("[^\\p{L}\\p{N}_]+")),
+						 Qt::SkipEmptyParts);
 	const qint64 now = QDateTime::currentMSecsSinceEpoch();
-	if (now - cooldowns.value(reactionType) < cooldownMs || now - lastReactionAt < 500) {
-		return;
+	for (const auto &entry : presentation.value(QStringLiteral("reactions")).toArray()) {
+		const auto item = entry.toObject();
+		if (!item.value(QStringLiteral("enabled")).toBool()) continue;
+		const auto phrase = item.value(QStringLiteral("phrase")).toString().toCaseFolded().trimmed();
+		const auto mode = item.value(QStringLiteral("match")).toString();
+		const bool match = mode == QStringLiteral("exact") ? normalized == phrase
+			: mode == QStringLiteral("contains") ? normalized.contains(phrase) : words.contains(phrase);
+		if (!match) continue;
+		const auto key = item.value(QStringLiteral("id")).toString() +
+			(item.value(QStringLiteral("perViewer")).toBool() ? QStringLiteral("/") +
+			 platform.toCaseFolded() + QStringLiteral("/") + name.toCaseFolded() : QString{});
+		const int cooldown = item.value(QStringLiteral("cooldownMs")).toInt();
+		const int globalCooldown = presentation.value(QStringLiteral("globalCooldownMs")).toInt();
+		if ((cooldown > 0 && cooldowns.contains(key) && now - cooldowns.value(key) < cooldown) ||
+		    (globalCooldown > 0 && lastReactionAt > 0 && now - lastReactionAt < globalCooldown)) break;
+		cooldowns[key] = now;
+		lastReactionAt = now;
+		dispatch({{QStringLiteral("kind"), QStringLiteral("reaction")},
+			{QStringLiteral("type"), item.value(QStringLiteral("effect")).toString()},
+			{QStringLiteral("durationMs"), item.value(QStringLiteral("durationMs")).toInt()},
+			{QStringLiteral("viewer"), shortText(name, 80)},
+			{QStringLiteral("platform"), shortText(platform, 24)}});
+		break;
 	}
-	cooldowns[reactionType] = now;
-	lastReactionAt = now;
-	reaction(reactionType);
+	if (cooldowns.size() > 2048) cooldowns.clear();
 }
 
 void OverlayRuntime::startTimer(int seconds)
@@ -433,6 +465,9 @@ void installOverlayWorkspace(OBSBasic *mainWindow, QDockWidget *sourceInspector)
 		});
 	}
 	layout->addLayout(effects);
+	auto *clear = new QPushButton(QStringLiteral("Очистить все эффекты"), content);
+	layout->addWidget(clear);
+	QObject::connect(clear, &QPushButton::clicked, dock, [runtime] { runtime->clearEffects(); });
 	auto *alerts = new QGridLayout();
 	int alertIndex = 0;
 	for (const auto &entry : {QStringLiteral("Фолловер"), QStringLiteral("Подписка"),

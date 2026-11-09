@@ -7,6 +7,7 @@
 #include <QCheckBox>
 #include <QClipboard>
 #include <QColor>
+#include <QComboBox>
 #include <QDateTime>
 #include <QDockWidget>
 #include <QHBoxLayout>
@@ -29,6 +30,7 @@ public:
 	explicit ChatViewState(QObject *parent) : QObject(parent) {}
 	QHash<QString, QCheckBox *> targets;
 	QHash<QString, QLabel *> statuses;
+	QHash<QString, QLabel *> viewers;
 	QHash<QString, QString> statusCache;
 };
 
@@ -69,6 +71,7 @@ void installChatWorkspace(OBSBasic *mainWindow)
 		}
 		view->targets.clear();
 		view->statuses.clear();
+		view->viewers.clear();
 		const auto accounts = gateway->accounts();
 		for (const auto &account : accounts) {
 			auto *column = new QWidget(selector);
@@ -84,9 +87,13 @@ void installChatWorkspace(OBSBasic *mainWindow)
 			status->setWordWrap(true);
 			status->setStyleSheet(QStringLiteral("color:#a1b5c9; font-size: 11px"));
 			stack->addWidget(status);
+			auto *viewer = new QLabel(QStringLiteral("Зрители: —"), column);
+			viewer->setStyleSheet(QStringLiteral("font-size:11px;color:#82d8d3"));
+			stack->addWidget(viewer);
 			accountRow->addWidget(column, 1);
 			view->targets.insert(account.id, box);
 			view->statuses.insert(account.id, status);
+			view->viewers.insert(account.id, viewer);
 		}
 		if (accounts.isEmpty()) {
 			auto *hint = new QLabel(QStringLiteral("Подключи аккаунты в Настройки → Трансляция"), selector);
@@ -99,6 +106,37 @@ void installChatWorkspace(OBSBasic *mainWindow)
 		gateway->reloadAccounts();
 		rebuild();
 	});
+	auto *kickRoomRow = new QHBoxLayout();
+	auto *kickSelect = new QComboBox(panel);
+	auto *kickRoom = new QLineEdit(panel);
+	kickRoom->setPlaceholderText(QStringLiteral("Kick chatroom ID (пусто = автоматически)"));
+	kickRoom->setMaxLength(15);
+	auto *kickSave = new QPushButton(QStringLiteral("Комната Kick"), panel);
+	kickRoomRow->addWidget(kickSelect);
+	kickRoomRow->addWidget(kickRoom, 1);
+	kickRoomRow->addWidget(kickSave);
+	root->addLayout(kickRoomRow);
+	auto rebuildKick = [=] {
+		const auto selected = kickSelect->currentData().toString();
+		kickSelect->clear();
+		for (const auto &account : gateway->accounts()) {
+			if (account.platform == QStringLiteral("kick")) kickSelect->addItem(account.displayName(), account.id);
+		}
+		const int index = kickSelect->findData(selected);
+		if (index >= 0) kickSelect->setCurrentIndex(index);
+		kickRoom->setVisible(kickSelect->count() > 0);
+		kickSelect->setVisible(kickSelect->count() > 0);
+		kickSave->setVisible(kickSelect->count() > 0);
+		kickRoom->setText(gateway->kickRoomId(kickSelect->currentData().toString()));
+	};
+	QObject::connect(kickSelect, &QComboBox::currentIndexChanged, dock, [=] {
+		kickRoom->setText(gateway->kickRoomId(kickSelect->currentData().toString()));
+	});
+	QObject::connect(kickSave, &QPushButton::clicked, dock, [=] {
+		gateway->setKickRoomId(kickSelect->currentData().toString(), kickRoom->text());
+	});
+	QObject::connect(refresh, &QPushButton::clicked, dock, rebuildKick);
+	rebuildKick();
 	auto *feed = new QListWidget(panel);
 	feed->setWordWrap(true);
 	feed->setAlternatingRowColors(true);
@@ -139,6 +177,17 @@ void installChatWorkspace(OBSBasic *mainWindow)
 			view->statusCache[id] = message;
 			if (view->statuses.contains(id)) view->statuses.value(id)->setText(message);
 		});
+	QObject::connect(gateway, &ChatGateway::providerWarning, dock,
+		[=](const QString &id, const QString &message) {
+			Q_UNUSED(id);
+			auto *item = new QListWidgetItem(QStringLiteral("⚠ ") + message, feed);
+			item->setForeground(QColor(QStringLiteral("#d8ac65")));
+			while (feed->count() > 300) delete feed->takeItem(0);
+		});
+	QObject::connect(gateway, &ChatGateway::viewersReceived, dock, [view](const QString &id, int count) {
+		if (auto *label = view->viewers.value(id)) label->setText(count < 0
+			? QStringLiteral("Зрители: —") : QStringLiteral("Зрители: %1").arg(count));
+	});
 	QObject::connect(gateway, &ChatGateway::incoming, dock, [=](const ChatLine &message) {
 		const auto timestamp = QDateTime::fromMSecsSinceEpoch(message.receivedAt).toString(QStringLiteral("HH:mm:ss"));
 		QString formatted = QStringLiteral("%1  [%2] %3").arg(timestamp,
