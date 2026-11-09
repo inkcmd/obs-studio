@@ -22,7 +22,7 @@ public:
 	explicit OverlayRuntime(QObject *parent = nullptr);
 	bool available() const { return listener.isListening(); }
 	QString error() const;
-	QString sourceUrl() const;
+	QString sourceUrl(const QString &layer = QStringLiteral("all")) const;
 	void reaction(const QString &type);
 	void clearEffects();
 	void testAlert(const QString &type);
@@ -36,7 +36,7 @@ public:
 	void resetTimer();
 	void setPosition(const QString &position);
 	void setPaused(bool paused);
-	bool addToScene(OBSBasic *mainWindow, QString *message);
+	bool addToScene(OBSBasic *mainWindow, QString *message, const QString &layer = QStringLiteral("all"));
 
 signals:
 	void eventDispatched(const QString &label);

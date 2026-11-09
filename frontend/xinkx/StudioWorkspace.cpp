@@ -6,6 +6,7 @@
 #include "ChatGateway.hpp"
 #include "PresentationSettings.hpp"
 #include "DonationGateway.hpp"
+#include "StudioAutomation.hpp"
 
 #include <OBSApp.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -16,6 +17,7 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QDockWidget>
+#include <QDialog>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QFrame>
@@ -23,8 +25,10 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QJsonDocument>
+#include <QJsonParseError>
 #include <QJsonObject>
 #include <QLabel>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSettings>
@@ -449,14 +453,14 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 
 	// XINKX-only settings are kept separately from OBS profile/scene data.
 	char configPath[512];
-	bool inspectorVisible = true;
+	bool inspectorVisible = false;
 	QSettings *settings = nullptr;
 	const int configLength = GetAppConfigPath(configPath, sizeof(configPath), "xinkx-studio/studio.ini");
 	if (configLength > 0 && static_cast<size_t>(configLength) < sizeof(configPath)) {
 		const QString path = QString::fromUtf8(configPath);
 		QDir().mkpath(QFileInfo(path).absolutePath());
 		settings = new QSettings(path, QSettings::IniFormat, mainWindow);
-		inspectorVisible = settings->value(QStringLiteral("workspace/inspectorVisible"), true).toBool();
+		inspectorVisible = settings->value(QStringLiteral("workspace/inspectorVisible"), false).toBool();
 		QObject::connect(inspector, &QDockWidget::visibilityChanged, mainWindow, [settings](bool visible) {
 			settings->setValue(QStringLiteral("workspace/inspectorVisible"), visible);
 		});
@@ -478,6 +482,43 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	studioPages->setDocumentMode(true);
 	studio->setWidget(studioPages);
 	mainWindow->AddDockWidget(studio, Qt::RightDockWidgetArea);
+	auto *automation = new StudioAutomation(mainWindow);
+	// A local model's future tool bridge will dispatch these same allowlisted
+	// commands. Nothing is exposed on a listening socket by this editor.
+	auto *commandDialog = new QDialog(mainWindow);
+	commandDialog->setObjectName(QStringLiteral("xinkxAutomationSettingsDialog"));
+	commandDialog->setWindowTitle(QStringLiteral("XINKX · Локальные команды и LLM"));
+	commandDialog->resize(680, 440);
+	auto *commandLayout = new QVBoxLayout(commandDialog);
+	auto *commandHelp = new QLabel(QStringLiteral("Локальные нативные команды OBS. Для LLM предусмотрен безопасный список действий. Подключение модели и сетевой доступ пока не включены."), commandDialog);
+	commandHelp->setWordWrap(true);
+	commandLayout->addWidget(commandHelp);
+	auto *commandEdit = new QPlainTextEdit(commandDialog);
+	commandEdit->setPlainText(QStringLiteral("{\"command\":\"overlay.add\",\"layer\":\"chat\"}"));
+	commandLayout->addWidget(commandEdit, 1);
+	auto *commandButtons = new QHBoxLayout();
+	auto *commandList = new QPushButton(QStringLiteral("Команды и сцены"), commandDialog);
+	auto *commandRun = new QPushButton(QStringLiteral("Проверить команду"), commandDialog);
+	commandButtons->addWidget(commandList);
+	commandButtons->addWidget(commandRun);
+	commandLayout->addLayout(commandButtons);
+	auto *commandStatus = new QLabel(commandDialog);
+	commandStatus->setWordWrap(true);
+	commandLayout->addWidget(commandStatus);
+	QObject::connect(commandList, &QPushButton::clicked, commandDialog, [=] {
+		commandStatus->setText(QString::fromUtf8(QJsonDocument(automation->describe()).toJson(QJsonDocument::Indented)));
+	});
+	QObject::connect(commandRun, &QPushButton::clicked, commandDialog, [=] {
+		if (commandEdit->toPlainText().size() > 8192) {
+			commandStatus->setText(QStringLiteral("Команда слишком длинная"));
+			return;
+		}
+		QJsonParseError error;
+		const auto json = QJsonDocument::fromJson(commandEdit->toPlainText().toUtf8(), &error);
+		const auto response = json.isObject() ? automation->execute(json.object()) :
+			QJsonObject{{QStringLiteral("ok"), false}, {QStringLiteral("message"), error.errorString()}};
+		commandStatus->setText(QString::fromUtf8(QJsonDocument(response).toJson(QJsonDocument::Compact)));
+	});
 	installOverlayWorkspace(mainWindow, inspector);
 	installChatWorkspace(mainWindow);
 	installPresentationWorkspace(mainWindow);

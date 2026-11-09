@@ -1,4 +1,21 @@
-# XINKX Studio — Stage 12 (0.15-dev)
+# XINKX Studio — Stage 14 (0.15-dev)
+
+## Stage 14 changes — native editor (Windows build/runtime verification pending)
+
+- **Studio → Эффекты** now adds individual OBS browser sources for chat, reactions, alerts/donations, timer, viewer counter and a camera frame. The existing combined `XINKX · Эффекты и события` source remains compatible. Each layer has an independent OBS transform and ordering; it receives the same event-stream from the localhost-only 8766 runtime. These are separate OBS *browser sources*, not yet registered `xinkx_*` source plugins or a timeline designer. The scene editor can also create real OBS scenes and GDI+ text sources.
+- **Настройки → Трансляция** contains the launchers for DonationAlerts OAuth/custom test donation templates, shared chat/reaction appearance (including click-through streamer window), and local automation commands. The separate studio tabs for donations/appearance are removed. Double-click on a configured stream account or custom donation template opens its editor.
+- **Эфир** and **Профили игр и сцен** use one game search field to query connected platform catalogs, with an explicit per-platform match selection; a category ID is never copied between services. The shared broadcast form applies titles and selected categories to all platforms when enabled. YouTube's game configuration still opens in YouTube Studio.
+- **Twitch** now requests `user:edit` in addition to existing chat/channel scopes, uses `/helix/users` to read the channel bio and `PUT /helix/users?description=...` to write it (max 300 characters). After successful OAuth persistence, the chat gateway immediately reloads new grants and discards stale retry delays. Users who previously connected Twitch need another consent flow to grant `user:edit`. Twitch OAuth scope verification still reports genuine insufficient grants; consent-screen screenshots alone do not prove token issuance.
+- **Kick** supports title and category updates using its public channels endpoint. Reading the channel description where returned is supported, but the documented public update endpoint does **not** expose a writable channel bio; the UI does not silently fabricate an update.
+- **Local LLM groundwork:** `StudioAutomation::execute()` is an allowlisted, GUI-thread native OBS command API. Supported commands: `scene.create`, `scene.activate`, `source.text.add`, `source.visible`, `overlay.add`, `effect.trigger`, `timer.start`, `timer.pause`, `timer.hide`. Test JSON in Settings → Stream → Automation. It does **not** start a socket, execute Python, run shell commands or connect a model automatically. A future authenticated local model bridge can dispatch through the same API.
+
+Sample command:
+
+```json
+{"command":"overlay.add","layer":"alerts"}
+```
+
+All new feature descriptions below Stage 12/13 sections refer to their historical state and may be superseded by the Stage 14 list above. Build and provider integration must be checked on the Windows OBS host.
 
 The Qt frontend uses the OBS scene graph, video pipeline and output handlers. The source inspector edits OBS scene items and uses the native undo/redo stack.
 

@@ -1,0 +1,23 @@
+{
+  "protocol": "xinkx.native.v1",
+  "transport": "in-process QObject; no network listener",
+  "command_field": "command",
+  "commands": [
+    {"command": "scene.create", "arguments": {"name": "string, 1–100 characters"}, "changes_obs": true},
+    {"command": "scene.activate", "arguments": {"name": "existing scene name"}, "changes_obs": true},
+    {"command": "source.text.add", "arguments": {"name": "unique name", "text": "string, 1–4096 characters"}, "changes_obs": true},
+    {"command": "source.visible", "arguments": {"name": "source in current scene", "visible": "boolean"}, "changes_obs": true},
+    {"command": "overlay.add", "arguments": {"layer": "chat|effects|alerts|timer|viewers|frame|all"}, "changes_obs": true},
+    {"command": "effect.trigger", "arguments": {"effect": "gg|boom|low-hp|confetti"}, "changes_obs": false},
+    {"command": "timer.start", "arguments": {"seconds": "integer, 1–3600"}, "changes_obs": false},
+    {"command": "timer.pause", "arguments": {}, "changes_obs": false},
+    {"command": "timer.hide", "arguments": {}, "changes_obs": false}
+  ],
+  "safety": {
+    "arbitrary_code": false,
+    "shell": false,
+    "start_or_stop_broadcast": false,
+    "external_access": false,
+    "future_bridge": "authenticated loopback or obs-websocket vendor request with explicit tool permissions"
+  }
+}

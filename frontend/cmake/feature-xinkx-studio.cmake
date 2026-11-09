@@ -6,6 +6,8 @@ target_sources(
     xinkx/StudioController.hpp
     xinkx/StudioWorkspace.cpp
     xinkx/StudioWorkspace.hpp
+    xinkx/StudioAutomation.cpp
+    xinkx/StudioAutomation.hpp
     xinkx/MultiStreamManager.cpp
     xinkx/MultiStreamManager.hpp
     xinkx/MultiStreamWorkspace.cpp

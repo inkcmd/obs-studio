@@ -98,11 +98,20 @@ void ChatGateway::reloadAccounts()
 			updated.insert(account.id, account);
 		}
 	}
+	QSet<QString> newlyAuthorized;
+	for (const auto &account : updated) {
+		if (account.platform == QStringLiteral("twitch") &&
+		    (account.oauth.accessToken != known.value(account.id).oauth.accessToken ||
+		     account.oauth.clientId != known.value(account.id).oauth.clientId ||
+		     account.providerId != known.value(account.id).providerId))
+			newlyAuthorized.insert(account.id);
+	}
 	for (auto it = twitchScopes.begin(); it != twitchScopes.end();) {
 		const auto old = known.value(it.key());
 		const auto next = updated.value(it.key());
 		if (next.id.isEmpty() || next.oauth.accessToken != old.oauth.accessToken ||
 		    next.providerId != old.providerId || next.oauth.clientId != old.oauth.clientId) {
+			nextTwitchAt[it.key()] = 0; // A successful OAuth login must retry immediately.
 			twitchPermissionChecks.remove(it.key());
 			for (auto warning = twitchOptionalWarnings.begin(); warning != twitchOptionalWarnings.end();) {
 				if (warning->startsWith(it.key())) warning = twitchOptionalWarnings.erase(warning);
@@ -139,6 +148,7 @@ void ChatGateway::reloadAccounts()
 	}
 	known = updated;
 	for (const auto &account : updated) {
+		if (newlyAuthorized.contains(account.id)) nextTwitchAt[account.id] = 0;
 		if (account.platform == QStringLiteral("youtube") && !youtube.contains(account.id)) {
 			youtube.insert(account.id, {});
 		}
@@ -411,15 +421,24 @@ void ChatGateway::inspectBroadcast(const QString &id, const QString &youtubeBroa
 		if (account.providerId.isEmpty()) { emit broadcastResult(id, QStringLiteral("Нет Twitch ID"), false); return; }
 		const auto url = apiUrl(QStringLiteral("https://api.twitch.tv/helix/channels"),
 			{{QStringLiteral("broadcaster_id"), account.providerId}});
-		authorized(id, url, {}, [this, id](const HttpResult &result) {
+		authorized(id, url, {}, [this, id, account](const HttpResult &result) {
 			if (!result.ok) { emit broadcastResult(id, result.error, false); return; }
 			const auto data = result.json.value(QStringLiteral("data")).toArray();
 			if (data.isEmpty()) { emit broadcastResult(id, QStringLiteral("Канал не найден"), false); return; }
 			const auto item = data.first().toObject();
-			emit broadcastInfo(id, {{QStringLiteral("platform"), QStringLiteral("twitch")},
+			QJsonObject output{{QStringLiteral("platform"), QStringLiteral("twitch")},
 				{QStringLiteral("title"), item.value(QStringLiteral("title"))},
 				{QStringLiteral("categoryId"), item.value(QStringLiteral("game_id"))},
-				{QStringLiteral("categoryName"), item.value(QStringLiteral("game_name"))}});
+				{QStringLiteral("categoryName"), item.value(QStringLiteral("game_name"))}};
+			// Twitch's channel bio is a user property, not part of /helix/channels.
+			authorized(id, apiUrl(QStringLiteral("https://api.twitch.tv/helix/users"),
+				{{QStringLiteral("id"), account.providerId}}), {},
+				[this, id, output](const HttpResult &profile) mutable {
+					if (profile.ok && !profile.json.value(QStringLiteral("data")).toArray().isEmpty())
+						output.insert(QStringLiteral("description"), profile.json.value(QStringLiteral("data"))
+							.toArray().first().toObject().value(QStringLiteral("description")));
+					emit broadcastInfo(id, output);
+				});
 		});
 	} else if (account.platform == QStringLiteral("kick")) {
 		authorized(id, QStringLiteral("https://api.kick.com/public/v1/channels"), {},
@@ -430,6 +449,7 @@ void ChatGateway::inspectBroadcast(const QString &id, const QString &youtubeBroa
 				const auto item = data.first().toObject();
 				emit broadcastInfo(id, {{QStringLiteral("platform"), QStringLiteral("kick")},
 					{QStringLiteral("title"), item.value(QStringLiteral("stream_title"))},
+					{QStringLiteral("description"), item.value(QStringLiteral("description"))},
 					{QStringLiteral("categoryId"), item.value(QStringLiteral("category")).toObject().value(QStringLiteral("id"))},
 					{QStringLiteral("categoryName"), item.value(QStringLiteral("category")).toObject().value(QStringLiteral("name"))}});
 			});
@@ -530,6 +550,24 @@ void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
 			{{QStringLiteral("broadcaster_id"), account.providerId}});
 		if (!heading.isEmpty()) body.insert(QStringLiteral("title"), heading);
 		if (!category.isEmpty()) body.insert(QStringLiteral("game_id"), category);
+		const auto finish = [this, id, description](bool changed, const QString &error) {
+			if (!changed || description.isEmpty()) {
+				emit broadcastResult(id, changed ? QStringLiteral("Twitch: данные сохранены") : error, changed);
+				return;
+			}
+			const auto userUrl = apiUrl(QStringLiteral("https://api.twitch.tv/helix/users"),
+				{{QStringLiteral("description"), description.left(300)}});
+			jsonApi(id, userUrl, QByteArray("PUT"), {}, [this, id](const HttpResult &reply) {
+				emit broadcastResult(id, reply.ok ? QStringLiteral("Twitch: эфир и описание канала сохранены")
+					: QStringLiteral("Twitch: описание не сохранено (нужно user:edit): ") + reply.error, reply.ok);
+			});
+		};
+		if (body.isEmpty()) {
+			finish(!description.isEmpty(), QStringLiteral("Twitch: укажи название, категорию или описание"));
+			return;
+		}
+		jsonApi(id, url, method, body, [finish](const HttpResult &result) { finish(result.ok, result.error); });
+		return;
 	} else if (account.platform == QStringLiteral("kick")) {
 		url = QStringLiteral("https://api.kick.com/public/v1/channels");
 		if (!heading.isEmpty()) body.insert(QStringLiteral("stream_title"), heading);
@@ -790,8 +828,13 @@ void ChatGateway::startTwitch(const QString &id)
 	tokenFor(id, [this, id](const QString &token) {
 		if (token.isEmpty()) { twitchPermissionChecks.remove(id); return; }
 		request(id, QStringLiteral("https://id.twitch.tv/oauth2/validate"), {}, {},
-			[this, id](const HttpResult &result) {
+			[this, id, token](const HttpResult &result) {
 				twitchPermissionChecks.remove(id);
+				// A new login can complete while the previous token is being validated.
+				if (known.value(id).oauth.accessToken != token) {
+					nextTwitchAt[id] = 0;
+					return;
+				}
 				if (!result.ok) {
 					status(id, QStringLiteral("Twitch: OAuth не прошёл проверку (%1). Переподключи аккаунт").arg(result.error));
 					nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() + 300000;
@@ -810,7 +853,8 @@ void ChatGateway::startTwitch(const QString &id)
 					return;
 				}
 				if (!scopes.contains(QStringLiteral("user:read:chat"))) {
-					status(id, QStringLiteral("Twitch: нет права user:read:chat. Отключи и заново подключи OAuth в Настройки → Трансляция"));
+					status(id, QStringLiteral("Twitch: токен не содержит user:read:chat (в нём %1 прав). Проверь итог OAuth в настройках трансляции")
+						.arg(scopes.size()));
 					nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() + 300000;
 					return;
 				}

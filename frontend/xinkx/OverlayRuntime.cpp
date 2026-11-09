@@ -1,6 +1,7 @@
 #include "OverlayRuntime.hpp"
 #include "PresentationSettings.hpp"
 #include "StudioWorkspace.hpp"
+#include "StudioAutomation.hpp"
 
 #include <OBSApp.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -16,8 +17,10 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QGroupBox>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLabel>
@@ -34,13 +37,31 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 namespace xinkx {
 
 namespace {
 
 constexpr quint16 kPort = 8766;
-const QByteArray kSourceName = QStringLiteral("XINKX · Эффекты и события").toUtf8();
+QString layerName(const QString &layer)
+{
+	if (layer == QStringLiteral("chat")) return QStringLiteral("XINKX · Чат");
+	if (layer == QStringLiteral("effects")) return QStringLiteral("XINKX · Реакции");
+	if (layer == QStringLiteral("alerts")) return QStringLiteral("XINKX · Донаты и события");
+	if (layer == QStringLiteral("timer")) return QStringLiteral("XINKX · Таймер");
+	if (layer == QStringLiteral("viewers")) return QStringLiteral("XINKX · Зрители");
+	if (layer == QStringLiteral("frame")) return QStringLiteral("XINKX · Рамка камеры");
+	return QStringLiteral("XINKX · Эффекты и события");
+}
+
+bool validLayer(const QString &layer)
+{
+	return layer == QStringLiteral("all") || layer == QStringLiteral("chat") ||
+	       layer == QStringLiteral("effects") || layer == QStringLiteral("alerts") ||
+	       layer == QStringLiteral("timer") || layer == QStringLiteral("viewers") ||
+	       layer == QStringLiteral("frame");
+}
 
 QByteArray frame(const QByteArray &name, const QJsonObject &payload)
 {
@@ -102,9 +123,9 @@ QString OverlayRuntime::error() const
 	return available() ? QString{} : QStringLiteral("Порт 8766 занят: ") + listener.errorString();
 }
 
-QString OverlayRuntime::sourceUrl() const
+QString OverlayRuntime::sourceUrl(const QString &layer) const
 {
-	return QStringLiteral("http://127.0.0.1:8766/overlay");
+	return QStringLiteral("http://127.0.0.1:8766/overlay?layer=%1").arg(validLayer(layer) ? layer : QStringLiteral("all"));
 }
 
 void OverlayRuntime::acceptConnections()
@@ -167,7 +188,9 @@ void OverlayRuntime::handleRequest(QTcpSocket *socket, const QByteArray &header)
 						    {QStringLiteral("viewers"), currentViewers}});
 		return;
 	}
-	if (requestLine == "GET /overlay HTTP/1.1") {
+	if (requestLine == "GET /overlay HTTP/1.1" ||
+	    (requestLine.startsWith("GET /overlay?layer=") && requestLine.endsWith(" HTTP/1.1") &&
+	     validLayer(QString::fromLatin1(requestLine.mid(19, requestLine.size() - 28))))) {
 		QFile html(QStringLiteral(":/xinkx/overlay.html"));
 		if (html.open(QIODevice::ReadOnly)) {
 			const auto bytes = html.readAll();
@@ -368,8 +391,12 @@ void OverlayRuntime::setPaused(bool paused)
 	stateChanged();
 }
 
-bool OverlayRuntime::addToScene(OBSBasic *mainWindow, QString *message)
+bool OverlayRuntime::addToScene(OBSBasic *mainWindow, QString *message, const QString &layer)
 {
+	if (!validLayer(layer)) {
+		*message = QStringLiteral("Неизвестный тип элемента XINKX");
+		return false;
+	}
 	if (!available()) {
 		*message = error();
 		return false;
@@ -379,12 +406,13 @@ bool OverlayRuntime::addToScene(OBSBasic *mainWindow, QString *message)
 		*message = QStringLiteral("Выбери сцену OBS");
 		return false;
 	}
-	if (auto *existing = obs_scene_find_source(scene, kSourceName.constData())) {
+	const QByteArray sourceName = layerName(layer).toUtf8();
+	if (auto *existing = obs_scene_find_source(scene, sourceName.constData())) {
 		obs_sceneitem_select(existing, true);
 		*message = QStringLiteral("Слой XINKX выделен в предпросмотре OBS. Перемещай и меняй размер мышью");
 		return true;
 	}
-	obs_source_t *source = obs_get_source_by_name(kSourceName.constData());
+	obs_source_t *source = obs_get_source_by_name(sourceName.constData());
 	if (source && std::strcmp(obs_source_get_id(source), "browser_source") != 0) {
 		obs_source_release(source);
 		*message = QStringLiteral("Имя слоя XINKX занято другим OBS-источником");
@@ -397,13 +425,24 @@ bool OverlayRuntime::addToScene(OBSBasic *mainWindow, QString *message)
 			return false;
 		}
 		OBSData settings = obs_data_create();
-		obs_data_set_string(settings, "url", sourceUrl().toUtf8().constData());
-		obs_data_set_int(settings, "width", video.base_width);
-		obs_data_set_int(settings, "height", video.base_height);
+		obs_data_set_string(settings, "url", sourceUrl(layer).toUtf8().constData());
+		const int width = layer == QStringLiteral("chat") ? 720 :
+			layer == QStringLiteral("timer") ? 480 :
+			layer == QStringLiteral("alerts") ? 960 :
+			layer == QStringLiteral("viewers") ? 520 :
+			layer == QStringLiteral("frame") ? 800 : static_cast<int>(video.base_width);
+		const int height = layer == QStringLiteral("chat") ? 560 :
+			layer == QStringLiteral("timer") ? 180 :
+			layer == QStringLiteral("alerts") ? 440 :
+			layer == QStringLiteral("viewers") ? 100 :
+			layer == QStringLiteral("frame") ? 450 : static_cast<int>(video.base_height);
+		obs_data_set_int(settings, "width", width);
+		obs_data_set_int(settings, "height", height);
 		obs_data_set_int(settings, "fps", 30);
 		obs_data_set_bool(settings, "shutdown", false);
 		obs_data_set_bool(settings, "restart_when_active", true);
-		source = obs_source_create("browser_source", kSourceName.constData(), settings, nullptr);
+		source = obs_source_create("browser_source", sourceName.constData(), settings, nullptr);
+		obs_data_release(settings);
 		if (!source) {
 			*message = QStringLiteral("OBS Browser Source недоступен: проверь obs-browser в сборке");
 			return false;
@@ -418,7 +457,7 @@ bool OverlayRuntime::addToScene(OBSBasic *mainWindow, QString *message)
 	}
 	obs_sceneitem_select(item, true);
 	OBSData after = OBSBasic::BackupScene(scene);
-	mainWindow->CreateSceneUndoRedoAction(QStringLiteral("XINKX: добавить эффекты и события"), before, after);
+	mainWindow->CreateSceneUndoRedoAction(QStringLiteral("XINKX: добавить ") + layerName(layer), before, after);
 	*message = QStringLiteral("Слой XINKX добавлен и выбран: его размер и позиция меняются в предпросмотре OBS · Ctrl+Z для отмены");
 	return true;
 }
@@ -437,21 +476,69 @@ void installOverlayWorkspace(OBSBasic *mainWindow, QDockWidget *sourceInspector)
 	auto *status = new QLabel(runtime->available() ? QStringLiteral("Локальный движок · готов") : runtime->error(), content);
 	status->setWordWrap(true);
 	layout->addWidget(status);
-	auto *add = new QPushButton(QStringLiteral("Добавить XINKX-слой в сцену"), content);
+	auto *sourceGroup = new QGroupBox(QStringLiteral("Элементы сцены OBS"), content);
+	auto *sourceLayout = new QVBoxLayout(sourceGroup);
+	auto *sourceRow = new QHBoxLayout();
+	auto *layer = new QComboBox(sourceGroup);
+	for (const auto &entry : {std::pair{QStringLiteral("Чат"), QStringLiteral("chat")},
+				  std::pair{QStringLiteral("Реакции"), QStringLiteral("effects")},
+				  std::pair{QStringLiteral("Алерты и донаты"), QStringLiteral("alerts")},
+				  std::pair{QStringLiteral("Таймер"), QStringLiteral("timer")},
+				  std::pair{QStringLiteral("Счётчик зрителей"), QStringLiteral("viewers")},
+				  std::pair{QStringLiteral("Рамка камеры"), QStringLiteral("frame")},
+				  std::pair{QStringLiteral("Все вместе (legacy)"), QStringLiteral("all")}})
+		layer->addItem(entry.first, entry.second);
+	auto *add = new QPushButton(QStringLiteral("Добавить / выделить"), sourceGroup);
 	add->setEnabled(runtime->available());
-	layout->addWidget(add);
+	sourceRow->addWidget(layer, 1);
+	sourceRow->addWidget(add);
+	sourceLayout->addLayout(sourceRow);
+	auto *sourceHint = new QLabel(QStringLiteral("Каждый элемент — отдельный источник OBS. Перемещай, масштабируй и меняй порядок на холсте."), sourceGroup);
+	sourceHint->setWordWrap(true);
+	sourceLayout->addWidget(sourceHint);
+	auto *createRow = new QHBoxLayout();
+	auto *newScene = new QPushButton(QStringLiteral("Новая сцена"), sourceGroup);
+	auto *newText = new QPushButton(QStringLiteral("Текстовый элемент"), sourceGroup);
+	createRow->addWidget(newScene);
+	createRow->addWidget(newText);
+	sourceLayout->addLayout(createRow);
+	layout->addWidget(sourceGroup);
+	QObject::connect(newScene, &QPushButton::clicked, dock, [=] {
+		bool ok = false;
+		const auto name = QInputDialog::getText(dock, QStringLiteral("Новая сцена OBS"),
+			QStringLiteral("Название"), QLineEdit::Normal, QString{}, &ok);
+		if (!ok || name.trimmed().isEmpty()) return;
+		if (auto *bus = mainWindow->findChild<StudioAutomation *>())
+			status->setText(bus->execute({{QStringLiteral("command"), QStringLiteral("scene.create")},
+				{QStringLiteral("name"), name}}).value(QStringLiteral("message")).toString());
+	});
+	QObject::connect(newText, &QPushButton::clicked, dock, [=] {
+		bool ok = false;
+		const auto name = QInputDialog::getText(dock, QStringLiteral("Текст OBS"),
+			QStringLiteral("Имя источника"), QLineEdit::Normal, QStringLiteral("XINKX · Текст"), &ok);
+		if (!ok || name.trimmed().isEmpty()) return;
+		const auto value = QInputDialog::getText(dock, QStringLiteral("Текст OBS"),
+			QStringLiteral("Содержимое"), QLineEdit::Normal, QString{}, &ok);
+		if (!ok || value.isEmpty()) return;
+		if (auto *bus = mainWindow->findChild<StudioAutomation *>())
+			status->setText(bus->execute({{QStringLiteral("command"), QStringLiteral("source.text.add")},
+				{QStringLiteral("name"), name}, {QStringLiteral("text"), value}})
+				.value(QStringLiteral("message")).toString());
+	});
 	QObject::connect(add, &QPushButton::clicked, dock, [=] {
 		QString notice;
-		runtime->addToScene(mainWindow, &notice);
+		runtime->addToScene(mainWindow, &notice, layer->currentData().toString());
 		status->setText(notice);
 	});
+	auto *testGroup = new QGroupBox(QStringLiteral("Реакции и тест событий"), content);
+	auto *testLayout = new QVBoxLayout(testGroup);
 	auto *position = new QComboBox(content);
 	position->addItem(QStringLiteral("Справа сверху"), QStringLiteral("top-right"));
 	position->addItem(QStringLiteral("Слева сверху"), QStringLiteral("top-left"));
 	position->addItem(QStringLiteral("По центру"), QStringLiteral("center"));
 	auto *positionForm = new QFormLayout();
 	positionForm->addRow(QStringLiteral("Позиция"), position);
-	layout->addLayout(positionForm);
+	testLayout->addLayout(positionForm);
 	QObject::connect(position, &QComboBox::currentIndexChanged, dock, [=] {
 		runtime->setPosition(position->currentData().toString());
 	});
@@ -470,9 +557,9 @@ void installOverlayWorkspace(OBSBasic *mainWindow, QDockWidget *sourceInspector)
 			runtime->reaction(type);
 		});
 	}
-	layout->addLayout(effects);
+	testLayout->addLayout(effects);
 	auto *clear = new QPushButton(QStringLiteral("Очистить все эффекты"), content);
-	layout->addWidget(clear);
+	testLayout->addWidget(clear);
 	QObject::connect(clear, &QPushButton::clicked, dock, [runtime] { runtime->clearEffects(); });
 	auto *alerts = new QGridLayout();
 	int alertIndex = 0;
@@ -489,7 +576,10 @@ void installOverlayWorkspace(OBSBasic *mainWindow, QDockWidget *sourceInspector)
 			runtime->testAlert(type);
 		});
 	}
-	layout->addLayout(alerts);
+	testLayout->addLayout(alerts);
+	layout->addWidget(testGroup);
+	auto *timerGroup = new QGroupBox(QStringLiteral("Таймер"), content);
+	auto *timerLayout = new QVBoxLayout(timerGroup);
 	auto *timerRow = new QGridLayout();
 	auto *duration = new QSpinBox(content);
 	duration->setRange(5, 3600);
@@ -502,12 +592,13 @@ void installOverlayWorkspace(OBSBasic *mainWindow, QDockWidget *sourceInspector)
 	timerRow->addWidget(start, 0, 1);
 	timerRow->addWidget(pause, 1, 0);
 	timerRow->addWidget(reset, 1, 1);
-	layout->addLayout(timerRow);
+	timerLayout->addLayout(timerRow);
 	QObject::connect(start, &QPushButton::clicked, dock, [=] { runtime->startTimer(duration->value()); });
 	QObject::connect(pause, &QPushButton::clicked, dock, [=] { runtime->pauseTimer(); });
 	QObject::connect(reset, &QPushButton::clicked, dock, [=] { runtime->resetTimer(); });
 	auto *clock = new QLabel(QStringLiteral("Таймер скрыт"), content);
-	layout->addWidget(clock);
+	timerLayout->addWidget(clock);
+	layout->addWidget(timerGroup);
 	QObject::connect(runtime, &OverlayRuntime::timerChanged, dock, [=](int seconds, bool running) {
 		clock->setText(seconds ? QStringLiteral("%1:%2 · %3")
 						.arg(seconds / 60, 2, 10, QLatin1Char('0'))
@@ -539,6 +630,7 @@ void installOverlayWorkspace(OBSBasic *mainWindow, QDockWidget *sourceInspector)
 			delete history->takeItem(history->count() - 1);
 		}
 	});
+	layout->addStretch(1);
 	studioTabs(mainWindow)->addTab(content, QStringLiteral("Эффекты"));
 	// Qt window geometry is OBS-owned. XINKX only stores its own dock visibility and options.
 	char path[512];

@@ -1,5 +1,6 @@
 #include "MultiStreamWorkspace.hpp"
 
+#include "ChatGateway.hpp"
 #include "OAuthLogin.hpp"
 #include "PlatformApi.hpp"
 #include "StreamAccounts.hpp"
@@ -532,6 +533,29 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 	notice->setWordWrap(true);
 	layout->addWidget(notice);
 	streamPage->layout()->addWidget(group);
+	auto *extras = new QGroupBox(u"XINKX · Донаты, чат и оформление"_s, streamPage);
+	auto *extraActions = new QHBoxLayout(extras);
+	auto *donationSettings = new QPushButton(u"Донаты и шаблоны…"_s, extras);
+	auto *appearanceSettings = new QPushButton(u"Чат, реакции и боты…"_s, extras);
+	auto *automationSettings = new QPushButton(u"Автоматизация / LLM…"_s, extras);
+	extraActions->addWidget(donationSettings);
+	extraActions->addWidget(appearanceSettings);
+	extraActions->addWidget(automationSettings);
+	streamPage->layout()->addWidget(extras);
+	const auto openSettings = [streamPage](const QString &name) {
+		auto *host = streamPage->window()->parentWidget(); // OBSBasic is the parent of OBSBasicSettings.
+		if (!host) return;
+		if (auto *editor = host->findChild<QDialog *>(name)) editor->exec();
+	};
+	QObject::connect(donationSettings, &QPushButton::clicked, extras, [openSettings] {
+		openSettings(QStringLiteral("xinkxDonationSettingsDialog"));
+	});
+	QObject::connect(appearanceSettings, &QPushButton::clicked, extras, [openSettings] {
+		openSettings(QStringLiteral("xinkxAppearanceSettingsDialog"));
+	});
+	QObject::connect(automationSettings, &QPushButton::clicked, extras, [openSettings] {
+		openSettings(QStringLiteral("xinkxAutomationSettingsDialog"));
+	});
 
 	const auto updateActions = [=] {
 		const auto *selected = tree->currentItem();
@@ -637,6 +661,9 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 			rebuild();
 		}
 	});
+	QObject::connect(tree, &QTreeWidget::itemDoubleClicked, group, [edit](QTreeWidgetItem *, int column) {
+		if (column != 0 && edit->isEnabled()) edit->click();
+	});
 	QObject::connect(remove, &QPushButton::clicked, group, [=] {
 		const auto *account = current();
 		if (!account || QMessageBox::question(group, u"Удалить аккаунт"_s, u"Удалить локальные данные аккаунта?"_s) !=
@@ -723,6 +750,9 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 					notice->setText(u"Не удалось сохранить OAuth через DPAPI. Повтори применение настроек."_s);
 				} else {
 					notice->setText(message);
+					if (auto *host = group->window()->parentWidget())
+						if (auto *gateway = host->findChild<ChatGateway *>(QStringLiteral("xinkxChatGateway")))
+							gateway->reloadAccounts();
 				}
 				break;
 			}

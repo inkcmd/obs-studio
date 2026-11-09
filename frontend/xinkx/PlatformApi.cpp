@@ -11,7 +11,7 @@ const QList<PlatformApi> &platformApis()
 		{u"twitch"_s, u"Twitch"_s, QUrl(u"https://id.twitch.tv/oauth2/authorize"_s),
 		 QUrl(u"https://id.twitch.tv/oauth2/token"_s), QUrl(u"https://id.twitch.tv/oauth2/revoke"_s),
 		 u"channel:read:stream_key channel:manage:broadcast channel:read:subscriptions "
-		 u"moderator:read:followers bits:read user:read:chat user:write:chat channel:bot"_s,
+		 u"moderator:read:followers bits:read user:read:chat user:write:chat channel:bot user:edit"_s,
 		 QUrl(u"https://api.twitch.tv/helix/users"_s), false, true},
 		{u"youtube"_s, u"YouTube"_s, QUrl(u"https://accounts.google.com/o/oauth2/v2/auth"_s),
 		 QUrl(u"https://oauth2.googleapis.com/token"_s), QUrl(u"https://oauth2.googleapis.com/revoke"_s),

@@ -152,32 +152,20 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 	form->addRow(QStringLiteral("Заголовок эфира"), title);
 	auto *description = new QPlainTextEdit(panel);
 	description->setMaximumHeight(85);
-	form->addRow(QStringLiteral("Описание YouTube"), description);
+	form->addRow(QStringLiteral("Описание Twitch / YouTube"), description);
+	auto *gameRow = new QWidget(panel);
+	auto *gameLine = new QHBoxLayout(gameRow);
+	gameLine->setContentsMargins(0, 0, 0, 0);
+	auto *gameSearch = new QLineEdit(gameRow);
+	gameSearch->setPlaceholderText(QStringLiteral("Одна игра для всех платформ"));
+	auto *findGame = new QPushButton(QStringLiteral("Найти везде"), gameRow);
+	gameLine->addWidget(gameSearch, 1);
+	gameLine->addWidget(findGame);
+	form->addRow(QStringLiteral("Поиск игры"), gameRow);
 	auto addCategorySearch = [=](const QString &platform, const QString &label) {
-		auto *wrapper = new QWidget(panel);
-		auto *column = new QVBoxLayout(wrapper);
-		column->setContentsMargins(0, 0, 0, 0);
-		column->setSpacing(3);
-		auto *row = new QHBoxLayout();
-		auto *searchInput = new QLineEdit(wrapper);
-		searchInput->setPlaceholderText(QStringLiteral("Поиск игры или категории…"));
-		auto *search = new QPushButton(QStringLiteral("Найти"), wrapper);
-		row->addWidget(searchInput, 1);
-		row->addWidget(search);
-		column->addLayout(row);
-		auto *results = new QComboBox(wrapper);
+		auto *results = new QComboBox(panel);
 		results->addItem(QStringLiteral("Не выбрано"), QString{});
-		column->addWidget(results);
-		form->addRow(label, wrapper);
-		auto fetch = [=] {
-			for (const auto &account : gateway->accounts()) {
-				if (account.platform != platform) continue;
-				gateway->searchCategories(account.id, searchInput->text());
-				return;
-			}
-		};
-		QObject::connect(search, &QPushButton::clicked, dock, fetch);
-		QObject::connect(searchInput, &QLineEdit::returnPressed, dock, fetch);
+		form->addRow(label, results);
 		QObject::connect(gateway, &ChatGateway::categoryResults, dock,
 			[=](const QString &accountId, const QJsonArray &entries) {
 				bool matching = false;
@@ -188,18 +176,32 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 				const QSignalBlocker blocked(results);
 				results->clear();
 				results->addItem(QStringLiteral("Не выбрано"), QString{});
+				int best = 0;
 				for (const auto &entry : entries) {
 					const auto item = entry.toObject();
-					results->addItem(item.value(QStringLiteral("name")).toString(), item.value(QStringLiteral("id")).toString());
+					const QString label = item.value(QStringLiteral("name")).toString();
+					results->addItem(label, item.value(QStringLiteral("id")).toVariant().toString());
+					if (label.compare(gameSearch->text().trimmed(), Qt::CaseInsensitive) == 0) best = results->count() - 1;
 				}
 				const int found = results->findData(previous);
-				results->setCurrentIndex(found >= 0 ? found : 0);
+				if (!best && platform == QStringLiteral("youtube")) {
+					for (int i = 1; i < results->count(); ++i)
+						if (results->itemText(i).contains(QStringLiteral("Gaming"), Qt::CaseInsensitive) ||
+						    results->itemText(i).contains(QStringLiteral("Видеоигр"), Qt::CaseInsensitive)) { best = i; break; }
+				}
+				results->setCurrentIndex(best ? best : found >= 0 ? found : entries.size() == 1 ? 1 : 0);
 			});
 		return results;
 	};
 	auto *twitchGame = addCategorySearch(QStringLiteral("twitch"), QStringLiteral("Игра Twitch"));
 	auto *kickGame = addCategorySearch(QStringLiteral("kick"), QStringLiteral("Категория Kick"));
 	auto *youtubeGame = addCategorySearch(QStringLiteral("youtube"), QStringLiteral("Категория YouTube"));
+	const auto findEverywhere = [=] {
+		if (gameSearch->text().trimmed().size() < 2) return;
+		for (const auto &account : gateway->accounts()) gateway->searchCategories(account.id, gameSearch->text());
+	};
+	QObject::connect(findGame, &QPushButton::clicked, dock, findEverywhere);
+	QObject::connect(gameSearch, &QLineEdit::returnPressed, dock, findEverywhere);
 	auto *youtubeBroadcast = new QComboBox(panel);
 	youtubeBroadcast->addItem(QStringLiteral("Выбери эфир YouTube"), QString{});
 	form->addRow(QStringLiteral("Эфир YouTube"), youtubeBroadcast);
@@ -221,7 +223,7 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 	layout->addWidget(activate);
 	auto *json = new QPushButton(QStringLiteral("Редактировать профили JSON…"), panel);
 	layout->addWidget(json);
-	auto *note = new QLabel(QStringLiteral("Выбери сцену OBS, найди игры на площадках и сохрани профиль. ID получаются автоматически. Автоматизация выключена по умолчанию."), panel);
+	auto *note = new QLabel(QStringLiteral("Одна строка поиска — три каталога. Выбери совпадения и сохрани. YouTube позволяет менять игру через Studio; автоматизация выключена по умолчанию."), panel);
 	note->setWordWrap(true);
 	layout->addWidget(note);
 	layout->addStretch();
@@ -363,7 +365,7 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 			     entry.value(QStringLiteral("description")).toString().trimmed().isEmpty())) continue;
 			gateway->updateBroadcast(account.id, entry.value(QStringLiteral("youtubeBroadcast")).toString(),
 				entry.value(QStringLiteral("title")).toString(),
-				account.platform == QStringLiteral("youtube") ? entry.value(QStringLiteral("description")).toString() : QString{},
+				account.platform == QStringLiteral("kick") ? QString{} : entry.value(QStringLiteral("description")).toString(),
 				category);
 		}
 	};

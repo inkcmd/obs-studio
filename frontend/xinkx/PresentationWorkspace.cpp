@@ -647,10 +647,15 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 		});
 		dialog.exec();
 	});
-	auto *scroll = new QScrollArea(dock);
+	auto *dialog = new QDialog(mainWindow);
+	dialog->setObjectName(QStringLiteral("xinkxAppearanceSettingsDialog"));
+	dialog->setWindowTitle(QStringLiteral("XINKX · Чат, реакции и боты"));
+	dialog->resize(760, 740);
+	auto *dialogLayout = new QVBoxLayout(dialog);
+	auto *scroll = new QScrollArea(dialog);
 	scroll->setWidgetResizable(true);
 	scroll->setWidget(panel);
-	studioTabs(mainWindow)->addTab(scroll, QStringLiteral("Оформление"));
+	dialogLayout->addWidget(scroll);
 }
 
 } // namespace xinkx

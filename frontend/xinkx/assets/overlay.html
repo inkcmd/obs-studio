@@ -61,6 +61,27 @@
   .chat-line.leave { animation:chatOut .4s both; }
   @keyframes chatIn { from { opacity:0; transform:translateX(-28px); } }
   @keyframes chatOut { to { opacity:0; transform:translateX(-28px); } }
+  #frame { display:none; position:absolute; inset:2%; border:8px solid #64ddff;
+    border-radius:24px; box-shadow:0 0 20px #5ccaffbb,inset 0 0 18px #5ccaff44; }
+  body[data-layer="frame"] #frame { display:block; }
+  body[data-layer="frame"] #surface,body[data-layer="frame"] #chat,
+  body[data-layer="frame"] #timer,body[data-layer="frame"] #viewers { display:none !important; }
+  body[data-layer="chat"] #surface,body[data-layer="chat"] #timer,
+  body[data-layer="chat"] #viewers { display:none !important; }
+  body[data-layer="effects"] #chat,body[data-layer="effects"] #timer,
+  body[data-layer="effects"] #viewers { display:none !important; }
+  body[data-layer="alerts"] #chat,body[data-layer="alerts"] #timer,
+  body[data-layer="alerts"] #viewers { display:none !important; }
+  body[data-layer="timer"] #surface,body[data-layer="timer"] #chat,
+  body[data-layer="timer"] #viewers { display:none !important; }
+  body[data-layer="viewers"] #surface,body[data-layer="viewers"] #chat,
+  body[data-layer="viewers"] #timer { display:none !important; }
+  body[data-layer="timer"] #timer { top:8px; left:8px; transform:none; font-size:64px; }
+  body[data-layer="timer"] #timer.hidden { transform:translateY(-20px); }
+  body[data-layer="viewers"] #viewers { top:12px; left:12px; }
+  body[data-layer="chat"] #chat { top:auto;bottom:5px;left:5px;right:auto;
+    transform:none;width:calc(100% - 10px); }
+  body[data-layer="alerts"] .effect.alert { left:50%;right:auto;top:50%;transform:translate(-50%,-50%); }
 </style>
 </head>
 <body data-position="top-right">
@@ -68,9 +89,12 @@
 <div id="timer" class="hidden" aria-label="Таймер">00:00</div>
 <div id="chat"></div>
 <div id="viewers"></div>
+<div id="frame" aria-label="Рамка камеры"></div>
 <script>
 (() => {
   'use strict';
+  const layer = new URLSearchParams(location.search).get('layer') || 'all';
+  document.body.dataset.layer = layer;
   const surface = document.getElementById('surface');
   const timer = document.getElementById('timer');
   const chat = document.getElementById('chat');
@@ -150,10 +174,14 @@
   }
   function effect(event) {
     if (!event || paused || !durations[event.type]) return;
+    if (layer==='alerts' && event.kind!=='alert') return;
+    if (layer==='effects' && event.kind!=='reaction') return;
+    if (['chat','timer','viewers','frame'].includes(layer)) return;
     if (queue.length>=20) queue.shift();
     queue.push(event); drain();
   }
   function showChat(event) {
+    if (!['chat','all'].includes(layer)) return;
     if (!event || paused || !event.message) return;
     const line=node('div','chat-line');
     if (style.chat.showPlatform) line.append(node('span','badge',String(event.platform||'').toUpperCase()));
@@ -180,6 +208,10 @@
     chat.style.transform=(c.horizontal==='center'?'translateX(-50%)':'')+
       (c.vertical==='center'?' translateY(-50%)':'');
     chat.style.alignItems=c.horizontal==='right'?'flex-end':c.horizontal==='center'?'center':'flex-start';
+    if (layer==='chat') {
+      chat.style.left='5px';chat.style.right='auto';chat.style.top='auto';chat.style.bottom='5px';
+      chat.style.width='calc(100% - 10px)';chat.style.transform='none';
+    }
     for (const line of chat.children) updateLine(line);
   }
   function updateLine(line) {
