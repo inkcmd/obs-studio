@@ -1132,8 +1132,10 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 		});
 		if (auto *window = static_cast<QWidget *>(obs_frontend_get_main_window()))
 			QTimer::singleShot(0, window, [window, enabledPortrait] {
-				if (enabledPortrait) PortraitCanvas::instance().edit(window);
-				else PortraitCanvas::instance().closeEditor();
+				const int mode = enabledPortrait ? 2 : 0;
+				if (auto *canvasMode = window->findChild<QComboBox *>(QStringLiteral("xinkxCanvasMode")))
+					canvasMode->setCurrentIndex(mode);
+				PortraitCanvas::instance().setViewMode(mode);
 			});
 		return true;
 	};

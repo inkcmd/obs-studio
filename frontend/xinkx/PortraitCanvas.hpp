@@ -17,6 +17,9 @@ public:
 	video_t *video();
 	void sync();
 	void edit(QWidget *parent);
+	// The active OBS scene drives both compositions; this only changes which
+	// preview(s) are visible: 0 = landscape, 1 = portrait, 2 = both.
+	void setViewMode(int mode);
 	void closeEditor();
 	void shutdown();
 

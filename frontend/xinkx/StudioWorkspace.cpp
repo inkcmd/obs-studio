@@ -528,12 +528,16 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	auto *studioPages = new QTabWidget(studio);
 	studioPages->setObjectName(QStringLiteral("xinkxStudioTabs"));
 	studioPages->setDocumentMode(true);
-	auto *portraitEditor = new QPushButton(QStringLiteral("9:16 холст"), studioPages);
-	portraitEditor->setToolTip(QStringLiteral("Открыть вертикальный редактор рядом с основным холстом OBS"));
-	studioPages->setCornerWidget(portraitEditor, Qt::TopRightCorner);
-	QObject::connect(portraitEditor, &QPushButton::clicked, mainWindow, [mainWindow] {
-		PortraitCanvas::instance().edit(mainWindow);
-	});
+	auto *canvasMode = new QComboBox(studioPages);
+	canvasMode->setObjectName(QStringLiteral("xinkxCanvasMode"));
+	canvasMode->setToolTip(QStringLiteral("Отображение холстов OBS; трансляции продолжаются независимо"));
+	canvasMode->addItems({QStringLiteral("16:9"), QStringLiteral("9:16"), QStringLiteral("Оба")});
+	studioPages->setCornerWidget(canvasMode, Qt::TopRightCorner);
+	QObject::connect(canvasMode, QOverload<int>::of(&QComboBox::currentIndexChanged), mainWindow,
+		[=](int mode) {
+			PortraitCanvas::instance().setViewMode(mode);
+			if (settings) settings->setValue(QStringLiteral("workspace/canvasViewMode"), mode);
+		});
 	studio->setWidget(studioPages);
 	mainWindow->AddDockWidget(studio, Qt::RightDockWidgetArea);
 	new StudioAutomation(mainWindow);
@@ -556,12 +560,15 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	});
 	// Once OBS restores its layout, show both canvases automatically whenever
 	// a portrait output is enabled. Both canvases follow the same OBS scene.
-	QTimer::singleShot(250, mainWindow, [mainWindow] {
+	QTimer::singleShot(250, mainWindow, [=] {
 		const auto accounts = loadStreamAccounts();
 		const bool hasPortrait = std::any_of(accounts.cbegin(), accounts.cend(), [](const StreamAccount &a) {
 			return a.enabled && a.destination.portrait;
 		});
-		if (hasPortrait) PortraitCanvas::instance().edit(mainWindow);
+		const int mode = hasPortrait ? std::clamp(settings ?
+			settings->value(QStringLiteral("workspace/canvasViewMode"), 2).toInt() : 2, 0, 2) : 0;
+		canvasMode->setCurrentIndex(mode);
+		PortraitCanvas::instance().setViewMode(mode);
 	});
 }
 
