@@ -17,7 +17,7 @@ for (const text of [
 
 for (const text of [
   'xinkxPortraitEditor',
-  'previewLayout->addWidget(side, 1)',
+  'previewLayout->addWidget(side)',
   'preview->pressed =',
   'preview->resized =',
   'obs_sceneitem_get_box_transform',

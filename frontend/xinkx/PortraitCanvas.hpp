@@ -17,6 +17,7 @@ public:
 	video_t *video();
 	void sync();
 	void edit(QWidget *parent);
+	void closeEditor();
 	void shutdown();
 
 private:

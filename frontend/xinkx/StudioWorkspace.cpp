@@ -10,6 +10,7 @@
 #include "StudioAutomation.hpp"
 #include "WheelFocusGuard.hpp"
 #include "PortraitCanvas.hpp"
+#include "StreamAccounts.hpp"
 
 #include <OBSApp.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -552,6 +553,15 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 		mainWindow->resizeDocks({studio}, {450}, Qt::Horizontal);
 		const int chat = studioPages->indexOf(studioPages->findChild<QWidget *>(QStringLiteral("xinkxChatPage")));
 		if (chat >= 0) studioPages->setCurrentIndex(chat);
+	});
+	// Once OBS restores its layout, show both canvases automatically whenever
+	// a portrait output is enabled. Both canvases follow the same OBS scene.
+	QTimer::singleShot(250, mainWindow, [mainWindow] {
+		const auto accounts = loadStreamAccounts();
+		const bool hasPortrait = std::any_of(accounts.cbegin(), accounts.cend(), [](const StreamAccount &a) {
+			return a.enabled && a.destination.portrait;
+		});
+		if (hasPortrait) PortraitCanvas::instance().edit(mainWindow);
 	});
 }
 

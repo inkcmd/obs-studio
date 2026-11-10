@@ -37,6 +37,7 @@
 #include <QVBoxLayout>
 
 #include <obs.hpp>
+#include <obs-frontend-api.h>
 
 #include <algorithm>
 #include <memory>
@@ -1126,6 +1127,14 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 			return false;
 		}
 		*dirty = false;
+		const bool enabledPortrait = std::any_of(accounts->cbegin(), accounts->cend(), [](const StreamAccount &a) {
+			return a.enabled && a.destination.portrait;
+		});
+		if (auto *window = static_cast<QWidget *>(obs_frontend_get_main_window()))
+			QTimer::singleShot(0, window, [window, enabledPortrait] {
+				if (enabledPortrait) PortraitCanvas::instance().edit(window);
+				else PortraitCanvas::instance().closeEditor();
+			});
 		return true;
 	};
 }

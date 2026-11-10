@@ -13,6 +13,7 @@
 
 #include <QAction>
 #include <QCheckBox>
+#include <QDockWidget>
 #include <QCryptographicHash>
 #include <QHBoxLayout>
 #include <QJsonArray>
@@ -24,10 +25,12 @@
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPushButton>
+#include <QPointer>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QTimer>
+#include <QTabWidget>
 #include <QUuid>
 #include <QVBoxLayout>
 
@@ -36,6 +39,7 @@
 #include <atomic>
 #include <cmath>
 #include <functional>
+#include <memory>
 #include <vector>
 
 namespace xinkx {
@@ -136,8 +140,8 @@ protected:
 	{
 		if (handle >= 0 && width() && height()) {
 			const QPointF delta = event->position() - start;
-			start = event->position();
-			// Preview dimensions preserve 9:16; convert pixels to 1080x1920 coordinates.
+			// Deltas are measured from mouse-down, like the native OBS editor.
+			// A per-frame delta plus 10px snapping would otherwise discard small drags.
 			const float scale = std::min(width() / float(portraitWidth), height() / float(portraitHeight));
 			if (scale > 0) {
 				const float dx = float(delta.x() / scale), dy = float(delta.y() / scale);
@@ -177,13 +181,21 @@ private:
 		const int h = int(scale * portraitHeight);
 		gs_projection_push();
 		gs_viewport_push();
+		// Draw an explicit canvas edge, even when every source is transparent or
+		// black. This guide lives only in the editor display, never in the output.
+		gs_set_viewport(0, 0, cx, cy);
+		gs_ortho(0.f, float(cx), 0.f, float(cy), -100.f, 100.f);
+		gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_SOLID);
+		vec4 outline{};
+		vec4_set(&outline, .38f, .49f, .60f, 1.f);
+		gs_effect_set_vec4(gs_effect_get_param_by_name(effect, "color"), &outline);
+		while (gs_effect_loop(effect, "Solid")) solidRect(float(x - 3), float(y - 3), float(w + 6), float(h + 6));
 		gs_set_viewport(x, y, w, h);
 		gs_ortho(0.f, float(portraitWidth), 0.f, float(portraitHeight), -100.f, 100.f);
 		obs_source_video_render(self->sceneSource);
 		if (self->hasSelection.load()) {
 			const float bx = self->selectionX.load(), by = self->selectionY.load();
 			const float bw = self->selectionW.load(), bh = self->selectionH.load();
-			gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_SOLID);
 			vec4 color{};
 			vec4_set(&color, 0.17f, 0.72f, 1.0f, 1.f);
 			gs_effect_set_vec4(gs_effect_get_param_by_name(effect, "color"), &color);
@@ -264,10 +276,26 @@ void PortraitCanvas::sync()
 void PortraitCanvas::rebuild(obs_scene_t *mainScene, const QString &name, const QString &newSignature)
 {
 	if (!scene || !mainScene) return;
-	std::vector<Captured> originals;
-	obs_scene_enum_items(mainScene, captureItem, &originals);
+	std::vector<Captured> mainSources;
+	obs_scene_enum_items(mainScene, captureItem, &mainSources);
 	QSettings store(studioSettingsPath(), QSettings::IniFormat);
-	const QJsonArray extras = QJsonDocument::fromJson(store.value(extraKey(name)).toByteArray()).array();
+	QJsonObject saved = QJsonDocument::fromJson(store.value(storeKey(name)).toByteArray()).object();
+	QJsonArray extras = QJsonDocument::fromJson(store.value(extraKey(name)).toByteArray()).array();
+	// Previous versions mirrored every item in the horizontal OBS scene. Migrate
+	// existing edited layouts once, but never mirror newly added OBS sources.
+	// A new portrait scene starts empty until the user adds its own layers.
+	if (!store.contains(extraKey(name))) {
+		for (const auto &item : mainSources) {
+			if (!saved.contains(item.key)) continue;
+			const QString uuid = QString::fromUtf8(obs_source_get_uuid(item.source));
+			if (uuid.isEmpty()) continue;
+			extras.append(uuid);
+			saved.insert(QStringLiteral("portrait:%1").arg(uuid), saved.value(item.key));
+		}
+		store.setValue(extraKey(name), QJsonDocument(extras).toJson(QJsonDocument::Compact));
+		store.setValue(storeKey(name), QJsonDocument(saved).toJson(QJsonDocument::Compact));
+	}
+	std::vector<Captured> originals;
 	for (const auto &entry : extras) {
 		const QJsonObject storedSource = entry.toObject();
 		const QString uuid = entry.isString() ? entry.toString() : storedSource.value(QStringLiteral("uuid")).toString();
@@ -286,11 +314,20 @@ void PortraitCanvas::rebuild(obs_scene_t *mainScene, const QString &name, const 
 		captured.source = source;
 		captured.key = QStringLiteral("portrait:%1").arg(uuid);
 		captured.name = QString::fromUtf8(obs_source_get_name(source));
-		captured.info.bounds_type = OBS_BOUNDS_SCALE_INNER;
-		captured.info.bounds = {float(portraitWidth) * .75f, float(portraitHeight) * .40f};
-		captured.info.alignment = OBS_ALIGN_TOP | OBS_ALIGN_LEFT;
-		captured.info.bounds_alignment = OBS_ALIGN_CENTER;
-		captured.info.scale = {1.f, 1.f};
+		const auto original = std::find_if(mainSources.cbegin(), mainSources.cend(), [&](const Captured &item) {
+			return QString::fromUtf8(obs_source_get_uuid(item.source)) == uuid;
+		});
+		if (original != mainSources.cend()) {
+			captured.info = original->info;
+			captured.crop = original->crop;
+			captured.visible = original->visible;
+		} else {
+			captured.info.bounds_type = OBS_BOUNDS_SCALE_INNER;
+			captured.info.bounds = {float(portraitWidth) * .75f, float(portraitHeight) * .40f};
+			captured.info.alignment = OBS_ALIGN_TOP | OBS_ALIGN_LEFT;
+			captured.info.bounds_alignment = OBS_ALIGN_CENTER;
+			captured.info.scale = {1.f, 1.f};
+		}
 		originals.push_back(std::move(captured));
 		obs_source_release(source);
 	}
@@ -302,7 +339,6 @@ void PortraitCanvas::rebuild(obs_scene_t *mainScene, const QString &name, const 
 	if (!obs_get_video_info(&base) || !base.base_width || !base.base_height) return;
 	const float ratioX = float(portraitWidth) / base.base_width;
 	const float ratioY = float(portraitHeight) / base.base_height;
-	const QJsonObject saved = QJsonDocument::fromJson(store.value(storeKey(name)).toByteArray()).object();
 	for (const auto &source : originals) {
 		obs_sceneitem_t *item = obs_scene_add(scene, source.source);
 		if (!item) continue;
@@ -420,11 +456,12 @@ void PortraitCanvas::edit(QWidget *parent)
 	editing = true;
 	auto *side = new QWidget(canvasEditor);
 	side->setObjectName(QStringLiteral("xinkxPortraitEditor"));
-	side->setMinimumWidth(245);
+	side->setMinimumWidth(265);
+	side->setMaximumWidth(460);
 	auto *column = new QVBoxLayout(side);
 	column->setContentsMargins(3, 3, 3, 3);
 	auto *header = new QHBoxLayout();
-	header->addWidget(new QLabel(QStringLiteral("XINKX · Вертикальный холст 9:16"), side));
+	header->addWidget(new QLabel(QStringLiteral("9:16 · 1080×1920 · текущая сцена OBS"), side));
 	auto *close = new QPushButton(QStringLiteral("×"), side);
 	close->setToolTip(QStringLiteral("Скрыть вертикальный холст"));
 	close->setMaximumWidth(30);
@@ -432,23 +469,72 @@ void PortraitCanvas::edit(QWidget *parent)
 	column->addLayout(header);
 	auto *preview = new PortraitDisplay(obs_scene_get_source(scene), side);
 	column->addWidget(preview, 1);
-	auto *toolbar = new QHBoxLayout();
+	auto *toolbarWidget = new QWidget(side);
+	auto *toolbar = new QHBoxLayout(toolbarWidget);
+	toolbar->setContentsMargins(0, 0, 0, 0);
 	auto *add = new QPushButton(QStringLiteral("+ Источник"), side);
 	auto *remove = new QPushButton(QStringLiteral("−"), side);
 	auto *properties = new QPushButton(QStringLiteral("Свойства"), side);
-	auto *snap = new QCheckBox(QStringLiteral("Сетка"), side);
+	auto *snap = new QCheckBox(QStringLiteral("Привязка"), side);
 	snap->setChecked(true);
 	toolbar->addWidget(add);
 	toolbar->addWidget(remove);
 	toolbar->addWidget(properties);
 	toolbar->addWidget(snap);
-	column->addLayout(toolbar);
+	column->addWidget(toolbarWidget);
 	auto *list = new QListWidget(side);
 	list->setObjectName(QStringLiteral("xinkxPortraitSourceList"));
 	list->setMinimumHeight(105);
 	list->setMaximumHeight(175);
 	column->addWidget(list);
-	previewLayout->addWidget(side, 1);
+	// Reuse OBS's existing Sources dock: its source tree and controls become the
+	// 16:9 tab, while portrait has its own source tree/controls in the 9:16 tab.
+	// The central area therefore holds previews only, not a second settings pane.
+	QTabWidget *sourceTabs = nullptr;
+	if (auto *sourcesDock = mainWindow->findChild<QDockWidget *>(QStringLiteral("sourcesDock"))) {
+		if (auto *nativeFrame = sourcesDock->findChild<QWidget *>(QStringLiteral("sourcesFrame"))) {
+			QWidget *contents = nativeFrame->parentWidget();
+			auto *dockLayout = contents ? static_cast<QVBoxLayout *>(contents->layout()) : nullptr;
+			if (dockLayout) {
+				sourceTabs = new QTabWidget(contents);
+				sourceTabs->setObjectName(QStringLiteral("xinkxSourceCanvasTabs"));
+				auto *portraitSources = new QWidget(sourceTabs);
+				auto *sourceColumn = new QVBoxLayout(portraitSources);
+				sourceColumn->setContentsMargins(0, 0, 0, 0);
+				column->removeWidget(list);
+				column->removeWidget(toolbarWidget);
+				list->setMaximumHeight(QWIDGETSIZE_MAX);
+				sourceColumn->addWidget(list, 1);
+				sourceColumn->addWidget(toolbarWidget);
+				dockLayout->removeWidget(nativeFrame);
+				sourceTabs->addTab(nativeFrame, QStringLiteral("16:9"));
+				sourceTabs->addTab(portraitSources, QStringLiteral("9:16"));
+				dockLayout->insertWidget(0, sourceTabs);
+				sourceTabs->setCurrentIndex(1);
+				QPointer<QWidget> guardedContents(contents);
+				QPointer<QWidget> guardedFrame(nativeFrame);
+				QPointer<QTabWidget> guardedTabs(sourceTabs);
+				QObject::connect(side, &QObject::destroyed, sourceTabs, [=] {
+					if (!guardedContents || !guardedFrame || !guardedTabs) return;
+					auto *layout = static_cast<QVBoxLayout *>(guardedContents->layout());
+					if (!layout) return;
+					layout->removeWidget(guardedTabs);
+					guardedTabs->removeTab(0);
+					guardedFrame->setParent(guardedContents);
+					layout->insertWidget(0, guardedFrame);
+					guardedTabs->deleteLater();
+				});
+			}
+		}
+	}
+	previewLayout->addWidget(side);
+	// Dragging changes only this scene item's transform. Do not write an INI file
+	// on every mouse-move; persist once the user stops interacting.
+	auto *saveDelay = new QTimer(side);
+	saveDelay->setSingleShot(true);
+	saveDelay->setInterval(350);
+	QObject::connect(saveDelay, &QTimer::timeout, side, [this] { save(); });
+	auto initialTransform = std::make_shared<obs_transform_info>();
 
 	const auto refreshList = [=] {
 		const int selected = list->currentRow();
@@ -486,11 +572,10 @@ void PortraitCanvas::edit(QWidget *parent)
 		if (row < 0 || row >= layers.size()) return;
 		obs_transform_info info{};
 		obs_sceneitem_get_info2(layers.at(row).item, &info);
-		const auto align = [=](float value) {
-			return snap->isChecked() ? std::round(value / 10.f) * 10.f : value;
-		};
-		updateLayer(layers.at(row).key, align(px), align(py), std::max(32.f, align(width)),
-			std::max(32.f, align(height)), info.bounds_type == OBS_BOUNDS_SCALE_OUTER);
+		info.pos = {px, py};
+		info.bounds = {std::max(32.f, width), std::max(32.f, height)};
+		obs_sceneitem_set_info2(layers.at(row).item, &info);
+		saveDelay->start();
 		updateSelection();
 	};
 	const auto bounds = [=](int row, float *left, float *top, float *right, float *bottom) {
@@ -506,7 +591,33 @@ void PortraitCanvas::edit(QWidget *parent)
 			*right = std::max(*right, point.x); *bottom = std::max(*bottom, point.y);
 		}
 	};
+	// OBS-style snapping: canvas edges, canvas centre and other layer edges.
+	// Threshold is in displayed pixels, so it stays usable at every preview size.
+	const auto snapAxis = [=](float first, float second, bool horizontal) {
+		if (!snap->isChecked()) return 0.f;
+		const float scale = std::min(preview->width() / float(portraitWidth),
+			preview->height() / float(portraitHeight));
+		const float distance = 9.f / std::max(scale, .05f);
+		const float limit = horizontal ? float(portraitWidth) : float(portraitHeight);
+		std::vector<float> targets{0.f, limit, limit / 2.f};
+		for (int row = 0; row < layers.size(); ++row) {
+			if (row == list->currentRow() || !obs_sceneitem_visible(layers.at(row).item)) continue;
+			float left, top, right, bottom;
+			bounds(row, &left, &top, &right, &bottom);
+			const float a = horizontal ? left : top, b = horizontal ? right : bottom;
+			targets.push_back(a); targets.push_back(b); targets.push_back((a + b) / 2.f);
+		}
+		float offset = 0.f, best = distance;
+		for (const float edge : {first, second, (first + second) / 2.f}) {
+			for (const float target : targets) {
+				const float difference = target - edge;
+				if (std::abs(difference) < best) { best = std::abs(difference); offset = difference; }
+			}
+		}
+		return offset;
+	};
 	preview->pressed = [=](float px, float py) {
+		if (sourceTabs) sourceTabs->setCurrentIndex(1);
 		const float scale = std::min(preview->width() / float(portraitWidth),
 			preview->height() / float(portraitHeight));
 		const float distance = 13.f / std::max(scale, .05f);
@@ -522,11 +633,13 @@ void PortraitCanvas::edit(QWidget *parent)
 			for (int i = 0; i < int(handles.size()); ++i) {
 				if (std::hypot(px - handles[i].first, py - handles[i].second) <= distance) {
 					list->setCurrentRow(row);
+					obs_sceneitem_get_info2(layers.at(row).item, initialTransform.get());
 					return i + 1;
 				}
 			}
 			if (px >= left && px <= right && py >= top && py <= bottom) {
 				list->setCurrentRow(row);
+				obs_sceneitem_get_info2(layers.at(row).item, initialTransform.get());
 				return 0;
 			}
 		}
@@ -536,15 +649,20 @@ void PortraitCanvas::edit(QWidget *parent)
 	preview->moved = [=](float dx, float dy) {
 		const int row = list->currentRow();
 		if (row < 0 || row >= layers.size()) return;
-		obs_transform_info info{};
-		obs_sceneitem_get_info2(layers.at(row).item, &info);
-		saveCurrent(info.pos.x + dx, info.pos.y + dy, info.bounds.x, info.bounds.y);
+		const auto &info = *initialTransform;
+		const float ax = info.alignment & OBS_ALIGN_RIGHT ? 1.f :
+			info.alignment & OBS_ALIGN_LEFT ? 0.f : .5f;
+		const float ay = info.alignment & OBS_ALIGN_BOTTOM ? 1.f :
+			info.alignment & OBS_ALIGN_TOP ? 0.f : .5f;
+		float x = info.pos.x + dx, y = info.pos.y + dy;
+		x += snapAxis(x - info.bounds.x * ax, x + info.bounds.x * (1.f - ax), true);
+		y += snapAxis(y - info.bounds.y * ay, y + info.bounds.y * (1.f - ay), false);
+		saveCurrent(x, y, info.bounds.x, info.bounds.y);
 	};
 	preview->resized = [=](int handle, float dx, float dy) {
 		const int row = list->currentRow();
 		if (row < 0 || row >= layers.size()) return;
-		obs_transform_info info{};
-		obs_sceneitem_get_info2(layers.at(row).item, &info);
+		const auto &info = *initialTransform;
 		const float ax = info.alignment & OBS_ALIGN_RIGHT ? 1.f :
 			info.alignment & OBS_ALIGN_LEFT ? 0.f : .5f;
 		const float ay = info.alignment & OBS_ALIGN_BOTTOM ? 1.f :
@@ -559,6 +677,10 @@ void PortraitCanvas::edit(QWidget *parent)
 		if (moveRight) width = std::max(32.f, width + dx);
 		if (moveTop && height - dy >= 32.f) { top += dy; height -= dy; }
 		if (moveBottom) height = std::max(32.f, height + dy);
+		if (moveLeft) { const float offset = snapAxis(left, left, true); if (width - offset >= 32.f) { left += offset; width -= offset; } }
+		if (moveRight) width = std::max(32.f, width + snapAxis(left + width, left + width, true));
+		if (moveTop) { const float offset = snapAxis(top, top, false); if (height - offset >= 32.f) { top += offset; height -= offset; } }
+		if (moveBottom) height = std::max(32.f, height + snapAxis(top + height, top + height, false));
 		saveCurrent(left + width * ax, top + height * ay, width, height);
 	};
 	QObject::connect(list, &QListWidget::currentRowChanged, side, updateSelection);
@@ -578,25 +700,51 @@ void PortraitCanvas::edit(QWidget *parent)
 		const int row = list->currentRow();
 		if (row < 0 || row >= layers.size()) return;
 		const auto layer = layers.at(row);
-		if (!layer.key.startsWith(QStringLiteral("portrait:"))) {
-			obs_sceneitem_set_visible(layer.item, false);
-			save();
-		} else {
-			const QString uuid = layer.key.mid(9);
-			QSettings settings(studioSettingsPath(), QSettings::IniFormat);
-			auto extras = QJsonDocument::fromJson(settings.value(extraKey(sceneName)).toByteArray()).array();
-			for (int i = extras.size() - 1; i >= 0; --i)
-				if (extras.at(i).toString() == uuid ||
-				    extras.at(i).toObject().value(QStringLiteral("uuid")).toString() == uuid)
-					extras.removeAt(i);
-			settings.setValue(extraKey(sceneName), QJsonDocument(extras).toJson(QJsonDocument::Compact));
-			obs_sceneitem_remove(layer.item);
-			layers.removeAt(row);
-			save();
-		}
+		const QString uuid = layer.key.mid(9);
+		QSettings settings(studioSettingsPath(), QSettings::IniFormat);
+		auto extras = QJsonDocument::fromJson(settings.value(extraKey(sceneName)).toByteArray()).array();
+		for (int i = extras.size() - 1; i >= 0; --i)
+			if (extras.at(i).toString() == uuid ||
+			    extras.at(i).toObject().value(QStringLiteral("uuid")).toString() == uuid)
+				extras.removeAt(i);
+		settings.setValue(extraKey(sceneName), QJsonDocument(extras).toJson(QJsonDocument::Compact));
+		obs_sceneitem_remove(layer.item);
+		layers.removeAt(row);
+		save();
 		refreshList();
 		updateSelection();
 	});
+	const auto addSource = [=](obs_source_t *source, bool separateProperties) {
+		if (!source) return;
+		obs_sceneitem_t *item = obs_scene_add(scene, source);
+		if (!item) return;
+		obs_transform_info info{};
+		info.pos = {120.f, 440.f};
+		info.bounds = {840.f, 1020.f};
+		info.scale = {1.f, 1.f};
+		info.alignment = OBS_ALIGN_TOP | OBS_ALIGN_LEFT;
+		info.bounds_alignment = OBS_ALIGN_CENTER;
+		info.bounds_type = OBS_BOUNDS_SCALE_INNER;
+		obs_sceneitem_set_info2(item, &info);
+		const QString uuid = QString::fromUtf8(obs_source_get_uuid(source));
+		const QString name = QString::fromUtf8(obs_source_get_name(source));
+		layers.push_back({QStringLiteral("portrait:%1").arg(uuid), name, item});
+		QSettings settings(studioSettingsPath(), QSettings::IniFormat);
+		auto extras = QJsonDocument::fromJson(settings.value(extraKey(sceneName)).toByteArray()).array();
+		if (separateProperties) {
+			OBSDataAutoRelease snapshot = obs_save_source(source);
+			const char *json = snapshot ? obs_data_get_json(snapshot) : nullptr;
+			extras.append(QJsonObject{{QStringLiteral("uuid"), uuid},
+				{QStringLiteral("source"), QJsonDocument::fromJson(QByteArray(json ? json : "{}")).object()}});
+		} else {
+			// The input is shared, but its scene-item geometry is independent.
+			extras.append(uuid);
+		}
+		settings.setValue(extraKey(sceneName), QJsonDocument(extras).toJson(QJsonDocument::Compact));
+		save();
+		refreshList();
+		list->setCurrentRow(layers.size() - 1);
+	};
 	QObject::connect(add, &QPushButton::clicked, side, [=] {
 		QMenu menu(side);
 		const std::array<std::pair<const char *, const char *>, 6> nativeTypes = {{
@@ -611,33 +759,12 @@ void PortraitCanvas::edit(QWidget *parent)
 					QUuid::createUuid().toString(QUuid::WithoutBraces).left(6));
 				OBSDataAutoRelease settings = obs_data_create();
 				obs_source_t *source = obs_source_create(type.first, name.toUtf8().constData(), settings, nullptr);
-				if (!source) return;
-				obs_sceneitem_t *item = obs_scene_add(scene, source);
-				if (!item) { obs_source_release(source); return; }
-				obs_transform_info info{};
-				info.pos = {100.f, 500.f};
-				info.bounds = {800.f, 500.f};
-				info.scale = {1.f, 1.f};
-				info.alignment = OBS_ALIGN_TOP | OBS_ALIGN_LEFT;
-				info.bounds_alignment = OBS_ALIGN_CENTER;
-				info.bounds_type = OBS_BOUNDS_SCALE_INNER;
-				obs_sceneitem_set_info2(item, &info);
-				const QString uuid = QString::fromUtf8(obs_source_get_uuid(source));
-				layers.push_back({QStringLiteral("portrait:%1").arg(uuid), name, item});
-				QSettings store(studioSettingsPath(), QSettings::IniFormat);
-				auto extras = QJsonDocument::fromJson(store.value(extraKey(sceneName)).toByteArray()).array();
-				OBSDataAutoRelease saved = obs_save_source(source);
-				const char *json = obs_data_get_json(saved);
-				extras.append(QJsonObject{{QStringLiteral("uuid"), uuid},
-					{QStringLiteral("source"), QJsonDocument::fromJson(QByteArray(json ? json : "{}")).object()}});
-				store.setValue(extraKey(sceneName), QJsonDocument(extras).toJson(QJsonDocument::Compact));
-				obs_source_release(source);
-				save();
-				refreshList();
-				list->setCurrentRow(layers.size() - 1);
+				if (source) { addSource(source, true); obs_source_release(source); }
 			});
 		}
 		menu.addSeparator();
+		auto *reuseMenu = menu.addMenu(QStringLiteral("Использовать источник OBS · общие свойства"));
+		auto *duplicateMenu = menu.addMenu(QStringLiteral("Создать независимую копию источника"));
 		struct Choice { QString uuid, name; };
 		QVector<Choice> choices;
 		obs_enum_sources([](void *context, obs_source_t *source) {
@@ -652,40 +779,34 @@ void PortraitCanvas::edit(QWidget *parent)
 			const bool exists = std::any_of(layers.cbegin(), layers.cend(), [&](const Layer &layer) {
 				return QString::fromUtf8(obs_source_get_uuid(obs_sceneitem_get_source(layer.item))) == candidate.uuid;
 			});
-			if (exists) continue;
-			auto *action = menu.addAction(candidate.name);
-			QObject::connect(action, &QAction::triggered, side, [=] {
-				OBSSourceAutoRelease source = obs_get_source_by_uuid(candidate.uuid.toUtf8().constData());
-				if (!source) return;
-				obs_sceneitem_t *item = obs_scene_add(scene, source);
-				if (!item) return;
-				obs_transform_info info{};
-				info.pos = {135.f, 480.f};
-				info.bounds = {810.f, 960.f};
-				info.scale = {1.f, 1.f};
-				info.alignment = OBS_ALIGN_TOP | OBS_ALIGN_LEFT;
-				info.bounds_alignment = OBS_ALIGN_CENTER;
-				info.bounds_type = OBS_BOUNDS_SCALE_INNER;
-				obs_sceneitem_set_info2(item, &info);
-				layers.push_back({QStringLiteral("portrait:%1").arg(candidate.uuid), candidate.name, item});
-				QSettings settings(studioSettingsPath(), QSettings::IniFormat);
-				auto extras = QJsonDocument::fromJson(settings.value(extraKey(sceneName)).toByteArray()).array();
-				extras.append(candidate.uuid);
-				settings.setValue(extraKey(sceneName), QJsonDocument(extras).toJson(QJsonDocument::Compact));
-				save();
-				refreshList();
-				list->setCurrentRow(layers.size() - 1);
+			if (!exists) {
+				auto *reuse = reuseMenu->addAction(candidate.name);
+				QObject::connect(reuse, &QAction::triggered, side, [=] {
+					OBSSourceAutoRelease source = obs_get_source_by_uuid(candidate.uuid.toUtf8().constData());
+					if (source) addSource(source, false);
+				});
+			}
+			auto *clone = duplicateMenu->addAction(candidate.name);
+			QObject::connect(clone, &QAction::triggered, side, [=] {
+				OBSSourceAutoRelease original = obs_get_source_by_uuid(candidate.uuid.toUtf8().constData());
+				if (!original) return;
+				const QString newName = QStringLiteral("9:16 · %1 · %2").arg(candidate.name,
+					QUuid::createUuid().toString(QUuid::WithoutBraces).left(6));
+				obs_source_t *copy = obs_source_duplicate(original, newName.toUtf8().constData(), false);
+				if (copy) { addSource(copy, true); obs_source_release(copy); }
 			});
 		}
-		if (menu.isEmpty()) menu.addAction(QStringLiteral("Нет других источников OBS"))->setEnabled(false);
+		if (reuseMenu->isEmpty()) reuseMenu->setEnabled(false);
+		if (duplicateMenu->isEmpty()) duplicateMenu->setEnabled(false);
 		menu.exec(add->mapToGlobal(QPoint(0, add->height())));
 	});
-	QObject::connect(close, &QPushButton::clicked, side, &QWidget::deleteLater);
+	QObject::connect(close, &QPushButton::clicked, side, [=] { save(); side->deleteLater(); });
 	QObject::connect(side, &QObject::destroyed, mainWindow, [this] { editing = false; });
 	auto *watchScene = new QTimer(side);
 	watchScene->setInterval(600);
 	QObject::connect(watchScene, &QTimer::timeout, side, [=] {
 		const QString before = signature;
+		if (saveDelay->isActive()) { saveDelay->stop(); save(); }
 		editing = false;
 		sync();
 		editing = true;
@@ -720,6 +841,16 @@ void PortraitCanvas::shutdown()
 	signature.clear();
 	sceneName.clear();
 	editing = false;
+}
+
+void PortraitCanvas::closeEditor()
+{
+	if (auto *window = static_cast<QMainWindow *>(obs_frontend_get_main_window())) {
+		if (auto *editor = window->findChild<QWidget *>(QStringLiteral("xinkxPortraitEditor"))) {
+			save();
+			editor->deleteLater();
+		}
+	}
 }
 
 } // namespace xinkx
