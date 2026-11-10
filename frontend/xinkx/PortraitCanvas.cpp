@@ -15,6 +15,7 @@
 #include <QCheckBox>
 #include <QCryptographicHash>
 #include <QHBoxLayout>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
