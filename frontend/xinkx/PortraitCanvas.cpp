@@ -374,7 +374,7 @@ void PortraitCanvas::edit(QWidget *parent)
 
 	for (const auto &layer : std::as_const(layers))
 		list->addItem(layer.name);
-	const auto loadCurrent = [=, this] {
+	const auto loadCurrent = [=] {
 		const int row = list->currentRow();
 		const bool good = row >= 0 && row < layers.size();
 		for (auto *field : {static_cast<QWidget *>(x), static_cast<QWidget *>(y),
@@ -391,7 +391,7 @@ void PortraitCanvas::edit(QWidget *parent)
 		fill->setChecked(info.bounds_type == OBS_BOUNDS_SCALE_OUTER);
 		visible->setChecked(obs_sceneitem_visible(layers.at(row).item));
 	};
-	const auto apply = [=, this] {
+	const auto apply = [=] {
 		const int row = list->currentRow();
 		if (row < 0 || row >= layers.size()) return;
 		const auto &layer = layers.at(row);
@@ -404,7 +404,7 @@ void PortraitCanvas::edit(QWidget *parent)
 		QObject::connect(spin, &QDoubleSpinBox::valueChanged, dock, apply);
 	QObject::connect(fill, &QCheckBox::toggled, dock, apply);
 	QObject::connect(visible, &QCheckBox::toggled, dock, apply);
-	preview->pressed = [=, this](float px, float py) {
+	preview->pressed = [=](float px, float py) {
 		vec3 position{};
 		vec3_set(&position, px, py, 0.f);
 		for (int row = int(layers.size()) - 1; row >= 0; --row) {
@@ -442,7 +442,7 @@ void PortraitCanvas::edit(QWidget *parent)
 	};
 	// OBS positions a scene item by its own alignment anchor, not necessarily
 	// by its top-left corner. Respect that anchor for both alignment commands.
-	const auto placeLayer = [=, this](double left, double top) {
+	const auto placeLayer = [=](double left, double top) {
 		const int row = list->currentRow();
 		if (row < 0 || row >= layers.size()) return;
 		obs_transform_info info{};
@@ -471,7 +471,7 @@ void PortraitCanvas::edit(QWidget *parent)
 	// 9:16 canvas and its layer list without closing the main OBS preview.
 	auto *watchScene = new QTimer(dock);
 	watchScene->setInterval(600);
-	QObject::connect(watchScene, &QTimer::timeout, dock, [=, this] {
+	QObject::connect(watchScene, &QTimer::timeout, dock, [=] {
 		const QString before = signature;
 		editing = false;
 		sync();

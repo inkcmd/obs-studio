@@ -244,7 +244,7 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 	// OBS is still loading the scene collection. Do not require "New profile".
 	auto *awaitScenes = new QTimer(group);
 	awaitScenes->setInterval(400);
-	auto *attempts = std::make_shared<int>(0);
+	auto attempts = std::make_shared<int>(0);
 	QObject::connect(awaitScenes, &QTimer::timeout, group, [=] {
 		if (scene->count() > 1 || ++*attempts > 75) { awaitScenes->stop(); return; }
 		load();

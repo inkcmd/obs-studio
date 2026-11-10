@@ -407,7 +407,7 @@ bool editAccount(QWidget *parent, StreamAccount &account, bool creating, const Q
 	};
 	QObject::connect(selectYoutubeStream, &QPushButton::clicked, &dialog, refreshStreams);
 	QObject::connect(createYoutubeStream, &QPushButton::clicked, &dialog,
-		[=, &pickerCredentials] {
+		[=, &pickerCredentials, &dialog] {
 			StreamAccount picker;
 			if (!pickerCredentials(&picker)) {
 				youtubeStreamStatus->setText(QStringLiteral("Сначала подключи OAuth YouTube."));
