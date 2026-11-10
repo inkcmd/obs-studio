@@ -26,13 +26,13 @@ assert.doesNotMatch(streams, /youtubeId->text\(\)/);
 assert.match(streams, /createYouTubeStream\(picker, title->text\(\)\.trimmed\(\)/);
 assert.match(streams, /applyStreamResolution/);
 
-// The portrait dock is adjacent to OBS's horizontal preview and offers
-// direct hit-testing and scene transforms without an independent dialog.
+// The portrait editor lives in OBS's central preview layout with visible
+// resize handles, mouse transforms and independent persistent source choices.
 assert.match(portrait, /xinkxPortraitEditor/);
-assert.match(portrait, /obs_sceneitem_get_box_transform\(item, &box\)/);
+assert.match(portrait, /obs_sceneitem_get_box_transform\(layers\.at\(row\)\.item, &box\)/);
 assert.match(portrait, /preview->pressed =/);
 assert.match(portrait, /preview->resized =/);
-assert.match(portrait, /Привязка к сетке 10 px/);
-assert.match(portrait, /На весь холст/);
+assert.match(portrait, /previewLayout->addWidget\(side, 1\)/);
+assert.match(portrait, /extraKey\(sceneName\)/);
 
 console.log('XINKX native source presets, inline YouTube streams and portrait editor contract OK');

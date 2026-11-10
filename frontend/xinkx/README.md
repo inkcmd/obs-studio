@@ -1,4 +1,11 @@
-# XINKX Studio — Stages 21–23 (0.15-dev; Windows runtime verification pending)
+# XINKX Studio — Native stream and portrait editor (Windows runtime verification pending)
+
+## Stages 27–31 — one YouTube channel and two adjacent canvases
+
+- In **Settings → Stream**, a YouTube OAuth owner and its linked 9:16 destination appear as **one channel row**. **Edit** opens a single dialog with **16:9 / 9:16 / both** modes, separate bitrates, encoder settings, dimensions and distinct YouTube live-stream selectors. `liveStreams.list` supplies each selected stream's RTMP(S) URL and key through the existing OAuth session; each stream retains its own libobs output. **Create stream** creates a YouTube ingest stream, not a scheduled broadcast. The user must still bind the chosen ingest stream to the intended YouTube broadcast/vertical live stream in YouTube Studio. Existing DPAPI-backed output settings remain readable. Deleting the channel removes both linked local outputs.
+- **9:16 холст** now opens beside the normal OBS canvas inside its preview layout, not in a floating coordinate dialog. Select sources on the canvas or in its layer list; drag to move and use eight corner/edge handles to resize. A checkable visibility list, 10px snap, source properties and an **Add source** menu are present. The menu can reuse sources from OBS or create independent XINKX source instances. Transforms and portrait-only source metadata are stored per OBS scene in `studio.ini`; their source snapshots survive an app restart. Only one portrait preview is opened at a time.
+- The portrait libobs mix and encoder stay independent from the horizontal output. A game/camera input reporting an initial `0×0` size no longer generates a permanently unusable `1×1` portrait transform. Nothing here updates the main OBS source transforms or the broadcast thumbnail.
+- **Verification required on Windows:** MSVC/Qt build, open/close side-by-side canvas during scene changes and application shutdown, drag all handles, add/remove/restart portrait-only sources, select/create two YouTube streams on a test channel, confirm two distinct actual ingest keys, and verify the intended events in YouTube Studio. Source-contract tests cannot substitute for this runtime test.
 
 ## Stages 21–23 — RTMP reliability, source catalog editing and native portrait canvas
 

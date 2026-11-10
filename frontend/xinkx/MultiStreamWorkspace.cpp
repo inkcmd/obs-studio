@@ -20,6 +20,7 @@
 #include <QHash>
 #include <QHBoxLayout>
 #include <QIcon>
+#include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
@@ -123,6 +124,269 @@ RtmpCatalog loadRtmpCatalog()
 	}
 	result.services.sort(Qt::CaseInsensitive);
 	return result;
+}
+
+// One YouTube channel owns the OAuth session. Its independent horizontal and
+// vertical encoders remain separate StreamAccount destinations internally, so
+// existing DPAPI settings and MultiStreamManager outputs need no migration.
+bool editYouTubeChannel(QWidget *parent, QVector<StreamAccount> &accounts, const QString &ownerId)
+{
+	const auto ownerIt = std::find_if(accounts.cbegin(), accounts.cend(), [&](const StreamAccount &item) {
+		return item.id == ownerId && item.platform == QStringLiteral("youtube");
+	});
+	if (ownerIt == accounts.cend()) return false;
+	StreamAccount horizontal = *ownerIt;
+	if (!horizontal.authorizationSourceId.isEmpty()) return false;
+	const auto secondIt = std::find_if(accounts.cbegin(), accounts.cend(), [&](const StreamAccount &item) {
+		return item.platform == QStringLiteral("youtube") && item.authorizationSourceId == ownerId;
+	});
+	StreamAccount vertical;
+	const bool hasVertical = secondIt != accounts.cend();
+	if (hasVertical) vertical = *secondIt;
+	else {
+		vertical.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+		vertical.platform = QStringLiteral("youtube");
+		vertical.label = QStringLiteral("Вертикальный · %1").arg(horizontal.displayName());
+		vertical.authorizationSourceId = horizontal.id;
+		vertical.providerId = horizontal.providerId;
+		vertical.providerName = horizontal.providerName;
+		vertical.oauth = horizontal.oauth;
+		vertical.enabled = false;
+		vertical.destination = horizontal.destination;
+		vertical.destination.ingestUrl.clear();
+		vertical.destination.streamKey.clear();
+		vertical.destination.fromOAuth = false;
+		vertical.destination.bitrate = 9000;
+		vertical.destination.width = 1080;
+		vertical.destination.height = 1920;
+		vertical.destination.portrait = true;
+	}
+	QDialog dialog(parent);
+	dialog.setWindowTitle(QStringLiteral("YouTube · %1").arg(horizontal.displayName()));
+	dialog.resize(690, 675);
+	auto *layout = new QVBoxLayout(&dialog);
+	auto *identity = new QLabel(QStringLiteral("Канал: %1 · один OAuth для обоих видеопотоков")
+		.arg(horizontal.providerName.isEmpty() ? horizontal.displayName() : horizontal.providerName), &dialog);
+	identity->setWordWrap(true);
+	layout->addWidget(identity);
+	auto *mode = new QComboBox(&dialog);
+	mode->setObjectName(QStringLiteral("xinkxYoutubeDualMode"));
+	mode->addItem(QStringLiteral("Только основной · 16:9"), 0);
+	mode->addItem(QStringLiteral("Только вертикальный · 9:16"), 1);
+	mode->addItem(QStringLiteral("Оба потока · 16:9 + 9:16"), 2);
+	mode->setCurrentIndex(vertical.enabled && horizontal.enabled ? 2 : vertical.enabled ? 1 : 0);
+	auto *modeForm = new QFormLayout();
+	modeForm->addRow(QStringLiteral("Режим трансляции"), mode);
+	layout->addLayout(modeForm);
+	struct Fields {
+		QGroupBox *box;
+		QComboBox *stream;
+		QPushButton *create;
+		QSpinBox *bitrate;
+		QSpinBox *width;
+		QSpinBox *height;
+		QComboBox *encoder;
+		QLabel *notice;
+	};
+	const auto makeFields = [&](const QString &title, const StreamAccount &account) {
+		Fields fields{};
+		fields.box = new QGroupBox(title, &dialog);
+		auto *form = new QFormLayout(fields.box);
+		fields.stream = new QComboBox(fields.box);
+		fields.stream->setMinimumContentsLength(20);
+		fields.stream->addItem(QStringLiteral("Выберите видеопоток YouTube"), QString{});
+		if (!account.youtubeStreamId.isEmpty()) {
+			fields.stream->addItem(QStringLiteral("Сохранённый · %1").arg(account.youtubeStreamId), account.youtubeStreamId);
+			fields.stream->setCurrentIndex(1);
+		}
+		form->addRow(QStringLiteral("Ключ YouTube"), fields.stream);
+		fields.create = new QPushButton(QStringLiteral("Создать видеопоток"), fields.box);
+		form->addRow(fields.create);
+		fields.bitrate = spin(fields.box, 500, 51000, account.destination.bitrate);
+		fields.bitrate->setSuffix(QStringLiteral(" kbps"));
+		form->addRow(QStringLiteral("Битрейт"), fields.bitrate);
+		fields.width = spin(fields.box, 320, 7680, account.destination.width);
+		fields.height = spin(fields.box, 240, 4320, account.destination.height);
+		form->addRow(QStringLiteral("Ширина"), fields.width);
+		form->addRow(QStringLiteral("Высота"), fields.height);
+		fields.encoder = new QComboBox(fields.box);
+		fields.encoder->addItem(QStringLiteral("Авто (NVENC / x264)"), QStringLiteral("auto"));
+		fields.encoder->addItem(QStringLiteral("NVENC H.264"), QStringLiteral("nvenc"));
+		fields.encoder->addItem(QStringLiteral("x264"), QStringLiteral("x264"));
+		fields.encoder->setCurrentIndex(std::max(0, fields.encoder->findData(account.destination.encoder)));
+		form->addRow(QStringLiteral("Кодировщик"), fields.encoder);
+		fields.notice = new QLabel(account.destination.ready() ? QStringLiteral("RTMP(S)-ключ сохранён")
+			: QStringLiteral("Ключ появится автоматически после загрузки списка"), fields.box);
+		fields.notice->setWordWrap(true);
+		form->addRow(fields.notice);
+		layout->addWidget(fields.box);
+		return fields;
+	};
+	const Fields main = makeFields(QStringLiteral("Основной · холст OBS 16:9"), horizontal);
+	const Fields tall = makeFields(QStringLiteral("Вертикальный · холст XINKX 9:16"), vertical);
+	const auto updateMode = [=] {
+		main.box->setEnabled(mode->currentIndex() != 1);
+		tall.box->setEnabled(mode->currentIndex() != 0);
+	};
+	QObject::connect(mode, &QComboBox::currentIndexChanged, &dialog, updateMode);
+	updateMode();
+	auto *status = new QLabel(QStringLiteral("Загрузка ключей через OAuth…"), &dialog);
+	status->setWordWrap(true);
+	status->setTextFormat(Qt::PlainText);
+	layout->addWidget(status);
+	auto *refresh = new QPushButton(QStringLiteral("Обновить видеопотоки и ключи"), &dialog);
+	layout->addWidget(refresh);
+	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+	layout->addWidget(buttons);
+	OAuthLogin auth(&dialog);
+	QHash<QString, QJsonObject> available;
+	const Fields *creatingFor = nullptr;
+	const auto setDestination = [&](StreamAccount &account, const Fields &fields) {
+		const QString id = fields.stream->currentData().toString();
+		if (account.youtubeStreamId != id) {
+			account.destination.streamKey.clear();
+			account.destination.ingestUrl.clear();
+			account.destination.fromOAuth = false;
+		}
+		account.youtubeStreamId = id;
+		const auto ingest = available.value(id).value(QStringLiteral("cdn")).toObject()
+			.value(QStringLiteral("ingestionInfo")).toObject();
+		const QString key = ingest.value(QStringLiteral("streamName")).toString();
+		const QString url = ingest.value(QStringLiteral("rtmpsIngestionAddress")).toString(
+			ingest.value(QStringLiteral("ingestionAddress")).toString());
+		if (!key.isEmpty() && validIngestUrl(url)) {
+			account.destination.streamKey = key;
+			account.destination.ingestUrl = url;
+			account.destination.fromOAuth = true;
+		}
+		account.destination.width = fields.width->value();
+		account.destination.height = fields.height->value();
+		account.destination.bitrate = fields.bitrate->value();
+		account.destination.encoder = fields.encoder->currentData().toString();
+		account.destination.portrait = &fields == &tall;
+	};
+	const auto renderKeys = [&] {
+		for (const auto &entry : {std::pair{&main, &horizontal}, std::pair{&tall, &vertical}}) {
+			const QString selected = entry.first->stream->currentData().toString();
+			const auto ingestion = available.value(selected).value(QStringLiteral("cdn")).toObject()
+				.value(QStringLiteral("ingestionInfo")).toObject();
+			const bool resolved = !ingestion.value(QStringLiteral("streamName")).toString().isEmpty();
+			entry.first->notice->setText(resolved ? QStringLiteral("RTMP(S)-адрес и ключ получены автоматически")
+				: entry.second->youtubeStreamId == selected && entry.second->destination.ready()
+				? QStringLiteral("Сохранённый RTMP(S)-ключ") : QStringLiteral("Ключ пока недоступен"));
+		}
+	};
+	QObject::connect(&auth, &OAuthLogin::youtubeStreamsLoaded, &dialog,
+		[&](const StreamAccount &updated, const QJsonArray &streams) {
+			horizontal.oauth = updated.oauth;
+			vertical.oauth = updated.oauth;
+			available.clear();
+			for (const auto &item : streams) {
+				const QJsonObject stream = item.toObject();
+				const QString id = stream.value(QStringLiteral("id")).toString();
+				if (!id.isEmpty()) available.insert(id, stream);
+			}
+			for (const auto &entry : {std::pair{&main, &horizontal}, std::pair{&tall, &vertical}}) {
+				const QSignalBlocker blocked(entry.first->stream);
+				const QString old = entry.first->stream->currentData().toString();
+				entry.first->stream->clear();
+				entry.first->stream->addItem(QStringLiteral("Выберите видеопоток"), QString{});
+				for (auto it = available.cbegin(); it != available.cend(); ++it) {
+					const QString title = it.value().value(QStringLiteral("snippet")).toObject()
+						.value(QStringLiteral("title")).toString(it.key());
+					entry.first->stream->addItem(title, it.key());
+				}
+				int index = entry.first->stream->findData(old);
+				if (index < 0 && !old.isEmpty()) {
+					entry.first->stream->addItem(QStringLiteral("Сохранённый · %1").arg(old), old);
+					index = entry.first->stream->count() - 1;
+				}
+				entry.first->stream->setCurrentIndex(std::max(0, index));
+			}
+			status->setText(QStringLiteral("Доступных видеопотоков: %1").arg(streams.size()));
+			refresh->setEnabled(true);
+			renderKeys();
+		});
+	QObject::connect(&auth, &OAuthLogin::failed, &dialog, [=](const QString &, const QString &message) {
+		status->setText(message);
+		refresh->setEnabled(true);
+	});
+	QObject::connect(&auth, &OAuthLogin::youtubeStreamCreated, &dialog,
+		[&](const StreamAccount &updated, const QJsonObject &stream) {
+			horizontal.oauth = updated.oauth;
+			vertical.oauth = updated.oauth;
+			const QString id = stream.value(QStringLiteral("id")).toString();
+			if (!id.isEmpty() && creatingFor) {
+				available.insert(id, stream);
+				const QString title = stream.value(QStringLiteral("snippet")).toObject()
+					.value(QStringLiteral("title")).toString(id);
+				creatingFor->stream->addItem(title, id);
+				creatingFor->stream->setCurrentIndex(creatingFor->stream->findData(id));
+				status->setText(QStringLiteral("Видеопоток создан. Проверь привязку вертикального ключа в YouTube Studio."));
+			}
+			creatingFor = nullptr;
+			refresh->setEnabled(true);
+			renderKeys();
+		});
+	const auto refreshKeys = [&] {
+		if (auth.isBusy()) return;
+		if (horizontal.oauth.accessToken.isEmpty() && horizontal.oauth.refreshToken.isEmpty()) {
+			status->setText(QStringLiteral("Подключи OAuth YouTube в настройках трансляции."));
+			return;
+		}
+		refresh->setEnabled(false);
+		status->setText(QStringLiteral("Загрузка видеопотоков…"));
+		auth.listYouTubeStreams(horizontal);
+	};
+	QObject::connect(refresh, &QPushButton::clicked, &dialog, refreshKeys);
+	const auto createStream = [&](const Fields &fields, bool portrait) {
+		if (auth.isBusy()) return;
+		if (horizontal.oauth.accessToken.isEmpty() && horizontal.oauth.refreshToken.isEmpty()) {
+			status->setText(QStringLiteral("Сначала подключи OAuth YouTube."));
+			return;
+		}
+		bool accepted = false;
+		const QString name = QInputDialog::getText(&dialog, QStringLiteral("Новый видеопоток YouTube"),
+			QStringLiteral("Название"), QLineEdit::Normal,
+			portrait ? QStringLiteral("XINKX Vertical") : QStringLiteral("XINKX Horizontal"), &accepted).trimmed();
+		if (!accepted || name.isEmpty()) return;
+		creatingFor = &fields;
+		refresh->setEnabled(false);
+		status->setText(QStringLiteral("Создание видеопотока…"));
+		const int resolution = portrait ? fields.width->value() : fields.height->value();
+		const QString format = resolution >= 2160 ? QStringLiteral("2160p") :
+			resolution >= 1440 ? QStringLiteral("1440p") :
+			resolution >= 1080 ? QStringLiteral("1080p") : QStringLiteral("720p");
+		auth.createYouTubeStream(horizontal, name, format, QStringLiteral("60fps"));
+	};
+	QObject::connect(main.create, &QPushButton::clicked, &dialog, [&] { createStream(main, false); });
+	QObject::connect(tall.create, &QPushButton::clicked, &dialog, [&] { createStream(tall, true); });
+	for (auto *field : {main.stream, tall.stream})
+		QObject::connect(field, &QComboBox::currentIndexChanged, &dialog, renderKeys);
+	QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+	QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+		setDestination(horizontal, main);
+		setDestination(vertical, tall);
+		horizontal.enabled = mode->currentIndex() != 1;
+		vertical.enabled = mode->currentIndex() != 0;
+		if ((horizontal.enabled && !horizontal.destination.ready()) ||
+		    (vertical.enabled && !vertical.destination.ready()) ||
+		    (horizontal.enabled && vertical.enabled &&
+		     horizontal.destination.streamKey == vertical.destination.streamKey)) {
+			QMessageBox::warning(&dialog, QStringLiteral("YouTube"),
+				QStringLiteral("Выбери два разных видеопотока с доступными ключами и корректными параметрами."));
+			return;
+		}
+		dialog.accept();
+	});
+	QTimer::singleShot(0, &dialog, refreshKeys);
+	if (dialog.exec() != QDialog::Accepted) return false;
+	for (auto &item : accounts) {
+		if (item.id == horizontal.id) item = horizontal;
+		if (hasVertical && item.id == vertical.id) item = vertical;
+	}
+	if (!hasVertical) accounts.push_back(vertical);
+	return true;
 }
 
 bool editAccount(QWidget *parent, StreamAccount &account, bool creating, const QVector<StreamAccount> &available)
@@ -550,6 +814,8 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 	auto accounts = std::make_shared<QVector<StreamAccount>>(loadStreamAccounts());
 	auto dirty = std::make_shared<bool>(false);
 	auto notices = std::make_shared<QHash<QString, QString>>();
+	// Remember the chosen YouTube output mode while the group checkbox is off.
+	auto youtubeMode = std::make_shared<QHash<QString, QPair<bool, bool>>>();
 	auto *group = new QGroupBox(u"XINKX · Выходы трансляции"_s, streamPage);
 	group->setObjectName(u"xinkxStreamAccounts"_s);
 	auto *layout = new QVBoxLayout(group);
@@ -619,9 +885,17 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 		tree->blockSignals(true);
 		tree->clear();
 		for (const auto &account : *accounts) {
+			// A secondary YouTube output is a destination of the same channel,
+			// not a second login or a second row in the account list.
+			if (account.platform == u"youtube"_s && !account.authorizationSourceId.isEmpty()) continue;
 			auto *item = new QTreeWidgetItem(tree);
 			item->setData(1, Qt::UserRole, account.id);
-			item->setCheckState(0, account.enabled ? Qt::Checked : Qt::Unchecked);
+			const auto sibling = std::find_if(accounts->cbegin(), accounts->cend(), [&](const StreamAccount &other) {
+				return other.platform == u"youtube"_s && other.authorizationSourceId == account.id;
+			});
+			const bool hasSecondary = sibling != accounts->cend();
+			const bool active = account.enabled || (hasSecondary && sibling->enabled);
+			item->setCheckState(0, active ? Qt::Checked : Qt::Unchecked);
 			const QString provider = account.platform == u"obs_service"_s
 						 ? account.destination.serviceName : platformTitle(account.platform);
 			item->setText(1, u"%1 · %2"_s.arg(provider, account.displayName()));
@@ -629,17 +903,22 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 			const auto &dest = account.destination;
 			const bool connected = !account.oauth.requiresAuthorization() && !account.providerId.isEmpty();
 			const bool ready = dest.ready() && (!dest.fromOAuth || !account.oauth.accessToken.isEmpty());
+			const bool secondaryReady = hasSecondary && sibling->destination.ready();
 			const bool expired = dest.fromOAuth && account.oauth.requiresAuthorization();
 			const bool issue = notices->contains(account.id);
-			const auto state = !account.enabled ? u"Отключён"_s
+			const auto state = !active ? u"Отключён"_s
 					   : issue ? u"Ошибка / требуется действие"_s
 					   : expired ? u"OAuth истёк · обнови сессию"_s
+					   : hasSecondary ? u"%1 · основной %2 / вертикальный %3"_s
+						.arg(account.enabled && sibling->enabled ? u"Оба"_s : account.enabled ? u"16:9"_s : u"9:16"_s,
+							ready ? u"готов"_s : u"нет ключа"_s,
+							secondaryReady ? u"готов"_s : u"нет ключа"_s)
 					   : ready ? (connected ? u"Подключён · готов"_s : u"Готов · RTMP"_s)
 					   : connected ? u"Подключён · нужен ключ"_s
 					   : platformApi(account.platform) ? u"Требуется авторизация"_s : u"Нужны сервер и ключ"_s;
 			item->setText(2, state);
 			item->setToolTip(2, notices->value(account.id));
-			if (account.enabled && (issue || expired || connected || ready)) {
+			if (active && (issue || expired || connected || ready || secondaryReady)) {
 				item->setForeground(2, QBrush(QColor(issue || expired ? "#efa064" : "#58dea2")));
 			}
 			if (account.id == selected) {
@@ -678,7 +957,20 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 		if (column == 0) {
 			for (auto &account : *accounts) {
 				if (account.id == item->data(1, Qt::UserRole).toString()) {
-					account.enabled = item->checkState(0) == Qt::Checked;
+					const bool on = item->checkState(0) == Qt::Checked;
+					auto linked = std::find_if(accounts->begin(), accounts->end(), [&](const StreamAccount &entry) {
+						return entry.platform == u"youtube"_s && entry.authorizationSourceId == account.id;
+					});
+					if (linked == accounts->end()) account.enabled = on;
+					else if (!on) {
+						if (account.enabled || linked->enabled)
+							youtubeMode->insert(account.id, {account.enabled, linked->enabled});
+						account.enabled = linked->enabled = false;
+					} else {
+						const auto previous = youtubeMode->value(account.id, {true, false});
+						account.enabled = previous.first;
+						linked->enabled = previous.second;
+					}
 					markChanged();
 					rebuild();
 					break;
@@ -696,8 +988,14 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 		}
 	});
 	QObject::connect(edit, &QPushButton::clicked, group, [=] {
-		if (auto *account = current(); account && editAccount(group, *account, false, *accounts)) {
-			notices->remove(account->id);
+		const auto *account = current();
+		if (!account) return;
+		const QString id = account->id;
+		const bool updated = account->platform == u"youtube"_s && account->authorizationSourceId.isEmpty()
+			? editYouTubeChannel(group, *accounts, id)
+			: editAccount(group, *current(), false, *accounts);
+		if (updated) {
+			notices->remove(id);
 			markChanged();
 			rebuild();
 		}
@@ -707,19 +1005,20 @@ std::function<bool()> installMultiStreamSettings(QWidget *streamPage, QWidget *n
 	});
 	QObject::connect(remove, &QPushButton::clicked, group, [=] {
 		const auto *account = current();
-		if (account && std::any_of(accounts->cbegin(), accounts->cend(), [=](const StreamAccount &item) {
-			return item.authorizationSourceId == account->id;
-		})) {
-			QMessageBox::warning(group, QStringLiteral("Аккаунт YouTube"),
-				QStringLiteral("Сначала удали связанные дополнительные выходы этого аккаунта."));
-			return;
-		}
-		if (!account || QMessageBox::question(group, u"Удалить аккаунт"_s, u"Удалить локальные данные аккаунта?"_s) !=
+		if (!account) return;
+		const auto id = account->id;
+		const bool linked = std::any_of(accounts->cbegin(), accounts->cend(), [&](const StreamAccount &item) {
+			return item.authorizationSourceId == id;
+		});
+		if (QMessageBox::question(group, u"Удалить аккаунт"_s,
+			linked ? u"Удалить канал и оба связанных выхода вместе с локальными настройками?"_s
+			       : u"Удалить локальные данные аккаунта?"_s) !=
 					QMessageBox::Yes) {
 			return;
 		}
-		const auto id = account->id;
-		accounts->removeIf([&](const auto &entry) { return entry.id == id; });
+		accounts->removeIf([&](const auto &entry) {
+			return entry.id == id || entry.authorizationSourceId == id;
+		});
 		notices->remove(id);
 		markChanged();
 		rebuild();

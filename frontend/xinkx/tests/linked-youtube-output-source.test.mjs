@@ -15,7 +15,8 @@ assert.match(store, /alias \? QString\{\} : account\.oauth\.accessToken/);
 assert.match(settings, /xinkxSharedAuthorization/);
 assert.match(settings, /authorization->currentData\(\)\.toString\(\)/);
 assert.match(settings, /account\.authorizationSourceId = linked/);
-assert.match(settings, /authorizationSourceId == account->id/);
+assert.match(settings, /authorizationSourceId == id/);
+assert.match(settings, /entry\.id == id \|\| entry\.authorizationSourceId == id/);
 assert.match(gateway, /credentialOwner = account\.authorizationSourceId/);
 assert.match(gateway, /it\.value\(\)\.authorizationSourceId == credentialOwner/);
 
