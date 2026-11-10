@@ -19,6 +19,7 @@ class OBSBasic;
 namespace xinkx {
 
 class NativeWebSocket;
+class YouTubeGrpcStream;
 
 struct ChatLine {
 	QString platform;
@@ -81,7 +82,9 @@ private:
 		QString nextPage;
 		bool baseline = false;
 		bool pending = false;
+		bool forceTokenRefresh = false;
 		qint64 nextAt = 0;
+		int attempts = 0;
 	};
 	struct KickState {
 		QString roomId;
@@ -100,7 +103,14 @@ private:
 	QTimer tick;
 	QHash<QString, StreamAccount> known;
 	QHash<QString, YouTubeState> youtube;
+	QHash<QString, YouTubeGrpcStream *> youtubeStreams;
 	QHash<QString, NativeWebSocket *> twitch;
+	QHash<QString, NativeWebSocket *> twitchReconnect;
+	QHash<QString, quint64> youtubeGeneration;
+	QHash<QString, quint64> twitchGeneration;
+	QHash<QString, quint64> twitchReconnectGeneration;
+	QHash<QString, quint64> kickGeneration;
+	quint64 nextSocketGeneration = 0;
 	QHash<QString, QSet<QString>> twitchScopes;
 	QSet<QString> twitchPermissionChecks;
 	QSet<QString> twitchOptionalWarnings;
@@ -120,12 +130,13 @@ private:
 
 	void schedule();
 	void pollYouTube(const QString &id);
-	void pollYouTubeMessages(const QString &id);
+	void startYouTubeStream(const QString &id);
 	void handleYouTubePage(const QString &id, const QJsonObject &page);
 	void subscribeTwitch(const QString &id, const QString &sessionId);
 	void handleTwitchFrame(const QString &id, const QByteArray &frame);
 	void startTwitch(const QString &id);
 	void openTwitchSocket(const QString &id);
+	void reconnectTwitchSocket(const QString &id, const QUrl &url);
 	void startKick(const QString &id);
 	void kickResolveRoom(const QString &id);
 	void kickDiscover(const QString &id);

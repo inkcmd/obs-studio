@@ -5,6 +5,7 @@
 #include "PlatformApi.hpp"
 #include "PresentationSettings.hpp"
 #include "StudioDiagnostics.hpp"
+#include "YouTubeGrpcStream.hpp"
 
 #include <widgets/OBSBasic.hpp>
 #include <utility/RemoteTextThread.hpp>
@@ -92,6 +93,10 @@ ChatGateway::~ChatGateway()
 {
 	for (auto *socket : twitch) delete socket;
 	twitch.clear();
+	for (auto *socket : twitchReconnect) delete socket;
+	twitchReconnect.clear();
+	for (auto *stream : youtubeStreams) delete stream;
+	youtubeStreams.clear();
 	for (auto *socket : kickSockets) delete socket;
 	kickSockets.clear();
 }
@@ -180,10 +185,26 @@ void ChatGateway::reloadAccounts()
 			it = twitch.erase(it);
 		} else ++it;
 	}
+	for (auto it = twitchReconnect.begin(); it != twitchReconnect.end();) {
+		const auto account = updated.value(it.key());
+		if (account.id.isEmpty() || account.providerId != known.value(it.key()).providerId ||
+		    account.oauth.accessToken != known.value(it.key()).oauth.accessToken) {
+			delete it.value();
+			it = twitchReconnect.erase(it);
+		} else ++it;
+	}
 	for (auto it = youtube.begin(); it != youtube.end();) {
 		if (!updated.contains(it.key()) ||
-		    updated[it.key()].providerId != known.value(it.key()).providerId) it = youtube.erase(it);
-		else ++it;
+		    updated[it.key()].providerId != known.value(it.key()).providerId) {
+			delete youtubeStreams.take(it.key());
+			it = youtube.erase(it);
+		} else {
+			// The broadcast did not change: keep its continuation token and
+			// reauthenticate the stream with the newly saved OAuth account.
+			if (updated[it.key()].oauth.accessToken != known.value(it.key()).oauth.accessToken)
+				delete youtubeStreams.take(it.key());
+			++it;
+		}
 	}
 	for (auto it = kickSockets.begin(); it != kickSockets.end();) {
 		if (!updated.contains(it.key()) ||
@@ -203,7 +224,10 @@ void ChatGateway::reloadAccounts()
 		else ++it;
 	}
 	for (auto it = youtube.begin(); it != youtube.end();) {
-		if (canonicalChatId(it.key()) != it.key()) it = youtube.erase(it);
+		if (canonicalChatId(it.key()) != it.key()) {
+			delete youtubeStreams.take(it.key());
+			it = youtube.erase(it);
+		}
 		else ++it;
 	}
 	for (const auto &account : updated) {
@@ -232,7 +256,7 @@ void ChatGateway::schedule()
 	if (now >= nextReloadAt) reloadAccounts();
 	for (auto it = youtube.begin(); it != youtube.end(); ++it) {
 		if (now < youtubeQuotaResumeAt) break;
-		if (!it->pending && now >= it->nextAt) pollYouTube(it.key());
+		if (!it->pending && !youtubeStreams.contains(it.key()) && now >= it->nextAt) pollYouTube(it.key());
 	}
 	for (const auto &account : known) {
 		if (account.platform == QStringLiteral("twitch") && !twitch.contains(account.id) &&
@@ -248,7 +272,7 @@ void ChatGateway::schedule()
 	for (auto it = kick.begin(); it != kick.end(); ++it) {
 		if (!it->pending && !kickSockets.contains(it.key()) && now >= it->nextAt) startKick(it.key());
 		if (kickSockets.contains(it.key()) && it->subscribed && !it->pending &&
-		    now >= it->tokenExpiresAt - 90000) {
+		    now >= it->tokenExpiresAt - 90000 && now >= it->nextAt) {
 			const auto id = it.key();
 			kickGuestToken(id, [this, id](const QString &token) {
 				if (!token.isEmpty() && kickSockets.contains(id)) {
@@ -846,15 +870,15 @@ void ChatGateway::createYouTubeBroadcast(const QString &id, const QString &title
 
 void ChatGateway::pollYouTube(const QString &id)
 {
-	if (!known.contains(id)) return;
+	if (!known.contains(id) || youtubeStreams.contains(id)) return;
 	auto &state = youtube[id];
 	if (state.pending) return;
-	state.pending = true;
-	state.nextAt = QDateTime::currentMSecsSinceEpoch() + 60000;
 	if (!state.chatId.isEmpty()) {
-		pollYouTubeMessages(id);
+		startYouTubeStream(id);
 		return;
 	}
+	state.pending = true;
+	state.nextAt = QDateTime::currentMSecsSinceEpoch() + 60000;
 	status(id, QStringLiteral("YouTube: ищем активную трансляцию"));
 	const QString url = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts"),
 		{{QStringLiteral("part"), QStringLiteral("snippet,status")},
@@ -882,54 +906,81 @@ void ChatGateway::pollYouTube(const QString &id)
 		youtube[id].chatId = chatId;
 		youtube[id].nextPage.clear();
 		youtube[id].baseline = false;
-		pollYouTubeMessages(id);
+		youtube[id].pending = false;
+		youtube[id].attempts = 0;
+		startYouTubeStream(id);
 	});
 }
 
-void ChatGateway::pollYouTubeMessages(const QString &id)
+void ChatGateway::startYouTubeStream(const QString &id)
 {
-	if (!youtube.contains(id)) return;
-	const auto state = youtube.value(id);
-	QList<QPair<QString, QString>> parameters{
-		{QStringLiteral("liveChatId"), state.chatId},
-		{QStringLiteral("part"), QStringLiteral("id,snippet,authorDetails")},
-		{QStringLiteral("maxResults"), QStringLiteral("200")},
-	};
-	if (!state.nextPage.isEmpty()) parameters.append({QStringLiteral("pageToken"), state.nextPage});
-	const auto url = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveChat/messages"), parameters);
-	authorized(id, url, {}, [this, id](const HttpResult &result) {
+	if (!youtube.contains(id) || youtube[id].pending || youtubeStreams.contains(id)) return;
+	auto &state = youtube[id];
+	if (state.chatId.isEmpty()) return;
+	state.pending = true;
+	const QString chatId = state.chatId;
+	const QString pageToken = state.nextPage;
+	const bool refreshToken = state.forceTokenRefresh;
+	state.forceTokenRefresh = false;
+	tokenFor(id, [this, id, chatId, pageToken](const QString &token) {
 		if (!youtube.contains(id)) return;
-		auto &state = youtube[id];
-		state.pending = false;
-		if (!result.ok) {
-			state.nextAt = std::max(QDateTime::currentMSecsSinceEpoch() + 60000, youtubeQuotaResumeAt);
-			status(id, QStringLiteral("YouTube чат: ") + result.error);
-			// A daily quota error is not a closed chat. Keep its ID and page
-			// token so the channel can resume when Google resets its quota.
-			if (result.status == 404 || (result.status == 403 &&
-			    QDateTime::currentMSecsSinceEpoch() >= youtubeQuotaResumeAt)) {
-				state.chatId.clear();
-				state.nextPage.clear();
-				state.baseline = false;
-			}
+		youtube[id].pending = false;
+		if (token.isEmpty()) {
+			youtube[id].nextAt = QDateTime::currentMSecsSinceEpoch() + 60000;
+			status(id, QStringLiteral("YouTube: OAuth недоступен для потокового чата"));
 			return;
 		}
-		if (state.baseline) handleYouTubePage(id, result.json);
-		else state.baseline = true; // Do not flood the scene with pre-existing chat history.
-		state.nextPage = result.json.value(QStringLiteral("nextPageToken")).toString(state.nextPage);
-		if (result.json.contains(QStringLiteral("offlineAt"))) {
-			state.chatId.clear(); state.nextPage.clear(); state.baseline = false;
-			state.nextAt = QDateTime::currentMSecsSinceEpoch() + 60000;
-			status(id, QStringLiteral("YouTube: эфир завершён"));
-			return;
-		}
-		const int interval = result.json.value(QStringLiteral("pollingIntervalMillis")).toInt(10000);
-		// 5 quota units per poll; the API-reported 5 s interval would exhaust
-		// the usual daily allowance even on a modest-length live broadcast.
-		const int delay = std::clamp(interval, 20000, 120000);
-		state.nextAt = QDateTime::currentMSecsSinceEpoch() + delay;
-		status(id, QStringLiteral("YouTube: чат · обновление %1 с").arg(delay / 1000));
-	});
+		if (youtubeStreams.contains(id) || youtube[id].chatId != chatId) return;
+		status(id, QStringLiteral("YouTube: подключаем потоковый чат"));
+		const quint64 generation = ++nextSocketGeneration;
+		youtubeGeneration[id] = generation;
+		auto identity = std::make_shared<YouTubeGrpcStream *>(nullptr);
+		*identity = new YouTubeGrpcStream(this, token, chatId, pageToken,
+			[this, id, chatId, identity, generation](const QJsonObject &page) {
+				if (youtubeGeneration.value(id) != generation || youtubeStreams.value(id) != *identity ||
+				    !youtube.contains(id) ||
+				    youtube[id].chatId != chatId) return;
+				auto &state = youtube[id];
+				// Discard only the initial history on a genuinely new chat. After a
+				// reconnect, the saved page token resumes without message loss.
+				if (state.baseline) handleYouTubePage(id, page);
+				else {
+					state.baseline = true;
+					status(id, QStringLiteral("YouTube: потоковый чат подключён"));
+				}
+				state.nextPage = page.value(QStringLiteral("nextPageToken")).toString(state.nextPage);
+				state.attempts = 0;
+				if (page.contains(QStringLiteral("offlineAt"))) {
+					delete youtubeStreams.take(id);
+					state.chatId.clear(); state.nextPage.clear(); state.baseline = false;
+					state.nextAt = QDateTime::currentMSecsSinceEpoch() + 60000;
+					status(id, QStringLiteral("YouTube: эфир завершён"));
+				}
+			},
+			[this, id, chatId, identity, generation](int grpcStatus, const QString &reason) {
+				if (youtubeGeneration.value(id) != generation || youtubeStreams.value(id) != *identity) return;
+				delete youtubeStreams.take(id);
+				if (!youtube.contains(id) || youtube[id].chatId != chatId) return;
+				auto &state = youtube[id];
+				state.attempts = std::min(state.attempts + 1, 6);
+				const int delay = std::min(120000, 2000 * (1 << state.attempts));
+				state.nextAt = QDateTime::currentMSecsSinceEpoch() + delay;
+				if (grpcStatus == 5 || grpcStatus == 9) {
+					state.chatId.clear(); state.nextPage.clear(); state.baseline = false;
+					state.nextAt = QDateTime::currentMSecsSinceEpoch() + 60000;
+				} else if (grpcStatus == 16) {
+					// Refresh revoked OAuth before the next gRPC connection.
+					state.forceTokenRefresh = true;
+				} else if (grpcStatus == 8 &&
+					(reason.contains(QStringLiteral("quota"), Qt::CaseInsensitive) ||
+					 reason.contains(QStringLiteral("exceeded"), Qt::CaseInsensitive))) {
+					youtubeQuotaResumeAt = nextYoutubeQuotaReset();
+					state.nextAt = youtubeQuotaResumeAt;
+				}
+				status(id, QStringLiteral("YouTube streamList: %1 · переподключение").arg(reason));
+			});
+		youtubeStreams[id] = *identity;
+	}, refreshToken);
 }
 
 void ChatGateway::handleYouTubePage(const QString &id, const QJsonObject &page)
@@ -939,7 +990,10 @@ void ChatGateway::handleYouTubePage(const QString &id, const QJsonObject &page)
 		const auto snippet = item.value(QStringLiteral("snippet")).toObject();
 		const auto type = snippet.value(QStringLiteral("type")).toString();
 		if (type != QStringLiteral("textMessageEvent") && type != QStringLiteral("superChatEvent") &&
-		    type != QStringLiteral("superStickerEvent")) continue;
+		    type != QStringLiteral("superStickerEvent") && type != QStringLiteral("newSponsorEvent") &&
+		    type != QStringLiteral("memberMilestoneChatEvent") &&
+		    type != QStringLiteral("membershipGiftingEvent") &&
+		    type != QStringLiteral("giftMembershipReceivedEvent")) continue;
 		ChatLine line;
 		line.platform = QStringLiteral("youtube");
 		line.accountId = id;
@@ -949,13 +1003,13 @@ void ChatGateway::handleYouTubePage(const QString &id, const QJsonObject &page)
 		line.text = snippet.value(QStringLiteral("displayMessage")).toString(
 				snippet.value(QStringLiteral("textMessageDetails")).toObject()
 				.value(QStringLiteral("messageText")).toString());
-		if (type != QStringLiteral("textMessageEvent")) {
+		if (type == QStringLiteral("superChatEvent") || type == QStringLiteral("superStickerEvent")) {
 			line.type = QStringLiteral("donation");
 			const auto details = snippet.value(type == QStringLiteral("superChatEvent")
 					? QStringLiteral("superChatDetails") : QStringLiteral("superStickerDetails")).toObject();
 			line.amount = details.value(QStringLiteral("amountDisplayString")).toString();
 			line.text = details.value(QStringLiteral("userComment")).toString(line.text);
-		}
+		} else if (type != QStringLiteral("textMessageEvent")) line.type = QStringLiteral("sub");
 		dispatch(std::move(line));
 	}
 }
@@ -981,7 +1035,11 @@ void ChatGateway::startTwitch(const QString &id)
 	if (twitchPermissionChecks.contains(id)) return;
 	twitchPermissionChecks.insert(id);
 	tokenFor(id, [this, id](const QString &token) {
-		if (token.isEmpty()) { twitchPermissionChecks.remove(id); return; }
+		if (token.isEmpty()) {
+			twitchPermissionChecks.remove(id);
+			nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() + 300000;
+			return;
+		}
 		request(id, QStringLiteral("https://id.twitch.tv/oauth2/validate"), {}, {},
 			[this, id, token](const HttpResult &result) {
 				twitchPermissionChecks.remove(id);
@@ -1022,15 +1080,69 @@ void ChatGateway::startTwitch(const QString &id)
 
 void ChatGateway::openTwitchSocket(const QString &id)
 {
-	if (twitch.contains(id)) return;
+	if (twitch.contains(id) || twitchReconnect.contains(id)) return;
 	status(id, QStringLiteral("Twitch: подключаем EventSub"));
-	twitch[id] = new NativeWebSocket(this, QUrl(QStringLiteral("wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30")),
-		[this, id](const QByteArray &frame) { handleTwitchFrame(id, frame); },
-		[this, id](const QString &reason) {
+	const quint64 generation = ++nextSocketGeneration;
+	twitchGeneration[id] = generation;
+	auto identity = std::make_shared<NativeWebSocket *>(nullptr);
+	*identity = new NativeWebSocket(this, QUrl(QStringLiteral("wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30")),
+		[this, id, identity, generation](const QByteArray &frame) {
+			if (twitchGeneration.value(id) == generation && twitch.value(id) == *identity)
+				handleTwitchFrame(id, frame);
+		},
+		[this, id, identity, generation](const QString &reason) {
+			if (twitchGeneration.value(id) != generation || twitch.value(id) != *identity) return;
 			status(id, QStringLiteral("Twitch: ") + reason);
 			nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() + 15000;
 			delete twitch.take(id);
 		});
+	twitch[id] = *identity;
+}
+
+void ChatGateway::reconnectTwitchSocket(const QString &id, const QUrl &url)
+{
+	if (!twitch.contains(id) || twitchReconnect.contains(id)) return;
+	// Twitch's reconnect URL transfers existing EventSub subscriptions. The
+	// original socket must stay alive until the replacement says welcome.
+	if (url.scheme() != QStringLiteral("wss") || url.host() != QStringLiteral("eventsub.wss.twitch.tv") ||
+	    url.path() != QStringLiteral("/ws") || !url.userInfo().isEmpty() ||
+	    (url.port(-1) != -1 && url.port(-1) != 443)) {
+		status(id, QStringLiteral("Twitch: недопустимый адрес переподключения EventSub"));
+		return;
+	}
+	status(id, QStringLiteral("Twitch: переносим EventSub на новое соединение"));
+	const quint64 generation = ++nextSocketGeneration;
+	twitchReconnectGeneration[id] = generation;
+	auto identity = std::make_shared<NativeWebSocket *>(nullptr);
+	*identity = new NativeWebSocket(this, url,
+		[this, id, identity, generation](const QByteArray &frame) {
+			const auto message = QJsonDocument::fromJson(frame).object();
+			const QString kind = message.value(QStringLiteral("metadata")).toObject()
+				.value(QStringLiteral("message_type")).toString();
+			if (kind == QStringLiteral("session_welcome") &&
+			    twitchReconnectGeneration.value(id) == generation && twitchReconnect.value(id) == *identity) {
+				auto *replacement = twitchReconnect.take(id);
+				delete twitch.take(id);
+				twitch[id] = replacement;
+				twitchGeneration[id] = generation;
+				status(id, QStringLiteral("Twitch: EventSub перенесён без повторной подписки"));
+				return;
+			}
+			if (twitchGeneration.value(id) == generation && twitch.value(id) == *identity)
+				handleTwitchFrame(id, frame);
+		},
+		[this, id, identity, generation](const QString &reason) {
+			if (twitchReconnectGeneration.value(id) == generation && twitchReconnect.value(id) == *identity) {
+				delete twitchReconnect.take(id);
+				status(id, QStringLiteral("Twitch: перенос прервался: %1").arg(reason));
+				return; // The old socket still has the existing subscriptions.
+			}
+			if (twitchGeneration.value(id) != generation || twitch.value(id) != *identity) return;
+			delete twitch.take(id);
+			nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() + 15000;
+			status(id, QStringLiteral("Twitch: %1 · новое подключение").arg(reason));
+		});
+	twitchReconnect[id] = *identity;
 }
 
 QString ChatGateway::kickRoomId(const QString &accountId) const
@@ -1090,7 +1202,10 @@ void ChatGateway::kickResolveRoom(const QString &id)
 					.value(QStringLiteral("id")).toVariant().toString();
 		if (!result.ok || !QRegularExpression(QStringLiteral("^[0-9]{1,15}$")).match(room).hasMatch()) {
 			status(id, QStringLiteral("Kick: не удалось определить комнату, введи её ID вручную"));
-			kick[id].nextAt = QDateTime::currentMSecsSinceEpoch() + 60000;
+			auto &state = kick[id];
+			state.attempts = std::min(6, state.attempts + 1);
+			state.nextAt = QDateTime::currentMSecsSinceEpoch() +
+				std::min(120000, 2000 * (1 << state.attempts));
 			return;
 		}
 		kick[id].roomId = room;
@@ -1117,6 +1232,9 @@ void ChatGateway::kickDiscover(const QString &id)
 			if (!kick.contains(id)) return;
 			if (!result.ok) {
 				kick[id].pending = false;
+				kick[id].attempts = std::min(6, kick[id].attempts + 1);
+				kick[id].nextAt = QDateTime::currentMSecsSinceEpoch() +
+					std::min(120000, 2000 * (1 << kick[id].attempts));
 				status(id, QStringLiteral("Kick discovery: ") + result.error);
 				return;
 			}
@@ -1138,18 +1256,28 @@ void ChatGateway::kickDiscover(const QString &id)
 				socketUrl.path() == QStringLiteral("/connection/websocket");
 			if (!valid) {
 				kick[id].pending = false;
+				kick[id].attempts = std::min(6, kick[id].attempts + 1);
+				kick[id].nextAt = QDateTime::currentMSecsSinceEpoch() +
+					std::min(120000, 2000 * (1 << kick[id].attempts));
 				status(id, QStringLiteral("Kick: неожиданный адрес WSS"));
 				return;
 			}
 			kick[id].socketUrl = socketUrl;
 			kick[id].pending = false;
 			kickGuestToken(id, [this, id](const QString &token) {
-				if (token.isEmpty() || !kick.contains(id)) return;
+				if (token.isEmpty() || !kick.contains(id) || kickSockets.contains(id)) return;
 				const auto url = kick[id].socketUrl;
 				status(id, QStringLiteral("Kick: соединяемся с комнатой %1").arg(kick[id].roomId));
-				kickSockets[id] = new NativeWebSocket(this, url,
-					[this, id](const QByteArray &frame) { handleKickFrame(id, frame); },
-					[this, id](const QString &error) {
+				const quint64 generation = ++nextSocketGeneration;
+				kickGeneration[id] = generation;
+				auto identity = std::make_shared<NativeWebSocket *>(nullptr);
+				*identity = new NativeWebSocket(this, url,
+					[this, id, identity, generation](const QByteArray &frame) {
+						if (kickGeneration.value(id) == generation && kickSockets.value(id) == *identity)
+							handleKickFrame(id, frame);
+					},
+					[this, id, identity, generation](const QString &error) {
+						if (kickGeneration.value(id) != generation || kickSockets.value(id) != *identity) return;
 						delete kickSockets.take(id);
 						if (!kick.contains(id)) return;
 						auto &state = kick[id];
@@ -1159,14 +1287,16 @@ void ChatGateway::kickDiscover(const QString &id)
 							std::min(60000, 2000 * (1 << state.attempts));
 						status(id, QStringLiteral("Kick: %1 · повторное соединение").arg(error));
 					},
-					[this, id, token] {
-						if (kickSockets.contains(id)) kickSockets[id]->send(QJsonDocument(QJsonObject{
+					[this, id, token, identity, generation] {
+						if (kickGeneration.value(id) == generation && kickSockets.value(id) == *identity)
+							kickSockets[id]->send(QJsonDocument(QJsonObject{
 							{QStringLiteral("id"), 1},
 							{QStringLiteral("connect"), QJsonObject{
 								{QStringLiteral("token"), token},
 								{QStringLiteral("name"), QStringLiteral("js")}}}})
 							.toJson(QJsonDocument::Compact));
 					}, QByteArray("https://kick.com"));
+				kickSockets[id] = *identity;
 			});
 		}, false, {QStringLiteral("Origin: https://kick.com")});
 }
@@ -1187,7 +1317,9 @@ void ChatGateway::kickGuestToken(const QString &id, const std::function<void(con
 						.value(QStringLiteral("token")).toString();
 			if (!result.ok || token.isEmpty()) {
 				status(id, QStringLiteral("Kick guest token: ") + result.error);
-				state.nextAt = QDateTime::currentMSecsSinceEpoch() + 30000;
+				state.attempts = std::min(6, state.attempts + 1);
+				state.nextAt = QDateTime::currentMSecsSinceEpoch() +
+					std::min(120000, 2000 * (1 << state.attempts));
 				done({});
 				return;
 			}
@@ -1213,7 +1345,11 @@ void ChatGateway::handleKickFrame(const QString &id, const QByteArray &frame)
 				.arg(error.value(QStringLiteral("code")).toVariant().toString(),
 				     error.value(QStringLiteral("message")).toString()));
 			delete kickSockets.take(id);
-			kick[id].nextAt = QDateTime::currentMSecsSinceEpoch() + 30000;
+			auto &state = kick[id];
+			state.subscribed = false;
+			state.attempts = std::min(6, state.attempts + 1);
+			state.nextAt = QDateTime::currentMSecsSinceEpoch() +
+				std::min(120000, 2000 * (1 << state.attempts));
 			return;
 		}
 		const int messageId = value.value(QStringLiteral("id")).toInt();
@@ -1318,10 +1454,22 @@ void ChatGateway::handleTwitchFrame(const QString &id, const QByteArray &frame)
 					 .value(QStringLiteral("id")).toString());
 		return;
 	}
-	if (messageType == QStringLiteral("session_reconnect") || messageType == QStringLiteral("revocation")) {
-		status(id, QStringLiteral("Twitch: переподключение EventSub"));
+	if (messageType == QStringLiteral("session_reconnect")) {
+		const QUrl target(payload.value(QStringLiteral("session")).toObject()
+			.value(QStringLiteral("reconnect_url")).toString());
+		reconnectTwitchSocket(id, target);
+		return;
+	}
+	if (messageType == QStringLiteral("revocation")) {
+		const QString type = payload.value(QStringLiteral("subscription")).toObject()
+			.value(QStringLiteral("type")).toString();
+		if (type != QStringLiteral("channel.chat.message")) {
+			emit providerWarning(id, QStringLiteral("Twitch: подписка %1 отозвана").arg(type));
+			return;
+		}
+		status(id, QStringLiteral("Twitch: подписка чата отозвана · переподключение"));
 		delete twitch.take(id);
-		nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() + 1000;
+		nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() + 60000;
 		return;
 	}
 	if (messageType != QStringLiteral("notification")) return;

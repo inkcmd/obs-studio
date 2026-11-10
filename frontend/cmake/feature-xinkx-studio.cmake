@@ -28,6 +28,8 @@ target_sources(
     xinkx/StudioSettingsPages.hpp
     xinkx/ChatGateway.cpp
     xinkx/ChatGateway.hpp
+	 xinkx/YouTubeGrpcStream.cpp
+	 xinkx/YouTubeGrpcStream.hpp
     xinkx/ChatWorkspace.cpp
 	 xinkx/PresentationSettings.cpp
 	 xinkx/PresentationSettings.hpp
