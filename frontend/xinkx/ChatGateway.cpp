@@ -87,6 +87,34 @@ QVector<StreamAccount> ChatGateway::accounts() const
 	return result;
 }
 
+QString ChatGateway::canonicalChatId(const QString &accountId) const
+{
+	const auto account = known.value(accountId);
+	if (account.platform != QStringLiteral("youtube")) return accountId;
+	QString owner = account.authorizationSourceId.isEmpty() ? accountId : account.authorizationSourceId;
+	if (!known.contains(owner)) owner = accountId;
+	if (account.providerId.isEmpty()) return owner;
+	// A channel can also have independently configured OAuth outputs. Prefer
+	// an actual token owner, with a deterministic choice across reloads.
+	for (const auto &candidate : known) {
+		if (candidate.platform != QStringLiteral("youtube") ||
+		    candidate.providerId != account.providerId || !candidate.authorizationSourceId.isEmpty()) continue;
+		if (candidate.id < owner) owner = candidate.id;
+	}
+	return owner;
+}
+
+QVector<StreamAccount> ChatGateway::chatAccounts() const
+{
+	QVector<StreamAccount> result;
+	for (const auto &account : accounts()) {
+		if (account.platform == QStringLiteral("youtube") && canonicalChatId(account.id) != account.id)
+			continue;
+		result.push_back(account);
+	}
+	return result;
+}
+
 void ChatGateway::status(const QString &id, const QString &message)
 {
 	emit providerStatus(id, bounded(message, 180));
@@ -150,9 +178,19 @@ void ChatGateway::reloadAccounts()
 		else ++it;
 	}
 	known = updated;
+	for (auto it = viewerSnapshot.begin(); it != viewerSnapshot.end();) {
+		if (!known.contains(it.key()) || canonicalChatId(it.key()) != it.key())
+			it = viewerSnapshot.erase(it);
+		else ++it;
+	}
+	for (auto it = youtube.begin(); it != youtube.end();) {
+		if (canonicalChatId(it.key()) != it.key()) it = youtube.erase(it);
+		else ++it;
+	}
 	for (const auto &account : updated) {
 		if (newlyAuthorized.contains(account.id)) nextTwitchAt[account.id] = 0;
-		if (account.platform == QStringLiteral("youtube") && !youtube.contains(account.id)) {
+		if (account.platform == QStringLiteral("youtube") && canonicalChatId(account.id) == account.id &&
+		    !youtube.contains(account.id)) {
 			youtube.insert(account.id, {});
 		}
 		if (account.platform == QStringLiteral("kick") && !kick.contains(account.id)) {
@@ -179,6 +217,8 @@ void ChatGateway::schedule()
 	for (const auto &account : known) {
 		if (account.platform == QStringLiteral("twitch") && !twitch.contains(account.id) &&
 		    now >= nextTwitchAt.value(account.id)) startTwitch(account.id);
+		if (account.platform == QStringLiteral("youtube") && canonicalChatId(account.id) != account.id)
+			continue;
 		if (now >= nextViewerPoll.value(account.id)) {
 			nextViewerPoll[account.id] = now + 60000;
 			pollViewers(account.id);
@@ -203,6 +243,7 @@ void ChatGateway::schedule()
 
 void ChatGateway::pollViewers(const QString &id)
 {
+	if (canonicalChatId(id) != id) return;
 	const auto account = known.value(id);
 	if (account.id.isEmpty()) return;
 	const auto report = [this, id, platform = account.platform](int count) {
@@ -211,7 +252,8 @@ void ChatGateway::pollViewers(const QString &id)
 		int sum = 0;
 		bool knownValue = false;
 		for (const auto &account : known) {
-			if (account.platform != platform || !viewerSnapshot.contains(account.id)) continue;
+			if (account.platform != platform || !viewerSnapshot.contains(account.id) ||
+			    canonicalChatId(account.id) != account.id) continue;
 			const int value = viewerSnapshot.value(account.id);
 			if (value >= 0) { sum += value; knownValue = true; }
 		}
@@ -228,24 +270,38 @@ void ChatGateway::pollViewers(const QString &id)
 		});
 	} else if (account.platform == QStringLiteral("youtube")) {
 		const QString url = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts"),
-			{{QStringLiteral("part"), QStringLiteral("id")}, {QStringLiteral("broadcastStatus"), QStringLiteral("active")}});
+			{{QStringLiteral("part"), QStringLiteral("id")},
+			 {QStringLiteral("broadcastStatus"), QStringLiteral("active")},
+			 {QStringLiteral("maxResults"), QStringLiteral("50")}});
 		authorized(id, url, {}, [this, id, report](const HttpResult &result) {
 			if (!result.ok) { report(-1); return; }
 			const auto items = result.json.value(QStringLiteral("items")).toArray();
 			if (items.isEmpty()) { report(0); return; }
-			const auto videoId = items.first().toObject().value(QStringLiteral("id")).toString();
-			if (videoId.isEmpty()) { report(-1); return; }
+			QStringList videoIds;
+			for (const auto &value : items) {
+				const QString videoId = value.toObject().value(QStringLiteral("id")).toString();
+				if (!videoId.isEmpty() && !videoIds.contains(videoId)) videoIds.append(videoId);
+			}
+			if (videoIds.isEmpty()) { report(-1); return; }
 			const QString videoUrl = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/videos"),
 				{{QStringLiteral("part"), QStringLiteral("liveStreamingDetails")},
-				 {QStringLiteral("id"), videoId}});
-			authorized(id, videoUrl, {}, [report](const HttpResult &response) {
+				 {QStringLiteral("id"), videoIds.join(QLatin1Char(','))}});
+			authorized(id, videoUrl, {}, [report, expected = int(videoIds.size())](const HttpResult &response) {
 				if (!response.ok || response.json.value(QStringLiteral("items")).toArray().isEmpty()) {
 					report(-1); return;
 				}
-				const auto details = response.json.value(QStringLiteral("items")).toArray().first().toObject()
-					.value(QStringLiteral("liveStreamingDetails")).toObject();
-				const auto count = details.value(QStringLiteral("concurrentViewers"));
-				report(count.isUndefined() ? -1 : count.toVariant().toInt());
+				int total = 0;
+				int countedVideos = 0;
+				for (const auto &video : response.json.value(QStringLiteral("items")).toArray()) {
+					const auto details = video.toObject().value(QStringLiteral("liveStreamingDetails")).toObject();
+					const auto count = details.value(QStringLiteral("concurrentViewers"));
+					if (!count.isString() && !count.isDouble()) continue;
+					bool valid = false;
+					const int viewers = count.toVariant().toString().toInt(&valid);
+					if (valid && viewers >= 0) { total += viewers; ++countedVideos; }
+				}
+				// A partially known sum looks like an exact audience count.
+				report(countedVideos == expected ? total : -1);
 			});
 		});
 	} else if (account.platform == QStringLiteral("kick")) {
@@ -1326,6 +1382,9 @@ void ChatGateway::dispatch(ChatLine line)
 	line.text = bounded(line.text);
 	line.name = bounded(line.name, 80);
 	if (line.type == QStringLiteral("chat") && line.text.trimmed().isEmpty()) return;
+	// liveChat/messages returns the same YouTube message for each linked RTMP
+	// output. Its message ID belongs to the chat, not to the output account.
+	if (line.platform == QStringLiteral("youtube")) line.accountId = canonicalChatId(line.accountId);
 	const auto key = line.accountId + QLatin1Char(':') + line.messageId;
 	if (!line.messageId.isEmpty()) {
 		if (seenEvents.contains(key)) return;
@@ -1369,7 +1428,11 @@ void ChatGateway::sendMessage(const QString &message, const QStringList &account
 		for (const auto &id : accountIds) emit sendStatus(id, QStringLiteral("Сообщение: 1–200 символов"), false);
 		return;
 	}
-	for (const auto &id : accountIds) {
+	QSet<QString> sentTo;
+	for (const auto &requestedId : accountIds) {
+		const QString id = canonicalChatId(requestedId);
+		if (sentTo.contains(id)) continue;
+		sentTo.insert(id);
 		const auto account = known.value(id);
 		if (account.id.isEmpty() || sending.contains(id)) {
 			emit sendStatus(id, QStringLiteral("Аккаунт недоступен или отправка выполняется"), false);

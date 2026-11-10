@@ -77,7 +77,7 @@ void installChatWorkspace(OBSBasic *mainWindow)
 		view->targets.clear();
 		view->statuses.clear();
 		view->viewers.clear();
-		const auto accounts = gateway->accounts();
+		const auto accounts = gateway->chatAccounts();
 		for (const auto &account : accounts) {
 			auto *column = new QWidget(selector);
 			auto *stack = new QHBoxLayout(column);

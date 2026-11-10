@@ -53,6 +53,9 @@ public:
 	void uploadYouTubeThumbnail(const QString &accountId, const QString &videoId, const QString &filePath);
 	void pollViewers(const QString &accountId);
 	QVector<StreamAccount> accounts() const;
+	// Chat identity is one OAuth channel, even when it has multiple RTMP outputs.
+	// The full account list remains available for individual broadcast settings.
+	QVector<StreamAccount> chatAccounts() const;
 
 signals:
 	void incoming(const xinkx::ChatLine &line);
@@ -143,6 +146,7 @@ private:
 	void saveYouTubeStream(const QString &id, const QString &streamId, const QString &broadcastId);
 	void saveRefreshed(const QString &id, const QJsonObject &json);
 	void status(const QString &id, const QString &message);
+	QString canonicalChatId(const QString &accountId) const;
 };
 
 void installChatWorkspace(OBSBasic *mainWindow);

@@ -29,6 +29,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPushButton>
 #include <QRandomGenerator>
 #include <QRegion>
@@ -185,8 +186,8 @@ public:
 	void clearEffects() { events.clear(); update(); }
 	void setViewers(const QString &platform, int count)
 	{
-		if (count < 0) viewers.remove(platform);
-		else viewers.insert(platform, count);
+		// An unavailable API count is distinct from zero viewers.
+		viewers.insert(platform, count);
 		update();
 	}
 
@@ -277,7 +278,8 @@ protected:
 			int x = width() - 22;
 			for (const QString &platform : {QStringLiteral("kick"), QStringLiteral("youtube"), QStringLiteral("twitch")}) {
 				if (!viewers.contains(platform)) continue;
-				const QString value = QString::number(viewers.value(platform));
+				const int count = viewers.value(platform);
+				const QString value = count < 0 ? QStringLiteral("—") : QString::number(count);
 				const int textWidth = QFontMetrics(viewerFont).horizontalAdvance(value) + 5;
 				x -= textWidth;
 				painter.drawText(QRect(x, 14, textWidth, 25), Qt::AlignVCenter, value);
@@ -413,7 +415,14 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 	settings->setObjectName(QStringLiteral("xinkxPresentationSettings"));
 	auto *runtime = mainWindow->findChild<OverlayRuntime *>(QStringLiteral("xinkxOverlayRuntime"));
 	auto *gateway = mainWindow->findChild<ChatGateway *>(QStringLiteral("xinkxChatGateway"));
-	auto *streamer = new StreamerOverlay(mainWindow);
+	// A Qt::Tool owned by the OBS main window is hidden automatically when OBS
+	// is minimized. Keep the click-through overlay as an independent top-level
+	// window while tying its lifetime to the main window explicitly.
+	auto *streamer = new StreamerOverlay();
+	QPointer<StreamerOverlay> guardedStreamer(streamer);
+	QObject::connect(mainWindow, &QObject::destroyed, [guardedStreamer] {
+		if (guardedStreamer) delete guardedStreamer.data();
+	});
 	streamer->setObjectName(QStringLiteral("xinkxStreamerOverlay"));
 	streamer->configure(settings->snapshot());
 	streamer->setLayoutWriter([settings](const QJsonObject &layout) {
