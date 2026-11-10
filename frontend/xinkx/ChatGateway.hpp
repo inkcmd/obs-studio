@@ -50,7 +50,6 @@ public:
 	void createYouTubeBroadcast(const QString &accountId, const QString &title,
 				    const QString &description, const QString &categoryId);
 	void bindYouTubeStream(const QString &accountId, const QString &broadcastId, const QString &streamId);
-	void uploadYouTubeThumbnail(const QString &accountId, const QString &videoId, const QString &filePath);
 	void pollViewers(const QString &accountId);
 	QVector<StreamAccount> accounts() const;
 	// Chat identity is one OAuth channel, even when it has multiple RTMP outputs.
@@ -65,8 +64,6 @@ signals:
 	void broadcastInfo(const QString &accountId, const QJsonObject &details);
 	void categoryResults(const QString &accountId, const QJsonArray &categories);
 	void broadcastResult(const QString &accountId, const QString &message, bool success);
-	void youtubeMetadataUpdated(const QString &accountId, bool success);
-	void thumbnailUpdated(const QString &accountId, const QString &message, bool success);
 	void viewersReceived(const QString &accountId, int count);
 
 private:
@@ -117,6 +114,7 @@ private:
 	QHash<QString, int> viewerSnapshot;
 	QHash<QString, qint64> botCooldowns;
 	qint64 nextReloadAt = 0;
+	qint64 youtubeQuotaResumeAt = 0; // A 403 quotaExceeded pauses all requests to the same Google API project.
 	QSet<QString> seenEvents;
 	QStringList seenOrder;
 

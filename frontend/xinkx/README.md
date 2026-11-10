@@ -39,7 +39,16 @@ No automatic YouTube broadcast creation, start or modification is performed by t
 
 Verification on Windows: start Twitch+YouTube+Kick; uncheck only YouTube while Twitch/Kick continue; recheck YouTube and verify its bitrate/timer restart. Repeat with a fast off→on during stopping, then global Stop and ensure nothing restarts later. Independently inspect the selected YouTube broadcast's Live Control Room preview, stream key and live state. This patch has source-level verification only; it does **not** claim an authenticated YouTube runtime check.
 
-## Stage 19 — one broadcast profile, one Save (Windows runtime verification pending)
+## Stage 20 — YouTube quota and profile reliability (Windows runtime verification pending)
+
+- The editor keeps one Save action and the selected YouTube event, title, description and public video category. YouTube Studio browser automation and thumbnail/banner upload have been removed. The game autocomplete uses Twitch/Kick only; no private YouTube Studio game mapping is attempted.
+- Saving a YouTube broadcast uses the official `liveBroadcasts.list`/`liveBroadcasts.update` API. It keeps the required scheduled-start and monitor settings, submits mutable snippet fields only, supports clearing the description and verifies title/description/category in the API response. The event selector title is updated without another read request.
+- YouTube requests share a quota-exhausted backoff until the documented next Pacific midnight; invalid/repeated calls cannot restore chat before Google resets the quota. The chat polls no faster than once every 20 seconds (5 units per call) and viewer counts poll at most once every three minutes. This trades chat latency for sustained quota usage until a streaming transport is implemented.
+- An OBS scene duplication copies the corresponding saved portrait transforms and portrait-only source list before switching to the new scene. Both OBS scenes keep independent portrait layout settings.
+
+Windows checks: build `cmake --build build_x64 --config RelWithDebInfo --target obs-studio --parallel 8`; with a permitted disposable YouTube event, update title/description and clear description, reopen the event, then duplicate a scene and verify both independent portrait layouts. Native/authenticated integration is not covered by the Node source tests.
+
+## Stage 19 — historical implementation (superseded by Stage 20)
 
 - The **Эфир** tab presents a single profile selector/name/OBS scene, one title, one description, one game autocomplete and one thumbnail. **Сохранить профиль и обновить площадки** is the sole Save/Apply action: it stores the profile, switches to its scene, then updates connected Twitch/Kick/YouTube accounts. Merely selecting a profile changes the local editor, not any live broadcast. A failed scene switch or failed profile file write blocks remote updates.
 - A typed game searches the connected Twitch/Kick catalogs and the authenticated YouTube Studio game-title catalog after 700 ms; the single autocomplete merges suggestions. Matching exact provider labels populate per-provider IDs and the YouTube `mid` **without duplicate visible dropdowns**. These IDs are locally preserved per profile, including legacy profiles. When a game cannot be unambiguously mapped on a provider, it does not reuse the previous game's category and reports the limitation. Games with different official titles are not guessed automatically.
@@ -50,7 +59,7 @@ Verification on Windows: start Twitch+YouTube+Kick; uncheck only YouTube while T
 
 Windows checks: build `cmake --build --preset windows-x64 --parallel 12`; verify a saved profile round-trip, one Save against a disposable YouTube broadcast, the exact game in YouTube Studio, a custom thumbnail on that broadcast, repeated dedicated-profile Chrome reconnection and unaffected Twitch/Kick updates. Do not modify an existing live broadcast for the test without choosing it explicitly. `node frontend/xinkx/tests/youtube-studio-bridge-js.test.mjs` covers the browser-side mock; the source contract test checks UI wiring, but neither replaces a Windows MSVC build or Google/Twitch/Kick runtime authorization test.
 
-## Stage 18 — YouTube Studio browser bridge (Windows runtime verification pending)
+## Stage 18 — historical YouTube Studio experiment (removed in Stage 20)
 
 - The native broadcast editor now searches a unified game name on Twitch, Kick and (when the separate Studio session is connected) the unofficial YouTube Studio `gaming/game_title` endpoint. The picker stores YouTube's `mid` alongside the game name locally. Picking a YouTube result maps the regular video category to 20 (`Gaming`). Typeahead search starts after 700 ms without replacing the title/description/game draft.
 - **Подключить YouTube Studio** launches the installed Chrome/Edge with an isolated XINKX-managed profile and **without debugging flags** for normal first-time Google login. Close all its windows after login and click **Подключить Studio** again. This reopens the same isolated profile with a loopback-only Chrome DevTools Protocol port and checks Studio's current channel ID against the existing YouTube OAuth account. The session is reopened automatically on subsequent app starts. The regular Chrome/Edge profile and its cookies are never read.

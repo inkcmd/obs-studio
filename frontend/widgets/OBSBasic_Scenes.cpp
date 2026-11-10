@@ -22,6 +22,8 @@
 
 #include <dialogs/NameDialog.hpp>
 
+#include <xinkx/PortraitCanvas.hpp>
+
 #include <qt-wrappers.hpp>
 
 #include <QLineEdit>
@@ -278,6 +280,9 @@ void OBSBasic::DuplicateSelectedScene()
 		}
 
 		OBSSceneAutoRelease scene = obs_scene_duplicate(curScene, name.c_str(), OBS_SCENE_DUP_REFS);
+		if (!scene) return;
+		xinkx::PortraitCanvas::instance().duplicateLayout(
+			QString::fromUtf8(obs_source_get_name(curSceneSource)), QString::fromStdString(name));
 		source = obs_scene_get_source(scene);
 		SetCurrentScene(source, true);
 

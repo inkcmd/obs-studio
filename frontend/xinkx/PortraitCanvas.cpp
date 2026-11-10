@@ -417,6 +417,20 @@ video_t *PortraitCanvas::video()
 	return obs_canvas_get_video(canvas);
 }
 
+void PortraitCanvas::duplicateLayout(const QString &fromScene, const QString &toScene)
+{
+	if (fromScene.isEmpty() || toScene.isEmpty() || fromScene == toScene) return;
+	QSettings settings(studioSettingsPath(), QSettings::IniFormat);
+	// A source layout may exist without extra sources, but a duplicate must
+	// never replace an independently edited destination scene.
+	if (settings.contains(storeKey(toScene)) || settings.contains(extraKey(toScene))) return;
+	const QString sourceLayout = storeKey(fromScene);
+	const QString sourceExtras = extraKey(fromScene);
+	if (settings.contains(sourceLayout)) settings.setValue(storeKey(toScene), settings.value(sourceLayout));
+	if (settings.contains(sourceExtras)) settings.setValue(extraKey(toScene), settings.value(sourceExtras));
+	settings.sync();
+}
+
 void PortraitCanvas::sync()
 {
 	if (!ensure()) return;

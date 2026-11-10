@@ -101,7 +101,7 @@ bool validProfiles(const QJsonObject &root)
 			if (!object.value(QString::fromLatin1(key)).isString() ||
 			    object.value(QString::fromLatin1(key)).toString().size() > 5000) return false;
 		for (const auto &key : {"twitchCategoryName", "kickCategoryName", "youtubeCategoryName",
-			"youtubeBroadcastName", "youtubeGameMid", "thumbnail"}) {
+			"youtubeBroadcastName"}) {
 			const auto item = object.value(QString::fromLatin1(key));
 			if (!item.isUndefined() && (!item.isString() || item.toString().size() > 1024)) return false;
 		}
@@ -147,13 +147,12 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 	auto *title = panel->findChild<QLineEdit *>(QStringLiteral("xinkxBroadcastTitle"));
 	auto *description = panel->findChild<QPlainTextEdit *>(QStringLiteral("xinkxBroadcastDescription"));
 	auto *game = panel->findChild<QLineEdit *>(QStringLiteral("xinkxBroadcastGame"));
-	auto *thumbnail = panel->findChild<QLineEdit *>(QStringLiteral("xinkxBroadcastThumbnail"));
 	auto *twitch = panel->findChild<QComboBox *>(QStringLiteral("xinkxBroadcastTwitchGame"));
 	auto *kick = panel->findChild<QComboBox *>(QStringLiteral("xinkxBroadcastKickGame"));
 	auto *youtube = panel->findChild<QComboBox *>(QStringLiteral("xinkxBroadcastYouTubeGame"));
 	auto *youtubeEvent = panel->findChild<QComboBox *>(QStringLiteral("xinkxBroadcastYouTubeEvent"));
 	auto *save = panel->findChild<QPushButton *>(QStringLiteral("xinkxBroadcastSave"));
-	if (!title || !description || !game || !thumbnail || !twitch || !kick || !youtube || !youtubeEvent || !save)
+	if (!title || !description || !game || !twitch || !kick || !youtube || !youtubeEvent || !save)
 		return;
 
 	auto root = std::make_shared<QJsonObject>(QJsonObject{{QStringLiteral("version"), 1},
@@ -220,10 +219,6 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 		title->setText(profile.value(QStringLiteral("title")).toString());
 		description->setPlainText(profile.value(QStringLiteral("description")).toString());
 		game->setText(profile.value(QStringLiteral("game")).toString());
-		const QString mid = profile.value(QStringLiteral("youtubeGameMid")).toString();
-		game->setProperty("xinkxYoutubeMid", mid);
-		game->setProperty("xinkxYoutubeGameName", game->text());
-		thumbnail->setText(profile.value(QStringLiteral("thumbnail")).toString());
 		selectSaved(twitch, profile.value(QStringLiteral("twitchCategory")).toString(),
 			profile.value(QStringLiteral("twitchCategoryName")).toString());
 		selectSaved(kick, profile.value(QStringLiteral("kickCategory")).toString(),
@@ -232,10 +227,6 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 			profile.value(QStringLiteral("youtubeCategoryName")).toString());
 		selectSaved(youtubeEvent, profile.value(QStringLiteral("youtubeBroadcast")).toString(),
 			profile.value(QStringLiteral("youtubeBroadcastName")).toString());
-		QSettings settings(studioSettingsPath(), QSettings::IniFormat);
-		settings.setValue(QStringLiteral("broadcast/editor/youtubeGameMid"), mid);
-		settings.setValue(QStringLiteral("broadcast/editor/youtubeGameName"), game->text());
-		settings.sync();
 	};
 	QObject::connect(profiles, &QComboBox::currentIndexChanged, group, load);
 	reload();
@@ -285,8 +276,6 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 			{QStringLiteral("title"), title->text()},
 			{QStringLiteral("description"), description->toPlainText().left(5000)},
 			{QStringLiteral("game"), game->text().left(150)},
-			{QStringLiteral("thumbnail"), thumbnail->text()},
-			{QStringLiteral("youtubeGameMid"), game->property("xinkxYoutubeMid").toString()},
 			{QStringLiteral("twitchCategory"), twitch->currentData().toString()},
 			{QStringLiteral("twitchCategoryName"), twitch->currentText()},
 			{QStringLiteral("kickCategory"), kick->currentData().toString()},
@@ -308,6 +297,29 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 		profiles->setCurrentIndex(index >= 0 && index < list.size() ? index + 1 : list.size());
 		note->setText(QStringLiteral("Профиль сохранён"));
 	});
+	if (auto *gateway = mainWindow->findChild<ChatGateway *>(QStringLiteral("xinkxChatGateway"))) {
+		QObject::connect(gateway, &ChatGateway::broadcastResult, group,
+			[=](const QString &accountId, const QString &, bool success) {
+				if (!success) return;
+				bool youtubeAccount = false;
+				for (const auto &account : gateway->accounts())
+					if (account.id == accountId && account.platform == QStringLiteral("youtube"))
+						youtubeAccount = true;
+				if (!youtubeAccount) return;
+				const int index = profiles->currentData().toInt();
+				QJsonArray saved = root->value(QStringLiteral("profiles")).toArray();
+				if (index < 0 || index >= saved.size()) return;
+				QJsonObject profile = saved.at(index).toObject();
+				if (youtubeEvent->currentData().toString().isEmpty() ||
+				    profile.value(QStringLiteral("youtubeBroadcast")).toString() != youtubeEvent->currentData().toString())
+					return;
+				profile.insert(QStringLiteral("youtubeBroadcastName"), youtubeEvent->currentText());
+				saved.replace(index, profile);
+				QJsonObject updated = *root;
+				updated.insert(QStringLiteral("profiles"), saved);
+				if (storeProfiles(updated)) *root = updated;
+			});
+	}
 }
 
 } // namespace xinkx

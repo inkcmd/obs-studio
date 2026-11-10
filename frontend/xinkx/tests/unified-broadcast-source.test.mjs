@@ -7,7 +7,6 @@ const source = name => readFileSync(new URL(`../${name}`, import.meta.url), 'utf
 const broadcast = source('BroadcastWorkspace.cpp');
 const profiles = source('GameProfilesWorkspace.cpp');
 const api = source('ChatGateway.cpp');
-const studio = source('YouTubeStudioBridge.cpp');
 
 assert.match(broadcast, /setObjectName\(QStringLiteral\("xinkxBroadcastSave"\)\)/);
 assert.equal((broadcast.match(/new QPushButton\(QStringLiteral\("Сохранить/g) || []).length, 1);
@@ -18,13 +17,19 @@ assert.match(broadcast, /new QCompleter\(model, panel\)/);
 assert.match(broadcast, /Категория YouTube/);
 assert.match(broadcast, /Эфир YouTube/);
 assert.doesNotMatch(broadcast, /youtubeEvent->hide\(\)/);
-assert.doesNotMatch(broadcast, /studio->connectChannel\(youtubeAccount\(\)\.providerId\)/);
-assert.match(broadcast, /setProperty\("xinkxYoutubeMid", id\)/);
-assert.match(broadcast, /pendingThumbnail->take\(id\)/);
+assert.doesNotMatch(broadcast, /YouTubeStudioBridge|Открыть YouTube Studio/);
+assert.doesNotMatch(broadcast, /xinkxBroadcastThumbnail|pendingThumbnail|pendingGame/);
+assert.doesNotMatch(profiles, /xinkxBroadcastThumbnail|thumbnail->text\(\)/);
 assert.match(api, /videoCategories.*\n.*regionCode/);
-assert.match(api, /youtube\/v3\/videos\?part=snippet/);
-assert.match(api, /uploadType"\), QStringLiteral\("media"\)/);
-assert.match(api, /thumbnails\/set/);
-assert.match(studio, /bool YouTubeStudioBridge::hasProfile\(\) const/);
+assert.doesNotMatch(api, /thumbnails\/set|youtubeMetadataUpdated|thumbnailUpdated/);
+assert.match(api, /liveBroadcasts\?part=snippet/);
+assert.match(api, /snippet\.insert\(QStringLiteral\("description"\), description\.left\(5000\)\)/);
+assert.match(api, /snippet\.insert\(QStringLiteral\("title"\), heading\)/);
+assert.match(api, /"contentDetails"\), QJsonObject\{\{QStringLiteral\("monitorStream"\), monitor\}\}/);
+assert.match(api, /nextYoutubeQuotaReset/);
+assert.match(api, /quotaExceeded/);
+assert.doesNotMatch(broadcast, /if \(success\) gateway->inspectBroadcast/);
+assert.match(broadcast, /youtubeEvent->setItemText\(index, saved\.second\)/);
+assert.match(profiles, /profile\.insert\(QStringLiteral\("youtubeBroadcastName"\), youtubeEvent->currentText\(\)\)/);
 
-console.log('XINKX broadcast source contract: one Save, explicit YouTube event/category and official thumbnail/video update');
+console.log('XINKX broadcast source contract: one Save, YouTube metadata update and quota protection, no Studio/thumbnail');

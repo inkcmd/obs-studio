@@ -33,8 +33,6 @@ target_sources(
 	 xinkx/PresentationSettings.hpp
 	 xinkx/PresentationWorkspace.cpp
 	 xinkx/BroadcastWorkspace.cpp
-	 xinkx/YouTubeStudioBridge.cpp
-	 xinkx/YouTubeStudioBridge.hpp
 	 xinkx/GameProfilesWorkspace.cpp
 	 xinkx/SceneJsonWorkspace.cpp
 	 xinkx/DonationGateway.cpp

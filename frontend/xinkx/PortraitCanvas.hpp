@@ -16,6 +16,9 @@ public:
 	static PortraitCanvas &instance();
 	video_t *video();
 	void sync();
+	// OBS duplicates the horizontal scene separately; clone the portrait
+	// layout at the same time, retaining independent transform storage.
+	void duplicateLayout(const QString &fromScene, const QString &toScene);
 	void edit(QWidget *parent);
 	// The active OBS scene drives both compositions; this only changes which
 	// preview(s) are visible: 0 = landscape, 1 = portrait, 2 = both.

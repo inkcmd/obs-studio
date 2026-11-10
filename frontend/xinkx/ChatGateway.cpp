@@ -10,13 +10,12 @@
 #include <utility/RemoteTextThread.hpp>
 
 #include <QDateTime>
-#include <QFile>
-#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QRegularExpression>
 #include <QSettings>
 #include <QThread>
+#include <QTimeZone>
 #include <QUrl>
 #include <QUrlQuery>
 #include <QUuid>
@@ -48,6 +47,26 @@ QString endpointError(const QJsonObject &json, int status, const QString &transp
 		return QStringLiteral("HTTP %1: %2").arg(status).arg(bounded(!detail.isEmpty() ? detail : message, 150));
 	}
 	return status ? QStringLiteral("HTTP %1").arg(status) : bounded(transport, 150);
+}
+
+bool quotaExceeded(const QJsonObject &json)
+{
+	const QJsonObject error = json.value(QStringLiteral("error")).toObject();
+	for (const auto &item : error.value(QStringLiteral("errors")).toArray()) {
+		const QString reason = item.toObject().value(QStringLiteral("reason")).toString();
+		if (reason == QStringLiteral("quotaExceeded") || reason == QStringLiteral("dailyLimitExceeded")) return true;
+	}
+	const QString message = error.value(QStringLiteral("message")).toString();
+	return message.contains(QStringLiteral("exceeded your"), Qt::CaseInsensitive) &&
+		(message.contains(QStringLiteral("quota"), Qt::CaseInsensitive) ||
+		 message.contains(QStringLiteral("/youtube/v3/getting-started")));
+}
+
+qint64 nextYoutubeQuotaReset()
+{
+	const QTimeZone pacific("America/Los_Angeles");
+	const QDateTime now = QDateTime::currentDateTime().toTimeZone(pacific);
+	return QDateTime(now.date().addDays(1), QTime(0, 0), pacific).toMSecsSinceEpoch();
 }
 
 QString apiUrl(const QString &root, const QList<QPair<QString, QString>> &params)
@@ -212,6 +231,7 @@ void ChatGateway::schedule()
 	const auto now = QDateTime::currentMSecsSinceEpoch();
 	if (now >= nextReloadAt) reloadAccounts();
 	for (auto it = youtube.begin(); it != youtube.end(); ++it) {
+		if (now < youtubeQuotaResumeAt) break;
 		if (!it->pending && now >= it->nextAt) pollYouTube(it.key());
 	}
 	for (const auto &account : known) {
@@ -219,8 +239,9 @@ void ChatGateway::schedule()
 		    now >= nextTwitchAt.value(account.id)) startTwitch(account.id);
 		if (account.platform == QStringLiteral("youtube") && canonicalChatId(account.id) != account.id)
 			continue;
+		if (account.platform == QStringLiteral("youtube") && now < youtubeQuotaResumeAt) continue;
 		if (now >= nextViewerPoll.value(account.id)) {
-			nextViewerPoll[account.id] = now + 60000;
+			nextViewerPoll[account.id] = now + (account.platform == QStringLiteral("youtube") ? 180000 : 60000);
 			pollViewers(account.id);
 		}
 	}
@@ -325,6 +346,14 @@ void ChatGateway::request(const QString &id, const QString &url, const QByteArra
 			  const QStringList &extraHeaders, const QByteArray &verb)
 {
 	if (!known.contains(id)) return;
+	const bool youtubeApi = known.value(id).platform == QStringLiteral("youtube") &&
+		url.contains(QStringLiteral("googleapis.com/youtube/v3/"));
+	const qint64 now = QDateTime::currentMSecsSinceEpoch();
+	if (youtubeApi && now < youtubeQuotaResumeAt) {
+		done({{}, 403, false, QStringLiteral("YouTube: дневная квота API исчерпана. Повтор после %1")
+			.arg(QDateTime::fromMSecsSinceEpoch(youtubeQuotaResumeAt).toString(QStringLiteral("dd.MM HH:mm")))});
+		return;
+	}
 	std::vector<std::string> headers{"Accept: application/json"};
 	for (const auto &header : extraHeaders) headers.push_back(header.toStdString());
 	if (useToken) {
@@ -353,12 +382,18 @@ void ChatGateway::request(const QString &id, const QString &url, const QByteArra
 					     hasBody ? payload.c_str() : nullptr, headers, nullptr, 20, false,
 					     static_cast<int>(payload.size()));
 	});
-	connect(worker, &QThread::finished, this, [this, transfer, id, done] {
+	connect(worker, &QThread::finished, this, [this, transfer, id, done, youtubeApi] {
 		if (!known.contains(id)) return;
 		const int code = static_cast<int>(transfer->status);
 		const auto json = QJsonDocument::fromJson(QByteArray::fromStdString(transfer->response)).object();
 		const bool success = transfer->ok && code >= 200 && code < 300;
-		const auto error = success ? QString{} : endpointError(json, code, QString::fromStdString(transfer->error));
+		QString error = success ? QString{} : endpointError(json, code, QString::fromStdString(transfer->error));
+		if (youtubeApi && code == 403 && quotaExceeded(json)) {
+			youtubeQuotaResumeAt = nextYoutubeQuotaReset();
+			error = QStringLiteral("YouTube: дневная квота API исчерпана. Повтор после %1")
+				.arg(QDateTime::fromMSecsSinceEpoch(youtubeQuotaResumeAt).toString(QStringLiteral("dd.MM HH:mm")));
+			status(id, error);
+		}
 		done({json, code, success, error, QByteArray::fromStdString(transfer->response)});
 	});
 	connect(worker, &QThread::finished, worker, &QObject::deleteLater);
@@ -565,23 +600,10 @@ void ChatGateway::inspectBroadcast(const QString &id, const QString &youtubeBroa
 				else if (boundToConfiguredStream.size() == 1) selected = boundToConfiguredStream.first().toObject();
 				else if (broadcasts.size() == 1) selected = broadcasts.first().toObject();
 			}
-			const auto streamsUrl = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveStreams"),
-				{{QStringLiteral("part"), QStringLiteral("id,snippet,status")},
-				 {QStringLiteral("mine"), QStringLiteral("true")}, {QStringLiteral("maxResults"), QStringLiteral("50")}});
-			authorized(id, streamsUrl, {}, [this, id, selected, broadcasts](const HttpResult &streamsResult) {
-				QJsonArray streams;
-				if (streamsResult.ok) for (const auto &entry : streamsResult.json.value(QStringLiteral("items")).toArray()) {
-					const auto item = entry.toObject();
-					streams.append(QJsonObject{{QStringLiteral("id"), item.value(QStringLiteral("id"))},
-						{QStringLiteral("title"), item.value(QStringLiteral("snippet")).toObject()
-						 .value(QStringLiteral("title"))}});
-				}
-				QJsonObject output = selected;
-				output.insert(QStringLiteral("platform"), QStringLiteral("youtube"));
-				output.insert(QStringLiteral("broadcasts"), broadcasts);
-				output.insert(QStringLiteral("streams"), streams);
-				emit broadcastInfo(id, output);
-			});
+			QJsonObject output = selected;
+			output.insert(QStringLiteral("platform"), QStringLiteral("youtube"));
+			output.insert(QStringLiteral("broadcasts"), broadcasts);
+			emit broadcastInfo(id, output);
 		});
 	}
 }
@@ -620,46 +642,6 @@ void ChatGateway::searchCategories(const QString &id, const QString &query)
 			if (categories.size() >= 50) break;
 		}
 		emit categoryResults(id, categories);
-	});
-}
-
-void ChatGateway::uploadYouTubeThumbnail(const QString &id, const QString &videoId, const QString &path)
-{
-	if (known.value(id).platform != QStringLiteral("youtube") ||
-	    !QRegularExpression(QStringLiteral("^[A-Za-z0-9_-]{11}$")).match(videoId).hasMatch()) {
-		emit thumbnailUpdated(id, QStringLiteral("YouTube: не выбран эфир для обложки"), false);
-		return;
-	}
-	const QFileInfo info(path);
-	if (!info.isFile() || info.size() > 20 * 1024 * 1024 || info.size() < 100) {
-		emit thumbnailUpdated(id, QStringLiteral("Превью: файл не найден или больше 20 МБ"), false);
-		return;
-	}
-	QFile file(path);
-	if (!file.open(QIODevice::ReadOnly)) {
-		emit thumbnailUpdated(id, QStringLiteral("Превью: нет доступа к файлу"), false);
-		return;
-	}
-	const QByteArray image = file.readAll();
-	const bool jpeg = image.startsWith(QByteArray::fromHex("ffd8ff"));
-	const bool png = image.startsWith(QByteArray::fromHex("89504e470d0a1a0a"));
-	if (!jpeg && !png) {
-		emit thumbnailUpdated(id, QStringLiteral("Превью: поддерживаются PNG и JPEG"), false);
-		return;
-	}
-	const QByteArray mime = jpeg ? QByteArray("image/jpeg") : QByteArray("image/png");
-	const QString endpoint = apiUrl(QStringLiteral("https://www.googleapis.com/upload/youtube/v3/thumbnails/set"),
-		{{QStringLiteral("videoId"), videoId}, {QStringLiteral("uploadType"), QStringLiteral("media")}});
-	tokenFor(id, [this, id, endpoint, image, mime](const QString &token) {
-		if (token.isEmpty()) {
-			emit thumbnailUpdated(id, QStringLiteral("YouTube: OAuth недоступен для загрузки превью"), false);
-			return;
-		}
-		request(id, endpoint, image, mime, [this, id](const HttpResult &result) {
-			emit thumbnailUpdated(id, result.ok
-				? QStringLiteral("YouTube: обложка загружена через thumbnails.set")
-				: QStringLiteral("YouTube: обложка не загружена: ") + result.error, result.ok);
-		}, true, {}, QByteArray("POST"));
 	});
 }
 
@@ -710,63 +692,52 @@ void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
 			emit broadcastResult(id, QStringLiteral("YouTube: выбери эфир"), false); return;
 		}
 		const auto readUrl = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts"),
-			{{QStringLiteral("part"), QStringLiteral("snippet")}, {QStringLiteral("id"), broadcastId}});
+			{{QStringLiteral("part"), QStringLiteral("snippet,contentDetails")}, {QStringLiteral("id"), broadcastId}});
 		authorized(id, readUrl, {}, [this, id, broadcastId, heading, description, category](const HttpResult &result) {
 			if (!result.ok || result.json.value(QStringLiteral("items")).toArray().isEmpty()) {
 				emit broadcastResult(id, QStringLiteral("YouTube: не удалось прочитать эфир: ") + result.error, false);
-				emit youtubeMetadataUpdated(id, false);
 				return;
 			}
-			auto snippet = result.json.value(QStringLiteral("items")).toArray().first().toObject()
-				.value(QStringLiteral("snippet")).toObject();
+			const QJsonObject existing = result.json.value(QStringLiteral("items")).toArray().first().toObject();
+			const auto originalSnippet = existing.value(QStringLiteral("snippet")).toObject();
+			const auto originalDetails = existing.value(QStringLiteral("contentDetails")).toObject();
+			QJsonObject monitor = originalDetails.value(QStringLiteral("monitorStream")).toObject();
+			// liveBroadcasts.update also requires scheduledStartTime and monitorStream
+			// settings even when only the snippet part is being changed.
+			if (originalSnippet.value(QStringLiteral("scheduledStartTime")).toString().isEmpty()) {
+				emit broadcastResult(id, QStringLiteral("YouTube: API не вернул обязательные настройки эфира"), false);
+				return;
+			}
+			// JSON API may omit default false/zero values from the read response.
+			if (!monitor.contains(QStringLiteral("enableMonitorStream")))
+				monitor.insert(QStringLiteral("enableMonitorStream"), false);
+			if (!monitor.contains(QStringLiteral("broadcastStreamDelayMs")))
+				monitor.insert(QStringLiteral("broadcastStreamDelayMs"), 0);
+			// Only send mutable snippet properties; Google also returns read-only
+			// fields such as liveChatId, publishedAt and thumbnails.
+			QJsonObject snippet{{QStringLiteral("title"), originalSnippet.value(QStringLiteral("title"))},
+				{QStringLiteral("scheduledStartTime"), originalSnippet.value(QStringLiteral("scheduledStartTime"))}};
+			for (const QString &field : {QStringLiteral("scheduledEndTime"), QStringLiteral("categoryId")})
+				if (originalSnippet.contains(field)) snippet.insert(field, originalSnippet.value(field));
 			if (!heading.isEmpty()) snippet.insert(QStringLiteral("title"), heading);
-			if (!description.isEmpty()) snippet.insert(QStringLiteral("description"), description.left(5000));
+			// Empty text intentionally clears the existing video description.
+			snippet.insert(QStringLiteral("description"), description.left(5000));
 			if (!category.isEmpty()) snippet.insert(QStringLiteral("categoryId"), category);
 			const auto endpoint = QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts?part=snippet");
 			const auto body = QJsonObject{{QStringLiteral("id"), broadcastId},
-				{QStringLiteral("snippet"), snippet}};
-			jsonApi(id, endpoint, QByteArray("PUT"), body, [this, id, broadcastId, category](const HttpResult &reply) {
+				{QStringLiteral("snippet"), snippet},
+				{QStringLiteral("contentDetails"), QJsonObject{{QStringLiteral("monitorStream"), monitor}}}};
+			jsonApi(id, endpoint, QByteArray("PUT"), body, [this, id, heading, description, category](const HttpResult &reply) {
 				if (!reply.ok) {
 					emit broadcastResult(id, QStringLiteral("YouTube: ") + reply.error, false);
-					emit youtubeMetadataUpdated(id, false);
 					return;
 				}
-				if (category.isEmpty()) {
-					emit broadcastResult(id, QStringLiteral("YouTube: параметры эфира сохранены"), true);
-					emit youtubeMetadataUpdated(id, true);
-					return;
-				}
-				// liveBroadcasts.update does not reliably update the underlying
-				// video category. videos.update is the documented category API.
-				const QString readVideo = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/videos"),
-					{{QStringLiteral("part"), QStringLiteral("snippet")}, {QStringLiteral("id"), broadcastId}});
-				authorized(id, readVideo, {}, [this, id, category, broadcastId](const HttpResult &check) {
-					const auto videos = check.json.value(QStringLiteral("items")).toArray();
-					if (!check.ok || videos.isEmpty()) {
-						emit broadcastResult(id, QStringLiteral("YouTube: не удалось получить видео для категории: ") + check.error, false);
-						emit youtubeMetadataUpdated(id, false);
-						return;
-					}
-					QJsonObject videoSnippet = videos.first().toObject().value(QStringLiteral("snippet")).toObject();
-					videoSnippet.insert(QStringLiteral("categoryId"), category);
-					// videos.update requires title and categoryId; preserving other
-					// fields avoids clearing description, tags and language.
-					if (videoSnippet.value(QStringLiteral("title")).toString().isEmpty()) {
-						emit broadcastResult(id, QStringLiteral("YouTube: у видео отсутствует заголовок"), false);
-						emit youtubeMetadataUpdated(id, false);
-						return;
-					}
-					jsonApi(id, QStringLiteral("https://www.googleapis.com/youtube/v3/videos?part=snippet"),
-						QByteArray("PUT"), {{QStringLiteral("id"), broadcastId}, {QStringLiteral("snippet"), videoSnippet}},
-						[this, id, category](const HttpResult &saved) {
-							const QString actual = saved.json.value(QStringLiteral("snippet")).toObject()
-								.value(QStringLiteral("categoryId")).toString();
-							const bool verified = saved.ok && actual == category;
-							emit broadcastResult(id, verified ? QStringLiteral("YouTube: категория сохранена через videos.update")
-								: QStringLiteral("YouTube: категория не подтверждена: %1").arg(saved.error), verified);
-							emit youtubeMetadataUpdated(id, verified);
-						});
-				});
+				const auto saved = reply.json.value(QStringLiteral("snippet")).toObject();
+				const bool verified = (heading.isEmpty() || saved.value(QStringLiteral("title")).toString() == heading) &&
+					saved.value(QStringLiteral("description")).toString() == description.left(5000) &&
+					(category.isEmpty() || saved.value(QStringLiteral("categoryId")).toString() == category);
+				emit broadcastResult(id, verified ? QStringLiteral("YouTube: название и описание эфира обновлены")
+					: QStringLiteral("YouTube: ответ API не подтвердил обновление названия, описания или категории"), verified);
 			});
 		});
 		return;
@@ -893,6 +864,7 @@ void ChatGateway::pollYouTube(const QString &id)
 		if (!youtube.contains(id)) return;
 		if (!result.ok) {
 			youtube[id].pending = false;
+			youtube[id].nextAt = std::max(youtube[id].nextAt, youtubeQuotaResumeAt);
 			status(id, QStringLiteral("YouTube: ") + result.error);
 			return;
 		}
@@ -930,9 +902,12 @@ void ChatGateway::pollYouTubeMessages(const QString &id)
 		auto &state = youtube[id];
 		state.pending = false;
 		if (!result.ok) {
-			state.nextAt = QDateTime::currentMSecsSinceEpoch() + 60000;
+			state.nextAt = std::max(QDateTime::currentMSecsSinceEpoch() + 60000, youtubeQuotaResumeAt);
 			status(id, QStringLiteral("YouTube чат: ") + result.error);
-			if (result.status == 404 || result.status == 403) {
+			// A daily quota error is not a closed chat. Keep its ID and page
+			// token so the channel can resume when Google resets its quota.
+			if (result.status == 404 || (result.status == 403 &&
+			    QDateTime::currentMSecsSinceEpoch() >= youtubeQuotaResumeAt)) {
 				state.chatId.clear();
 				state.nextPage.clear();
 				state.baseline = false;
@@ -949,8 +924,11 @@ void ChatGateway::pollYouTubeMessages(const QString &id)
 			return;
 		}
 		const int interval = result.json.value(QStringLiteral("pollingIntervalMillis")).toInt(10000);
-		state.nextAt = QDateTime::currentMSecsSinceEpoch() + std::clamp(interval, 5000, 120000);
-		status(id, QStringLiteral("YouTube: чат · обновление %1 с").arg(std::clamp(interval, 5000, 120000) / 1000));
+		// 5 quota units per poll; the API-reported 5 s interval would exhaust
+		// the usual daily allowance even on a modest-length live broadcast.
+		const int delay = std::clamp(interval, 20000, 120000);
+		state.nextAt = QDateTime::currentMSecsSinceEpoch() + delay;
+		status(id, QStringLiteral("YouTube: чат · обновление %1 с").arg(delay / 1000));
 	});
 }
 
