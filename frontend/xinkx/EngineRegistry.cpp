@@ -17,6 +17,7 @@
 #include <QDateTime>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QJsonObject>
 #include <QLabel>
 #include <QPushButton>

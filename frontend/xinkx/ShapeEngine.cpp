@@ -18,6 +18,7 @@
 #include <QMutexLocker>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPen>
 #include <QPushButton>
 #include <QSpinBox>
 

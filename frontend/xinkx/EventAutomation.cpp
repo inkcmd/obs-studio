@@ -10,6 +10,7 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QDialog>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QFormLayout>
