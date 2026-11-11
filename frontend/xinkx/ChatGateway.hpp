@@ -42,6 +42,7 @@ public:
 	~ChatGateway() override;
 	void sendMessage(const QString &message, const QStringList &accountIds);
 	void reloadAccounts();
+	void retryDisconnectedChats();
 	void setKickRoomId(const QString &accountId, const QString &roomId);
 	QString kickRoomId(const QString &accountId) const;
 	void inspectBroadcast(const QString &accountId, const QString &youtubeBroadcastId = {});
@@ -121,6 +122,7 @@ private:
 	QHash<QString, QList<TokenDone>> waitingForToken;
 	QSet<QString> sending;
 	QHash<QString, qint64> nextTwitchAt;
+	QHash<QString, int> twitchRetryAttempts;
 	QHash<QString, qint64> nextViewerPoll;
 	QHash<QString, int> viewerSnapshot;
 	QHash<QString, qint64> botCooldowns;

@@ -36,6 +36,7 @@ public:
 	QHash<QString, QLabel *> statuses;
 	QHash<QString, QLabel *> viewers;
 	QHash<QString, QString> statusCache;
+	QHash<QString, QStringList> warnings;
 };
 
 } // namespace
@@ -56,13 +57,19 @@ void installChatWorkspace(OBSBasic *mainWindow)
 	heading->setStyleSheet(QStringLiteral("font-weight: 600"));
 	toolbar->addWidget(heading, 1);
 	auto *refresh = new QPushButton(QStringLiteral("Обновить"), panel);
-	refresh->setToolTip(QStringLiteral("Перечитать подключённые аккаунты из настроек трансляции"));
+	refresh->setToolTip(QStringLiteral("Перечитать аккаунты и повторно подключить недоступные чаты"));
 	toolbar->addWidget(refresh);
 	root->addLayout(toolbar);
 	auto *selector = new QWidget(panel);
 	auto *accountRow = new QHBoxLayout(selector);
 	accountRow->setContentsMargins(0, 2, 0, 2);
 	root->addWidget(selector);
+	auto *connectionNotice = new QLabel(panel);
+	connectionNotice->setWordWrap(true);
+	connectionNotice->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	connectionNotice->setStyleSheet(QStringLiteral("color:#efbd6d;font-size:11px"));
+	connectionNotice->hide();
+	root->addWidget(connectionNotice);
 	auto *view = new ChatViewState(dock);
 	auto rebuild = [=] {
 		QSet<QString> enabled;
@@ -112,9 +119,23 @@ void installChatWorkspace(OBSBasic *mainWindow)
 		}
 	};
 	rebuild();
+	const auto showProblems = [=] {
+		QStringList messages;
+		for (const auto &account : gateway->chatAccounts()) {
+			const QString state = view->statusCache.value(account.id);
+			if (!state.isEmpty() && !state.contains(QStringLiteral("подключён"), Qt::CaseInsensitive) &&
+			    !state.contains(QStringLiteral("перенесён"), Qt::CaseInsensitive))
+				messages << state;
+			messages << view->warnings.value(account.id);
+		}
+		connectionNotice->setText(messages.join(QLatin1Char('\n')));
+		connectionNotice->setVisible(!messages.isEmpty());
+	};
 	QObject::connect(refresh, &QPushButton::clicked, dock, [=] {
-		gateway->reloadAccounts();
+		view->warnings.clear();
+		gateway->retryDisconnectedChats();
 		rebuild();
+		showProblems();
 	});
 	auto *feed = new QListWidget(panel);
 	feed->setWordWrap(true);
@@ -157,6 +178,7 @@ void installChatWorkspace(OBSBasic *mainWindow)
 			if (view->statusCache.value(id) != message)
 				writeDiagnostic(QStringLiteral("provider:%1").arg(id), message);
 			view->statusCache[id] = message;
+			showProblems();
 			if (view->statuses.contains(id)) {
 				view->statuses.value(id)->setText(message);
 				if (auto *box = view->targets.value(id))
@@ -166,6 +188,8 @@ void installChatWorkspace(OBSBasic *mainWindow)
 	QObject::connect(gateway, &ChatGateway::providerWarning, dock,
 		[=](const QString &id, const QString &message) {
 			writeDiagnostic(QStringLiteral("provider:%1").arg(id), message);
+			if (!view->warnings[id].contains(message)) view->warnings[id].append(message);
+			showProblems();
 		});
 	QObject::connect(gateway, &ChatGateway::viewersReceived, dock, [view](const QString &id, int count) {
 		if (auto *label = view->viewers.value(id)) label->setText(count < 0

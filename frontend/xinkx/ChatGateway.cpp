@@ -248,6 +248,7 @@ void ChatGateway::reloadAccounts()
 	}
 	for (const auto &account : updated) {
 		if (newlyAuthorized.contains(account.id)) nextTwitchAt[account.id] = 0;
+		if (newlyAuthorized.contains(account.id)) twitchRetryAttempts.remove(account.id);
 		if (account.platform == QStringLiteral("youtube") && canonicalChatId(account.id) == account.id &&
 		    !youtube.contains(account.id)) {
 			youtube.insert(account.id, {});
@@ -263,7 +264,34 @@ void ChatGateway::reloadAccounts()
 			kick.insert(account.id, state);
 		}
 	}
+	for (auto it = twitchRetryAttempts.begin(); it != twitchRetryAttempts.end();) {
+		if (!known.contains(it.key())) it = twitchRetryAttempts.erase(it);
+		else ++it;
+	}
 	nextReloadAt = QDateTime::currentMSecsSinceEpoch() + 30000;
+}
+
+void ChatGateway::retryDisconnectedChats()
+{
+	reloadAccounts();
+	for (const auto &account : chatAccounts()) {
+		if (account.platform == QStringLiteral("twitch") && !twitch.contains(account.id) &&
+		    !twitchPermissionChecks.contains(account.id)) {
+			nextTwitchAt[account.id] = 0;
+			twitchRetryAttempts.remove(account.id);
+		} else if (account.platform == QStringLiteral("youtube") && youtube.contains(account.id) &&
+			   !youtube[account.id].pending && !youtubeStreams.contains(account.id)) {
+			youtube[account.id].nextAt = 0;
+			youtube[account.id].attempts = 0;
+		} else if (account.platform == QStringLiteral("kick") && kick.contains(account.id) &&
+			   !kick[account.id].pending && !kickSockets.contains(account.id)) {
+			kick[account.id].nextAt = 0;
+			kick[account.id].attempts = 0;
+		}
+	}
+	// An actual quotaExceeded is not a connectivity failure. Keep the shared
+	// YouTube quota pause, even for an explicit user-requested reconnect.
+	schedule();
 }
 
 void ChatGateway::schedule()
@@ -645,7 +673,42 @@ void ChatGateway::inspectBroadcast(const QString &id, const QString &youtubeBroa
 			QJsonObject output = selected;
 			output.insert(QStringLiteral("platform"), QStringLiteral("youtube"));
 			output.insert(QStringLiteral("broadcasts"), broadcasts);
-			emit broadcastInfo(id, output);
+			const QString boundStreamId = selected.value(QStringLiteral("boundStreamId")).toString();
+			if (boundStreamId.isEmpty()) {
+				emit broadcastInfo(id, output);
+				return;
+			}
+			// A healthy local RTMP output does not imply that this broadcast is
+			// bound to the same YouTube ingest stream. Compare IDs and stream keys
+			// without displaying or logging the stream key itself.
+			const QString streamUrl = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveStreams"),
+				{{QStringLiteral("part"), QStringLiteral("id,status,cdn")},
+				 {QStringLiteral("id"), boundStreamId}});
+			authorized(id, streamUrl, {}, [this, id, output, boundStreamId](const HttpResult &streamResult) mutable {
+				if (!streamResult.ok || streamResult.json.value(QStringLiteral("items")).toArray().isEmpty()) {
+					output.insert(QStringLiteral("ingestCheckError"), streamResult.error.isEmpty()
+						? QStringLiteral("видеопоток не найден") : streamResult.error);
+					emit broadcastInfo(id, output);
+					return;
+				}
+				const QJsonObject stream = streamResult.json.value(QStringLiteral("items"))
+					.toArray().first().toObject();
+				const auto health = stream.value(QStringLiteral("status")).toObject();
+				output.insert(QStringLiteral("ingestStatus"), health.value(QStringLiteral("streamStatus")));
+				output.insert(QStringLiteral("ingestHealth"), health.value(QStringLiteral("healthStatus"))
+					.toObject().value(QStringLiteral("status")));
+				const auto configured = known.value(id);
+				if (!configured.youtubeStreamId.isEmpty())
+					output.insert(QStringLiteral("configuredStreamMatch"),
+						configured.youtubeStreamId == boundStreamId);
+				const QString remoteKey = stream.value(QStringLiteral("cdn")).toObject()
+					.value(QStringLiteral("ingestionInfo")).toObject()
+					.value(QStringLiteral("streamName")).toString();
+				if (!remoteKey.isEmpty() && !configured.destination.streamKey.isEmpty())
+					output.insert(QStringLiteral("ingestKeyMatch"),
+						remoteKey == configured.destination.streamKey);
+				emit broadcastInfo(id, output);
+			});
 		});
 	}
 }
@@ -996,6 +1059,12 @@ void ChatGateway::pollYouTube(const QString &id)
 		if (!youtube.contains(id)) return;
 		if (!result.ok) {
 			youtube[id].pending = false;
+			if (result.status == 0) {
+				auto &state = youtube[id];
+				state.attempts = std::min(state.attempts + 1, 6);
+				state.nextAt = QDateTime::currentMSecsSinceEpoch() +
+					std::min(120000, 2000 * (1 << state.attempts));
+			}
 			youtube[id].nextAt = std::max(youtube[id].nextAt, youtubeQuotaResumeAt);
 			status(id, QStringLiteral("YouTube: ") + result.error);
 			return;
@@ -1145,7 +1214,10 @@ void ChatGateway::startTwitch(const QString &id)
 	tokenFor(id, [this, id](const QString &token) {
 		if (token.isEmpty()) {
 			twitchPermissionChecks.remove(id);
-			nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() + 300000;
+			const int failures = std::min(++twitchRetryAttempts[id], 6);
+			nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() +
+				std::min(120000, 2000 * (1 << failures));
+			status(id, QStringLiteral("Twitch: OAuth временно недоступен · повторное подключение"));
 			return;
 		}
 		request(id, QStringLiteral("https://id.twitch.tv/oauth2/validate"), {}, {},
@@ -1157,10 +1229,18 @@ void ChatGateway::startTwitch(const QString &id)
 					return;
 				}
 				if (!result.ok) {
-					status(id, QStringLiteral("Twitch: OAuth не прошёл проверку (%1). Переподключи аккаунт").arg(result.error));
-					nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() + 300000;
+					if (result.status == 0 || result.status >= 500 || result.status == 429) {
+						const int failures = std::min(++twitchRetryAttempts[id], 6);
+						nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() +
+							std::min(120000, 2000 * (1 << failures));
+						status(id, QStringLiteral("Twitch: сеть/сервер недоступны · повторное подключение (%1)").arg(result.error));
+					} else {
+						status(id, QStringLiteral("Twitch: OAuth отклонён (%1). Переподключи аккаунт").arg(result.error));
+						nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() + 300000;
+					}
 					return;
 				}
+				twitchRetryAttempts.remove(id);
 				const QString actualUserId = result.json.value(QStringLiteral("user_id")).toString();
 				const QString actualClientId = result.json.value(QStringLiteral("client_id")).toString();
 				QSet<QString> scopes;
@@ -1181,6 +1261,10 @@ void ChatGateway::startTwitch(const QString &id)
 				}
 				if (!scopes.contains(QStringLiteral("user:write:chat")))
 					emit providerWarning(id, QStringLiteral("Twitch: для отправки сообщений потребуется повторный OAuth с user:write:chat"));
+				if (!scopes.contains(QStringLiteral("channel:read:subscriptions")))
+					emit providerWarning(id, QStringLiteral("Twitch: уведомления о подписках отключены: в OAuth нет channel:read:subscriptions"));
+				if (!scopes.contains(QStringLiteral("moderator:read:followers")))
+					emit providerWarning(id, QStringLiteral("Twitch: уведомления о фолловерах отключены: в OAuth нет moderator:read:followers"));
 				openTwitchSocket(id);
 			}, false, {QStringLiteral("Authorization: OAuth %1").arg(token)});
 	});

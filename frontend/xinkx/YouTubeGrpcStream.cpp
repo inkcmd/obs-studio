@@ -290,13 +290,42 @@ YouTubeGrpcStream::YouTubeGrpcStream(QObject *receiver, const QString &accessTok
 					return static_cast<State *>(user)->stopping.load() ? 1 : 0;
 				});
 			curl_easy_setopt(curl, CURLOPT_XFERINFODATA, shared.get());
-			const CURLcode code = curl_easy_perform(curl);
+			// curl_easy_perform can stay blocked indefinitely on an idle HTTP/2
+			// stream (CURLOPT_TIMEOUT is intentionally 0). The destructor waits
+			// for this worker on the OBS UI thread, so cancellation must not
+			// depend on receiving a network packet or a progress callback.
+			// The multi interface permits a bounded poll and checks cancellation
+			// even when YouTube sends no chat messages for hours.
+			CURLcode code = CURLE_FAILED_INIT;
+			CURLMcode multiCode = CURLM_OK;
+			CURLM *multi = curl_multi_init();
+			if (multi) {
+				multiCode = curl_multi_add_handle(multi, curl);
+				if (multiCode == CURLM_OK) {
+					int active = 0;
+					multiCode = curl_multi_perform(multi, &active);
+					while (multiCode == CURLM_OK && active && !shared->stopping.load()) {
+						int socketsReady = 0;
+						multiCode = curl_multi_poll(multi, nullptr, 0, 250, &socketsReady);
+						if (multiCode == CURLM_OK && !shared->stopping.load())
+							multiCode = curl_multi_perform(multi, &active);
+					}
+					int unread = 0;
+					while (CURLMsg *finished = curl_multi_info_read(multi, &unread)) {
+						if (finished->msg == CURLMSG_DONE) code = finished->data.result;
+					}
+					curl_multi_remove_handle(multi, curl);
+				}
+				curl_multi_cleanup(multi);
+			}
 			long http = 0;
 			long httpVersion = 0;
 			curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
 			curl_easy_getinfo(curl, CURLINFO_HTTP_VERSION, &httpVersion);
 			grpcStatus = transfer.grpcStatus;
-			if (transfer.malformed) message = QStringLiteral("Некорректный gRPC-пакет");
+			if (multiCode != CURLM_OK) message = QStringLiteral("gRPC multi: %1")
+				.arg(QString::fromLatin1(curl_multi_strerror(multiCode)));
+			else if (transfer.malformed) message = QStringLiteral("Некорректный gRPC-пакет");
 			else if (httpVersion != CURL_HTTP_VERSION_2_0) message = QStringLiteral("Требуется HTTP/2 (libcurl/nghttp2)");
 			else if (http != 200) message = QStringLiteral("YouTube HTTP %1").arg(http);
 			else if (grpcStatus > 0) message = QStringLiteral("gRPC %1: %2").arg(grpcStatus)

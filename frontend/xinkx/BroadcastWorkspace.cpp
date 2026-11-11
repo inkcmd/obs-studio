@@ -8,6 +8,7 @@
 #include <QComboBox>
 #include <QCompleter>
 #include <QFormLayout>
+#include <QHBoxLayout>
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -118,7 +119,19 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 	auto *youtubeEvent = new QComboBox(panel);
 	youtubeEvent->setObjectName(QStringLiteral("xinkxBroadcastYouTubeEvent"));
 	youtubeEvent->addItem(QStringLiteral("Выберите эфир YouTube"), QString{});
-	form->addRow(QStringLiteral("Эфир YouTube"), youtubeEvent);
+	auto *youtubeEventRow = new QWidget(panel);
+	auto *youtubeEventLayout = new QHBoxLayout(youtubeEventRow);
+	youtubeEventLayout->setContentsMargins(0, 0, 0, 0);
+	youtubeEventLayout->addWidget(youtubeEvent, 1);
+	auto *checkYouTube = new QPushButton(QStringLiteral("Проверить"), youtubeEventRow);
+	checkYouTube->setToolTip(QStringLiteral("Проверить состояние эфира и привязанного видеопотока через YouTube API"));
+	youtubeEventLayout->addWidget(checkYouTube);
+	form->addRow(QStringLiteral("Эфир YouTube"), youtubeEventRow);
+	auto *youtubeHealth = new QLabel(QStringLiteral("YouTube: состояние эфира ещё не проверено"), panel);
+	youtubeHealth->setObjectName(QStringLiteral("xinkxYouTubeBroadcastHealth"));
+	youtubeHealth->setWordWrap(true);
+	youtubeHealth->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	form->addRow(QStringLiteral("Диагностика YouTube"), youtubeHealth);
 
 	auto *save = new QPushButton(QStringLiteral("Сохранить профиль и обновить площадки"), panel);
 	save->setObjectName(QStringLiteral("xinkxBroadcastSave"));
@@ -149,6 +162,16 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 			if (entry.platform == QStringLiteral("youtube")) return entry;
 		return StreamAccount{};
 	};
+	QObject::connect(checkYouTube, &QPushButton::clicked, panel, [=] {
+		const auto account = youtubeAccount();
+		const QString broadcastId = youtubeEvent->currentData().toString();
+		if (account.id.isEmpty() || broadcastId.isEmpty()) {
+			youtubeHealth->setText(QStringLiteral("Выбери YouTube-эфир и подключи OAuth."));
+			return;
+		}
+		youtubeHealth->setText(QStringLiteral("YouTube: проверяем привязку и приём сигнала…"));
+		gateway->inspectBroadcast(account.id, broadcastId);
+	});
 	const auto resolveVideo = [=](const QString &accountId) {
 		const QString explicitId = youtubeEvent->currentData().toString();
 		if (!explicitId.isEmpty()) return explicitId;
@@ -182,6 +205,7 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 	QObject::connect(youtubeEvent, &QComboBox::currentIndexChanged, panel, [=] {
 		local->setValue(key(QStringLiteral("youtubeBroadcast")), youtubeEvent->currentData().toString());
 		local->setValue(key(QStringLiteral("youtubeBroadcastName")), youtubeEvent->currentText());
+		youtubeHealth->setText(QStringLiteral("Нажми «Проверить» для выбранного эфира."));
 		flush->start();
 	});
 	const auto regenerateSuggestions = [=] {
@@ -381,6 +405,31 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 		const int activeIndex = youtubeEvent->findData(selectedId);
 		if (previousIndex > 0) youtubeEvent->setCurrentIndex(previousIndex);
 		else if (activeIndex > 0) youtubeEvent->setCurrentIndex(activeIndex);
+		const QString currentId = youtubeEvent->currentData().toString();
+		if (!currentId.isEmpty() && currentId == selectedId) {
+			QStringList diagnostics;
+			const QString lifecycle = info.value(QStringLiteral("lifecycle")).toString();
+			diagnostics << QStringLiteral("Эфир: %1").arg(lifecycle.isEmpty() ? QStringLiteral("неизвестно") : lifecycle);
+			const QString boundStreamId = info.value(QStringLiteral("boundStreamId")).toString();
+			if (boundStreamId.isEmpty())
+				diagnostics << QStringLiteral("Нет привязанного видеопотока. Передача RTMP не запустит этот эфир.");
+			else {
+				const QString ingest = info.value(QStringLiteral("ingestStatus")).toString();
+				diagnostics << QStringLiteral("Приём YouTube: %1").arg(ingest.isEmpty()
+					? QStringLiteral("не проверен") : ingest);
+				if (info.contains(QStringLiteral("configuredStreamMatch")) &&
+				    !info.value(QStringLiteral("configuredStreamMatch")).toBool())
+					diagnostics << QStringLiteral("ОШИБКА: выбранный в XINKX видеопоток не привязан к эфиру.");
+				if (info.contains(QStringLiteral("ingestKeyMatch")) &&
+				    !info.value(QStringLiteral("ingestKeyMatch")).toBool())
+					diagnostics << QStringLiteral("ОШИБКА: RTMP-ключ XINKX не совпадает с ключом эфира.");
+				if (ingest == QStringLiteral("active") && lifecycle != QStringLiteral("live"))
+					diagnostics << QStringLiteral("YouTube получает сигнал, но эфир ещё не Live. Проверь автозапуск/«Начать эфир».");
+				const QString ingestError = info.value(QStringLiteral("ingestCheckError")).toString();
+				if (!ingestError.isEmpty()) diagnostics << QStringLiteral("Проверка: ") + ingestError;
+			}
+			youtubeHealth->setText(diagnostics.join(QLatin1Char('\n')));
+		}
 		local->setValue(key(QStringLiteral("youtubeBroadcast")), youtubeEvent->currentData().toString());
 		local->setValue(key(QStringLiteral("youtubeBroadcastName")), youtubeEvent->currentText());
 		flush->start();

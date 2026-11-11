@@ -162,6 +162,8 @@ void MultiStreamManager::start(const StreamAccount &account)
 	obs_output_set_reconnect_settings(session.output, 5, 5);
 	session.stopped.Connect(obs_output_get_signal_handler(session.output), "stop", outputStopped, &session);
 	session.stats.sampleTime = clock.elapsed();
+	writeDiagnostic(QStringLiteral("rtmp"), QStringLiteral("Starting output %1, serial=%2")
+		.arg(account.platform).arg(session.serial));
 	session.running = obs_output_start(session.output);
 	session.failed = !session.running;
 	writeDiagnostic(QStringLiteral("rtmp"), QStringLiteral("Start %1: accepted=%2, portrait=%3, %4x%5")
@@ -186,6 +188,8 @@ void MultiStreamManager::restart(Session &session)
 	session.stats = OutputStats{};
 	session.stats.sampleTime = clock.elapsed();
 	session.failed = false;
+	writeDiagnostic(QStringLiteral("rtmp"), QStringLiteral("Restarting output %1, serial=%2")
+		.arg(session.account.platform).arg(session.serial));
 	session.running = obs_output_start(session.output);
 	session.failed = !session.running;
 	if (session.running) session.stats.bytes = obs_output_get_total_bytes(session.output);
@@ -258,11 +262,15 @@ void MultiStreamManager::stop(Session &session, bool force)
 		return;
 	}
 	session.stopping = true;
+	writeDiagnostic(QStringLiteral("rtmp"), QStringLiteral("Stopping output %1, serial=%2, force=%3")
+		.arg(session.account.platform).arg(session.serial).arg(int(force)));
 	if (force || !obs_output_active(session.output)) {
 		obs_output_force_stop(session.output);
 	} else {
 		obs_output_stop(session.output);
 	}
+	writeDiagnostic(QStringLiteral("rtmp"), QStringLiteral("Stop requested %1, serial=%2")
+		.arg(session.account.platform).arg(session.serial));
 }
 
 void MultiStreamManager::stopAll(bool force)
