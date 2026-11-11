@@ -20,7 +20,7 @@ for (const term of [
 
 assert.match(workspace, /gateway->chatAccounts\(\)/);
 assert.match(overlay, /auto \*streamer = new StreamerOverlay\(\)/);
-assert.match(overlay, /QObject::connect\(mainWindow, &QObject::destroyed, \[guardedStreamer\]/);
+assert.match(overlay, /QObject::connect\(mainWindow, &QObject::destroyed, streamer, \[guardedStreamer\]/);
 assert.match(overlay, /count < 0 \? QStringLiteral\("—"\)/);
 assert.doesNotMatch(overlay, /new StreamerOverlay\(mainWindow\)/);
 

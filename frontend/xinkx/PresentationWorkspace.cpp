@@ -420,7 +420,7 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 	// window while tying its lifetime to the main window explicitly.
 	auto *streamer = new StreamerOverlay();
 	QPointer<StreamerOverlay> guardedStreamer(streamer);
-	QObject::connect(mainWindow, &QObject::destroyed, [guardedStreamer] {
+	QObject::connect(mainWindow, &QObject::destroyed, streamer, [guardedStreamer] {
 		if (guardedStreamer) delete guardedStreamer.data();
 	});
 	streamer->setObjectName(QStringLiteral("xinkxStreamerOverlay"));
