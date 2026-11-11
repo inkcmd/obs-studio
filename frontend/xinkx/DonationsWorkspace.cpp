@@ -1,4 +1,5 @@
 #include "DonationGateway.hpp"
+#include "EventCore.hpp"
 #include "OverlayRuntime.hpp"
 
 #include <widgets/OBSBasic.hpp>
@@ -15,17 +16,28 @@
 #include <QPushButton>
 #include <QVBoxLayout>
 
+#include <utility>
+
 namespace xinkx {
 
 void installDonationWorkspace(OBSBasic *mainWindow)
 {
 	auto *donations = new DonationGateway(mainWindow);
 	donations->setObjectName(QStringLiteral("xinkxDonationGateway"));
-	auto *runtime = mainWindow->findChild<OverlayRuntime *>(QStringLiteral("xinkxOverlayRuntime"));
-	if (runtime) {
-		QObject::connect(donations, &DonationGateway::donationEvent, runtime,
-			[runtime](const QString &provider, const QString &name, const QString &amount, const QString &message) {
-				runtime->publishAlert(QStringLiteral("donation"), provider, name, amount, message);
+	auto *events = mainWindow->findChild<EventCore *>(QStringLiteral("xinkxEventCore"));
+	if (events) {
+		QObject::connect(donations, &DonationGateway::donationDetailed, events,
+			[events](const QString &provider, const QString &sourceId, const QString &eventId,
+				 const QString &name, const QString &amount, const QString &message) {
+				StudioEvent event;
+				event.externalId = eventId;
+				event.sourceId = sourceId;
+				event.platform = provider;
+				event.type = QStringLiteral("donation");
+				event.name = name;
+				event.amount = amount;
+				event.message = message;
+				events->publish(std::move(event));
 			});
 	}
 }

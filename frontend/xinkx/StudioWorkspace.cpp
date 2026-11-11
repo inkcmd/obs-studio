@@ -8,6 +8,7 @@
 #include "PresentationSettings.hpp"
 #include "DonationGateway.hpp"
 #include "StudioAutomation.hpp"
+#include "EventCore.hpp"
 #include "WheelFocusGuard.hpp"
 #include "PortraitCanvas.hpp"
 #include "StreamAccounts.hpp"
@@ -541,6 +542,10 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	studio->setWidget(studioPages);
 	mainWindow->AddDockWidget(studio, Qt::RightDockWidgetArea);
 	new StudioAutomation(mainWindow);
+	const QString settingsFile = studioSettingsPath();
+	const QString eventsFile = settingsFile.isEmpty() ? QString{} :
+		QFileInfo(settingsFile).absoluteDir().filePath(QStringLiteral("events.jsonl"));
+	new EventCore(eventsFile, mainWindow);
 	installOverlayWorkspace(mainWindow, inspector);
 	installChatWorkspace(mainWindow);
 	installPresentationWorkspace(mainWindow);

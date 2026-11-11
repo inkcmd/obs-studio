@@ -33,7 +33,11 @@ assert.match(overlay, /gateway, &ChatGateway::incoming/);
 assert.match(overlay, /xinkxLastRealAlert/);
 assert.match(gateway, /alert:received/);
 assert.match(gateway, /alertDeliveryWarnings/);
-assert.match(gateway, /overlay->publishAlert\(line\.type, line\.platform/);
+// Provider alerts enter the EventCore once. Overlay delivery is subscribed
+// to that core rather than being called directly by every provider adapter.
+assert.match(gateway, /events->publish\(std::move\(event\)\)/);
+assert.match(overlay, /events, &EventCore::delivered, runtime/);
+assert.match(overlay, /runtime->publishAlert\(event\.type, event\.platform/);
 assert.match(overlay, /Kick: фолловеры\/подписки требуют официального webhook/);
 
 console.log('XINKX alert scene readiness, Twitch EventSub status, and actual delivery diagnostics OK');

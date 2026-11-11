@@ -1,6 +1,7 @@
 #include "ChatGateway.hpp"
 
 #include "NativeWebSocket.hpp"
+#include "EventCore.hpp"
 #include "OverlayRuntime.hpp"
 #include "PlatformApi.hpp"
 #include "PresentationSettings.hpp"
@@ -99,6 +100,23 @@ QString apiUrl(const QString &root, const QList<QPair<QString, QString>> &params
 
 ChatGateway::ChatGateway(OBSBasic *window) : QObject(window), mainWindow(window)
 {
+	if (auto *events = mainWindow->findChild<EventCore *>(QStringLiteral("xinkxEventCore"))) {
+		// Existing chat dock, streamer window and alert diagnostics keep their
+		// ChatLine API, but now observe events only after ordered core delivery.
+		// This also makes external donations visible in the unified event feed.
+		connect(events, &EventCore::delivered, this, [this](const StudioEvent &event) {
+			ChatLine line;
+			line.platform = event.platform;
+			line.accountId = event.accountId;
+			line.messageId = event.externalId;
+			line.name = event.name;
+			line.text = event.message;
+			line.type = event.type;
+			line.amount = event.amount;
+			line.receivedAt = event.receivedAt;
+			emit incoming(line);
+		});
+	}
 	reloadAccounts();
 	connect(&tick, &QTimer::timeout, this, &ChatGateway::schedule);
 	tick.setInterval(1000);
@@ -1728,10 +1746,24 @@ void ChatGateway::dispatch(ChatLine line)
 		if (seenOrder.size() > 1000) seenEvents.remove(seenOrder.takeFirst());
 	}
 	line.receivedAt = QDateTime::currentMSecsSinceEpoch();
-	emit incoming(line);
-	if (auto *overlay = mainWindow->findChild<OverlayRuntime *>(QStringLiteral("xinkxOverlayRuntime"))) {
-		if (line.type == QStringLiteral("chat")) overlay->publishChat(line.platform, line.name, line.text);
-		else {
+	// Chat, Twitch EventSub and YouTube purchases enter the same bounded
+	// pipeline as external donations. Reject duplicates before any UI,
+	// streamer-window or automated bot consumer observes them.
+	auto *events = mainWindow->findChild<EventCore *>(QStringLiteral("xinkxEventCore"));
+	if (!events) return;
+	StudioEvent event;
+	event.externalId = line.messageId;
+	event.sourceId = line.platform;
+	event.platform = line.platform;
+	event.accountId = line.accountId;
+	event.type = line.type;
+	event.name = line.name;
+	event.message = line.text;
+	event.amount = line.amount;
+	event.receivedAt = line.receivedAt;
+	if (!events->publish(std::move(event))) return;
+	if (line.type != QStringLiteral("chat")) {
+		if (auto *overlay = mainWindow->findChild<OverlayRuntime *>(QStringLiteral("xinkxOverlayRuntime"))) {
 			writeDiagnostic(QStringLiteral("alert:received"), QStringLiteral("%1 · %2")
 				.arg(line.platform, line.type));
 			const QString health = overlay->alertSourceHealth(mainWindow);
@@ -1748,7 +1780,6 @@ void ChatGateway::dispatch(ChatLine line)
 					else ++it;
 				}
 			}
-			overlay->publishAlert(line.type, line.platform, line.name, line.amount, line.text);
 		}
 	}
 	if (line.type != QStringLiteral("chat")) return;

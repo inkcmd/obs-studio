@@ -216,10 +216,13 @@ void DonationGateway::fetchCustomFeeds()
 			saveCustomFeeds();
 			std::reverse(fresh.begin(), fresh.end());
 			for (const auto &item : fresh) {
+				const QString eventId = item.value(QStringLiteral("id")).toVariant().toString();
 				const QString name = item.value(QStringLiteral("name")).toString(
 					item.value(QStringLiteral("username")).toString(QStringLiteral("Зритель")));
 				const QString amount = item.value(QStringLiteral("amount")).toVariant().toString() +
 					QStringLiteral(" ") + item.value(QStringLiteral("currency")).toString();
+				emit donationDetailed(it->config.name, id, eventId, name.left(80), amount.left(60),
+					item.value(QStringLiteral("message")).toString().left(240));
 				emit donationEvent(it->config.name, name.left(80), amount.left(60),
 					item.value(QStringLiteral("message")).toString().left(240));
 			}
@@ -382,11 +385,14 @@ void DonationGateway::fetch()
 			}
 			std::reverse(recent.begin(), recent.end());
 			for (const auto &item : recent) {
+				const QString eventId = item.value(QStringLiteral("id")).toVariant().toString();
 				const QString name = item.value(QStringLiteral("username")).toString(QStringLiteral("Зритель"));
 				const QString amount = item.value(QStringLiteral("amount")).toVariant().toString() +
 					QStringLiteral(" ") + item.value(QStringLiteral("currency")).toString();
 				const QString message = item.value(QStringLiteral("message")).toString();
 				emit donationReceived(name.left(80), amount.left(60), message.left(240));
+				emit donationDetailed(QStringLiteral("DonationAlerts"), QStringLiteral("donationalerts"), eventId,
+					name.left(80), amount.left(60), message.left(240));
 				emit donationEvent(QStringLiteral("DonationAlerts"), name.left(80), amount.left(60), message.left(240));
 			}
 		});

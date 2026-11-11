@@ -8,6 +8,8 @@ target_sources(
     xinkx/StudioWorkspace.hpp
     xinkx/StudioAutomation.cpp
     xinkx/StudioAutomation.hpp
+    xinkx/EventCore.cpp
+    xinkx/EventCore.hpp
     xinkx/MultiStreamManager.cpp
     xinkx/MultiStreamManager.hpp
     xinkx/PortraitCanvas.cpp

@@ -41,6 +41,9 @@ signals:
 	void statusChanged(const QString &message);
 	void donationReceived(const QString &name, const QString &amount, const QString &message);
 	void donationEvent(const QString &provider, const QString &name, const QString &amount, const QString &message);
+	// Preserves the payment's stable ID for cross-restart EventCore deduplication.
+	void donationDetailed(const QString &provider, const QString &sourceId, const QString &eventId,
+			      const QString &name, const QString &amount, const QString &message);
 
 private:
 	using Result = std::function<void(const QJsonObject &, int)>;
