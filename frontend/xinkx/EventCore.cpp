@@ -177,12 +177,15 @@ void EventCore::drain()
 
 EventMetrics EventCore::metrics() const
 {
-	return {acceptedCount, duplicateCount, overflowCount, pending.size(), history.size()};
+	// Both collections are hard-capped well below INT_MAX.
+	return {acceptedCount, duplicateCount, overflowCount,
+		static_cast<int>(pending.size()), static_cast<int>(history.size())};
 }
 
 QList<StudioEvent> EventCore::recent(int limit) const
 {
-	return history.mid(std::max(0, history.size() - std::clamp(limit, 0, kHistoryLimit)));
+	const qsizetype count = std::clamp<qsizetype>(limit, 0, kHistoryLimit);
+	return history.mid(std::max<qsizetype>(0, history.size() - count));
 }
 
 void EventCore::load()
