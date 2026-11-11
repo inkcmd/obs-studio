@@ -18,6 +18,8 @@ target_sources(
     xinkx/ShapeEngine.hpp
     xinkx/LocalAssistants.cpp
     xinkx/LocalAssistants.hpp
+    xinkx/EngineRegistry.cpp
+    xinkx/EngineRegistry.hpp
     xinkx/MultiStreamManager.cpp
     xinkx/MultiStreamManager.hpp
     xinkx/PortraitCanvas.cpp

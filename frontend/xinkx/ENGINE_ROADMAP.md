@@ -14,7 +14,7 @@ or `verified against live platforms`.
 | **2. Chat / Alerts / Automation** | Separate provider capability adapters, full free/paid event taxonomy, all permitted Twitch/YouTube/Kick subscriptions, moderation, rule-based event/action workflow and alerts editor | **Partial native implementation:** AlertEngine, paid/subtype metadata and local rules UI added; provider expansion and moderation pending; Windows build pending |
 | **3. Scene Elements** | One OBS source/item model for 16:9 and 9:16; native shapes/text/gradients/masks/path drawing, keyframe animation, alignment, grouping, presets, property inspector, undo/redo | **Partial native implementation:** GPU-backed custom figures and gradients, normal OBS scene item editing, properties and undo; path tool and animation timeline pending; Windows build pending |
 | **4. LLM / Speech** | Optional local model adapters (Ollama), explicit safe tool permissions, contextual memory, TTS/STT, voice routing and in-studio commands | **Partial native implementation:** Ollama client, session memory, explicit manual OBS action, Windows SAPI TTS; STT and rich tools pending; Windows build pending |
-| **5. Unified Studio / SDK** | Consolidate account/session models and workspace UI, extensible engines, diagnostics and plugin interfaces, installer and update/OBS upstream merge routine | Planned; existing OBS fork is operational source baseline |
+| **5. Unified Studio / SDK** | Consolidate account/session models and workspace UI, extensible engines, diagnostics and plugin interfaces, installer and update/OBS upstream merge routine | **Partial native implementation:** live engine overview, in-process capability registry, safe upstream integration script; plugin ABI/installer still pending; Windows build pending |
 
 ## Phase 1 — delivery contract
 
@@ -139,3 +139,24 @@ or `verified against live platforms`.
 - **Not claimed:** voice input/STT, model fine-tuning, vision analysis of live
   video, voice chat bots, third-party cloud models, automatic LLM-initiated
   actions or mixing TTS into a dedicated OBS output track.
+
+## Phase 5 — implemented slice and verification
+
+- **Обзор** is now the default studio page. It shows one compact status view
+  for Event Core, alerts, streaming outputs, provider chat, native scene
+  elements and local assistants, with navigation to the original editors.
+  It does not duplicate OBS's primary stream Start/Stop or recording controls.
+- `EngineRegistry` exposes a QObject/JSON inventory of installed engine
+  capabilities for future trusted integrations. It is not a dynamic C++ plugin
+  loader or a promised cross-version binary ABI.
+- `frontend/xinkx/tools/sync-obs-upstream.ps1` fetches official OBS changes
+  and reports branch divergence. With explicit `-Integrate` it opens a new
+  integration branch and starts `git merge --no-commit`, leaving the user's
+  `xinkx/main` untouched. No force push, auto-commit or blind overwrites.
+- **Windows checks:** registry lists all active components, Overview reflects
+  RTMP changes and live event health, keyboard/source navigation unchanged,
+  first startup after portable profile migration preserves source collection.
+  Review upstream script in dry-run mode only before enabling integration.
+- **Not claimed:** final unified UX for every OBS setting, public third-party
+  plugin SDK, auto-updater, Windows installer/release signing and successful
+  upstream OBS 33.x merge. These remain separate release engineering work.

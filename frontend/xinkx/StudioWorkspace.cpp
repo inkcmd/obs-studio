@@ -12,6 +12,7 @@
 #include "AlertEngine.hpp"
 #include "EventAutomation.hpp"
 #include "LocalAssistants.hpp"
+#include "EngineRegistry.hpp"
 #include "WheelFocusGuard.hpp"
 #include "PortraitCanvas.hpp"
 #include "StreamAccounts.hpp"
@@ -560,14 +561,15 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	// JSON scene export remains available in source for diagnostics. Native source and
 	// scene editing in OBS is the default; no separate raw JSON dock is opened.
 	installDonationWorkspace(mainWindow);
+	installEngineHub(mainWindow);
 	QTimer::singleShot(0, mainWindow, [mainWindow, inspector, studio, studioPages] {
 		studio->setFloating(false);
 		mainWindow->tabifyDockWidget(inspector, studio);
 		studio->show();
 		studio->raise();
 		mainWindow->resizeDocks({studio}, {450}, Qt::Horizontal);
-		const int chat = studioPages->indexOf(studioPages->findChild<QWidget *>(QStringLiteral("xinkxChatPage")));
-		if (chat >= 0) studioPages->setCurrentIndex(chat);
+		const int home = studioPages->indexOf(studioPages->widget(0));
+		if (home >= 0) studioPages->setCurrentIndex(home);
 	});
 	// Once OBS restores its layout, show both canvases automatically whenever
 	// a portrait output is enabled. Both canvases follow the same OBS scene.
