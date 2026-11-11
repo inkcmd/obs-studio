@@ -1,4 +1,5 @@
 #include "ChatGateway.hpp"
+#include "BroadcastTagsEditor.hpp"
 #include "StudioWorkspace.hpp"
 #include "StudioDiagnostics.hpp"
 
@@ -72,6 +73,14 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 	description->setPlaceholderText(QStringLiteral("Описание трансляции"));
 	description->setPlainText(local->value(key(QStringLiteral("description"))).toString());
 	form->addRow(QStringLiteral("Описание"), description);
+	auto *tags = new BroadcastTagsEditor(true, panel);
+	tags->setObjectName(QStringLiteral("xinkxBroadcastTags"));
+	tags->setTags(local->value(key(QStringLiteral("tags"))).toStringList());
+	form->addRow(QStringLiteral("Теги Twitch / Kick"), tags);
+	auto *youtubeTags = new BroadcastTagsEditor(false, panel);
+	youtubeTags->setObjectName(QStringLiteral("xinkxBroadcastYouTubeTags"));
+	youtubeTags->setTags(local->value(key(QStringLiteral("youtubeTags"))).toStringList());
+	form->addRow(QStringLiteral("Теги YouTube"), youtubeTags);
 	auto *game = new QLineEdit(local->value(key(QStringLiteral("game"))).toString(), panel);
 	game->setObjectName(QStringLiteral("xinkxBroadcastGame"));
 	game->setPlaceholderText(QStringLiteral("Начните вводить название игры…"));
@@ -129,6 +138,7 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 	auto firstTitle = std::make_shared<bool>(local->contains(key(QStringLiteral("title"))));
 	auto firstDescription = std::make_shared<bool>(local->contains(key(QStringLiteral("description"))));
 	auto firstGame = std::make_shared<bool>(local->contains(key(QStringLiteral("game"))));
+	auto firstTags = std::make_shared<bool>(local->contains(key(QStringLiteral("tags"))));
 	auto youtubeCategoryManual = std::make_shared<bool>(local->contains(key(QStringLiteral("youtubeCategory"))));
 
 	const auto youtubeAccount = [=] {
@@ -253,6 +263,15 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 		local->setValue(key(QStringLiteral("description")), description->toPlainText());
 		flush->start();
 	});
+	tags->setOnChanged([=](const QStringList &values) {
+		*firstTags = true;
+		local->setValue(key(QStringLiteral("tags")), values);
+		flush->start();
+	});
+	youtubeTags->setOnChanged([=](const QStringList &values) {
+		local->setValue(key(QStringLiteral("youtubeTags")), values);
+		flush->start();
+	});
 	QObject::connect(game, &QLineEdit::textChanged, panel, [=](const QString &value) {
 		*firstGame = true;
 		local->setValue(key(QStringLiteral("game")), value);
@@ -327,6 +346,16 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 		if (!*firstTitle && !actualTitle.isEmpty()) title->setText(actualTitle);
 		if (!*firstDescription && !actualDescription.isEmpty()) description->setPlainText(actualDescription);
 		if (!*firstGame && platform == QStringLiteral("twitch") && !actualGame.isEmpty()) game->setText(actualGame);
+		bool twitchConnected = false;
+		for (const auto &account : gateway->accounts())
+			if (account.platform == QStringLiteral("twitch")) { twitchConnected = true; break; }
+		if (!*firstTags && (platform == QStringLiteral("twitch") ||
+			(platform == QStringLiteral("kick") && !twitchConnected))) {
+			const QJsonArray remote = info.value(QStringLiteral("tags")).toArray();
+			QStringList incoming;
+			for (const QJsonValue &value : remote) if (value.isString()) incoming << value.toString();
+			if (!incoming.isEmpty()) tags->setTags(incoming);
+		}
 		if (platform != QStringLiteral("youtube")) {
 			const QString actualId = info.value(QStringLiteral("categoryId")).toVariant().toString();
 			if (!actualId.isEmpty() && categories->value(platform)->currentData().toString().isEmpty())
@@ -418,7 +447,11 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 				QString category = categories->value(entry.platform)->currentData().toString();
 				if (!name.isEmpty() && category.isEmpty() && entry.platform != QStringLiteral("youtube"))
 					(*warnings)[entry.id] = QStringLiteral(" · игра не найдена на площадке, категория не менялась");
-				gateway->updateBroadcast(entry.id, eventId, title->text(), description->toPlainText(), category);
+				const bool applyTags = entry.platform == QStringLiteral("youtube")
+					? local->contains(key(QStringLiteral("youtubeTags")))
+					: local->contains(key(QStringLiteral("tags")));
+				gateway->updateBroadcast(entry.id, eventId, title->text(), description->toPlainText(), category,
+					entry.platform == QStringLiteral("youtube") ? youtubeTags->tags() : tags->tags(), applyTags);
 				++sent;
 			}
 			QStringList notes;

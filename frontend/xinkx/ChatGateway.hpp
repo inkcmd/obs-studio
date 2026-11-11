@@ -47,7 +47,8 @@ public:
 	void inspectBroadcast(const QString &accountId, const QString &youtubeBroadcastId = {});
 	void searchCategories(const QString &accountId, const QString &query);
 	void updateBroadcast(const QString &accountId, const QString &youtubeBroadcastId,
-			     const QString &title, const QString &description, const QString &categoryId);
+			     const QString &title, const QString &description, const QString &categoryId,
+			     const QStringList &tags = {}, bool applyTags = false);
 	void createYouTubeBroadcast(const QString &accountId, const QString &title,
 				    const QString &description, const QString &categoryId);
 	void bindYouTubeStream(const QString &accountId, const QString &broadcastId, const QString &streamId);
@@ -153,6 +154,9 @@ private:
 	void jsonApi(const QString &id, const QString &url, const QByteArray &verb,
 		     const QJsonObject &body, const RequestDone &done, bool retry = false);
 	void saveYouTubeStream(const QString &id, const QString &streamId, const QString &broadcastId);
+	void updateYouTubeVideoTags(const QString &accountId, const QString &broadcastId,
+				    const QString &title, const QString &description,
+				    const QString &categoryId, const QStringList &tags);
 	void saveRefreshed(const QString &id, const QJsonObject &json);
 	void status(const QString &id, const QString &message);
 	QString canonicalChatId(const QString &accountId) const;

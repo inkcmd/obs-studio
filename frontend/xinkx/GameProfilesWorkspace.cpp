@@ -1,4 +1,5 @@
 #include "ChatGateway.hpp"
+#include "BroadcastTagsEditor.hpp"
 #include "StudioWorkspace.hpp"
 #include "StreamAccounts.hpp"
 
@@ -109,6 +110,16 @@ bool validProfiles(const QJsonObject &root)
 			const auto item = object.value(QString::fromLatin1(key));
 			if (!item.isUndefined() && (!item.isString() || item.toString().size() > 160)) return false;
 		}
+		for (const auto &key : {"tags", "youtubeTags"}) {
+			const QJsonValue value = object.value(QString::fromLatin1(key));
+			if (value.isUndefined()) continue; // Profiles written before tag support.
+			if (!value.isArray()) return false;
+			const QJsonArray tags = value.toArray();
+			if (tags.size() > 500 || (QString::fromLatin1(key) == QStringLiteral("tags") && tags.size() > 10))
+				return false;
+			for (const QJsonValue &tag : tags)
+				if (!tag.isString() || tag.toString().size() > 500) return false;
+		}
 	}
 	return true;
 }
@@ -146,13 +157,16 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 	if (!editor) return;
 	auto *title = panel->findChild<QLineEdit *>(QStringLiteral("xinkxBroadcastTitle"));
 	auto *description = panel->findChild<QPlainTextEdit *>(QStringLiteral("xinkxBroadcastDescription"));
+	auto *tags = static_cast<BroadcastTagsEditor *>(panel->findChild<QWidget *>(QStringLiteral("xinkxBroadcastTags")));
+	auto *youtubeTags = static_cast<BroadcastTagsEditor *>(
+		panel->findChild<QWidget *>(QStringLiteral("xinkxBroadcastYouTubeTags")));
 	auto *game = panel->findChild<QLineEdit *>(QStringLiteral("xinkxBroadcastGame"));
 	auto *twitch = panel->findChild<QComboBox *>(QStringLiteral("xinkxBroadcastTwitchGame"));
 	auto *kick = panel->findChild<QComboBox *>(QStringLiteral("xinkxBroadcastKickGame"));
 	auto *youtube = panel->findChild<QComboBox *>(QStringLiteral("xinkxBroadcastYouTubeGame"));
 	auto *youtubeEvent = panel->findChild<QComboBox *>(QStringLiteral("xinkxBroadcastYouTubeEvent"));
 	auto *save = panel->findChild<QPushButton *>(QStringLiteral("xinkxBroadcastSave"));
-	if (!title || !description || !game || !twitch || !kick || !youtube || !youtubeEvent || !save)
+	if (!title || !description || !tags || !youtubeTags || !game || !twitch || !kick || !youtube || !youtubeEvent || !save)
 		return;
 
 	auto root = std::make_shared<QJsonObject>(QJsonObject{{QStringLiteral("version"), 1},
@@ -218,6 +232,15 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 		if (sceneIndex >= 0) scene->setCurrentIndex(sceneIndex);
 		title->setText(profile.value(QStringLiteral("title")).toString());
 		description->setPlainText(profile.value(QStringLiteral("description")).toString());
+		const auto readTags = [](const QJsonArray &items) {
+			QStringList values;
+			for (const auto &tag : items) values << tag.toString();
+			return values;
+		};
+		if (profile.contains(QStringLiteral("tags")))
+			tags->setTags(readTags(profile.value(QStringLiteral("tags")).toArray()));
+		if (profile.contains(QStringLiteral("youtubeTags")))
+			youtubeTags->setTags(readTags(profile.value(QStringLiteral("youtubeTags")).toArray()));
 		game->setText(profile.value(QStringLiteral("game")).toString());
 		selectSaved(twitch, profile.value(QStringLiteral("twitchCategory")).toString(),
 			profile.value(QStringLiteral("twitchCategoryName")).toString());
@@ -275,6 +298,8 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 			{QStringLiteral("sceneUuid"), scene->currentData().toString()},
 			{QStringLiteral("title"), title->text()},
 			{QStringLiteral("description"), description->toPlainText().left(5000)},
+			{QStringLiteral("tags"), QJsonArray::fromStringList(tags->tags())},
+			{QStringLiteral("youtubeTags"), QJsonArray::fromStringList(youtubeTags->tags())},
 			{QStringLiteral("game"), game->text().left(150)},
 			{QStringLiteral("twitchCategory"), twitch->currentData().toString()},
 			{QStringLiteral("twitchCategoryName"), twitch->currentText()},

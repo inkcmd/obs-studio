@@ -35,6 +35,7 @@ target_sources(
 	 xinkx/PresentationSettings.hpp
 	 xinkx/PresentationWorkspace.cpp
 	 xinkx/BroadcastWorkspace.cpp
+	 xinkx/BroadcastTagsEditor.hpp
 	 xinkx/GameProfilesWorkspace.cpp
 	 xinkx/SceneJsonWorkspace.cpp
 	 xinkx/DonationGateway.cpp

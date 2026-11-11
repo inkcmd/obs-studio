@@ -63,6 +63,22 @@ bool quotaExceeded(const QJsonObject &json)
 		 message.contains(QStringLiteral("/youtube/v3/getting-started")));
 }
 
+bool tagsMatch(const QJsonArray &remote, const QStringList &expected)
+{
+	QStringList actual;
+	for (const QJsonValue &item : remote) {
+		if (!item.isString()) return false;
+		actual << item.toString();
+	}
+	if (actual.size() != expected.size()) return false;
+	QStringList sorted = expected;
+	actual.sort(Qt::CaseInsensitive);
+	sorted.sort(Qt::CaseInsensitive);
+	for (int i = 0; i < sorted.size(); ++i)
+		if (actual.at(i).compare(sorted.at(i), Qt::CaseInsensitive) != 0) return false;
+	return true;
+}
+
 qint64 nextYoutubeQuotaReset()
 {
 	const QTimeZone pacific("America/Los_Angeles");
@@ -551,6 +567,7 @@ void ChatGateway::inspectBroadcast(const QString &id, const QString &youtubeBroa
 			const auto item = data.first().toObject();
 			QJsonObject output{{QStringLiteral("platform"), QStringLiteral("twitch")},
 				{QStringLiteral("title"), item.value(QStringLiteral("title"))},
+				{QStringLiteral("tags"), item.value(QStringLiteral("tags"))},
 				{QStringLiteral("categoryId"), item.value(QStringLiteral("game_id"))},
 				{QStringLiteral("categoryName"), item.value(QStringLiteral("game_name"))}};
 			// Twitch's channel bio is a user property, not part of /helix/channels.
@@ -579,6 +596,7 @@ void ChatGateway::inspectBroadcast(const QString &id, const QString &youtubeBroa
 					: item.value(QStringLiteral("category")).toObject();
 				emit broadcastInfo(id, {{QStringLiteral("platform"), QStringLiteral("kick")},
 					{QStringLiteral("title"), title},
+					{QStringLiteral("tags"), live.value(QStringLiteral("custom_tags"))},
 					{QStringLiteral("description"), item.value(QStringLiteral("channel_description")).toString(
 						item.value(QStringLiteral("description")).toString())},
 					{QStringLiteral("categoryId"), category.value(QStringLiteral("id"))},
@@ -670,7 +688,8 @@ void ChatGateway::searchCategories(const QString &id, const QString &query)
 }
 
 void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
-				  const QString &title, const QString &description, const QString &categoryId)
+				  const QString &title, const QString &description, const QString &categoryId,
+				  const QStringList &tags, bool applyTags)
 {
 	const auto account = known.value(id);
 	if (account.id.isEmpty()) return;
@@ -684,6 +703,7 @@ void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
 			{{QStringLiteral("broadcaster_id"), account.providerId}});
 		if (!heading.isEmpty()) body.insert(QStringLiteral("title"), heading);
 		if (!category.isEmpty()) body.insert(QStringLiteral("game_id"), category);
+		if (applyTags) body.insert(QStringLiteral("tags"), QJsonArray::fromStringList(tags));
 		const auto finish = [this, id, description](bool changed, const QString &error) {
 			if (!changed || description.isEmpty()) {
 				emit broadcastResult(id, changed ? QStringLiteral("Twitch: данные сохранены") : error, changed);
@@ -711,13 +731,14 @@ void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
 			emit broadcastResult(id, QStringLiteral("Kick: категория должна быть числовым ID"), false); return;
 		}
 		if (number > 0) body.insert(QStringLiteral("category_id"), number);
+		if (applyTags) body.insert(QStringLiteral("custom_tags"), QJsonArray::fromStringList(tags));
 	} else if (account.platform == QStringLiteral("youtube")) {
 		if (broadcastId.isEmpty()) {
 			emit broadcastResult(id, QStringLiteral("YouTube: выбери эфир"), false); return;
 		}
 		const auto readUrl = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts"),
 			{{QStringLiteral("part"), QStringLiteral("snippet,contentDetails")}, {QStringLiteral("id"), broadcastId}});
-		authorized(id, readUrl, {}, [this, id, broadcastId, heading, description, category](const HttpResult &result) {
+		authorized(id, readUrl, {}, [this, id, broadcastId, heading, description, category, tags, applyTags](const HttpResult &result) {
 			if (!result.ok || result.json.value(QStringLiteral("items")).toArray().isEmpty()) {
 				emit broadcastResult(id, QStringLiteral("YouTube: не удалось прочитать эфир: ") + result.error, false);
 				return;
@@ -725,6 +746,15 @@ void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
 			const QJsonObject existing = result.json.value(QStringLiteral("items")).toArray().first().toObject();
 			const auto originalSnippet = existing.value(QStringLiteral("snippet")).toObject();
 			const auto originalDetails = existing.value(QStringLiteral("contentDetails")).toObject();
+			const bool metadataUnchanged =
+				(heading.isEmpty() || originalSnippet.value(QStringLiteral("title")).toString() == heading) &&
+				originalSnippet.value(QStringLiteral("description")).toString() == description.left(5000) &&
+				(category.isEmpty() || originalSnippet.value(QStringLiteral("categoryId")).toString() == category);
+			if (metadataUnchanged) {
+				if (applyTags) updateYouTubeVideoTags(id, broadcastId, heading, description, category, tags);
+				else emit broadcastResult(id, QStringLiteral("YouTube: данные эфира уже актуальны"), true);
+				return;
+			}
 			QJsonObject monitor = originalDetails.value(QStringLiteral("monitorStream")).toObject();
 			// liveBroadcasts.update also requires scheduledStartTime and monitorStream
 			// settings even when only the snippet part is being changed.
@@ -751,7 +781,7 @@ void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
 			const auto body = QJsonObject{{QStringLiteral("id"), broadcastId},
 				{QStringLiteral("snippet"), snippet},
 				{QStringLiteral("contentDetails"), QJsonObject{{QStringLiteral("monitorStream"), monitor}}}};
-			jsonApi(id, endpoint, QByteArray("PUT"), body, [this, id, heading, description, category](const HttpResult &reply) {
+			jsonApi(id, endpoint, QByteArray("PUT"), body, [this, id, broadcastId, heading, description, category, tags, applyTags](const HttpResult &reply) {
 				if (!reply.ok) {
 					emit broadcastResult(id, QStringLiteral("YouTube: ") + reply.error, false);
 					return;
@@ -760,14 +790,18 @@ void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
 				const bool verified = (heading.isEmpty() || saved.value(QStringLiteral("title")).toString() == heading) &&
 					saved.value(QStringLiteral("description")).toString() == description.left(5000) &&
 					(category.isEmpty() || saved.value(QStringLiteral("categoryId")).toString() == category);
-				emit broadcastResult(id, verified ? QStringLiteral("YouTube: название и описание эфира обновлены")
-					: QStringLiteral("YouTube: ответ API не подтвердил обновление названия, описания или категории"), verified);
+				if (!verified || !applyTags) {
+					emit broadcastResult(id, verified ? QStringLiteral("YouTube: название и описание эфира обновлены")
+						: QStringLiteral("YouTube: ответ API не подтвердил обновление названия, описания или категории"), verified);
+					return;
+				}
+				updateYouTubeVideoTags(id, broadcastId, heading, description, category, tags);
 			});
 		});
 		return;
 	} else return;
 	if (body.isEmpty()) { emit broadcastResult(id, QStringLiteral("Для этой площадки укажи название или категорию"), false); return; }
-	jsonApi(id, url, method, body, [this, id, account](const HttpResult &result) {
+	jsonApi(id, url, method, body, [this, id, account, tags, applyTags](const HttpResult &result) {
 		const auto label = platformTitle(account.platform);
 		const QString reason = account.platform == QStringLiteral("kick") && result.status == 401
 			? QStringLiteral("Kick: HTTP 401 после обновления токена. Переподключи OAuth в «Настройки → Трансляция» "
@@ -775,8 +809,82 @@ void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
 			: account.platform == QStringLiteral("kick") && result.status == 403
 			? QStringLiteral("Kick: HTTP 403 — проверь разрешение channel:write и права на канал")
 			: label + QStringLiteral(": ") + result.error;
-		emit broadcastResult(id, result.ok ? label + QStringLiteral(": данные обновлены") : reason,
-			result.ok);
+		if (!result.ok || !applyTags) {
+			emit broadcastResult(id, result.ok ? label + QStringLiteral(": данные обновлены") : reason, result.ok);
+			return;
+		}
+		// Kick has historically returned HTTP 204 while ignoring some metadata.
+		// Check the server's actual tag list before claiming a successful save.
+		const auto inspectUrl = QStringLiteral("https://api.kick.com/public/v1/channels");
+		authorized(id, inspectUrl, {}, [this, id, account, label, tags](const HttpResult &verified) {
+			if (!verified.ok || verified.json.value(QStringLiteral("data")).toArray().isEmpty()) {
+				emit broadcastResult(id, label + QStringLiteral(": эфир обновлён, но теги не удалось проверить"), false);
+				return;
+			}
+			const QJsonObject channel = verified.json.value(QStringLiteral("data")).toArray().first().toObject();
+			const QJsonValue value = channel.value(QStringLiteral("stream")).toObject()
+				.value(QStringLiteral("custom_tags"));
+			if (!value.isArray()) {
+				emit broadcastResult(id, label + QStringLiteral(": Kick не вернул список тегов для проверки"), false);
+				return;
+			}
+			const QJsonArray actual = value.toArray();
+			const bool match = tagsMatch(actual, tags);
+			emit broadcastResult(id, match ? label + QStringLiteral(": эфир и теги обновлены")
+				: label + QStringLiteral(": эфир обновлён, но теги не совпадают с сохранёнными"), match);
+		});
+	});
+}
+
+void ChatGateway::updateYouTubeVideoTags(const QString &id, const QString &broadcastId,
+					 const QString &heading, const QString &description,
+					 const QString &category, const QStringList &tags)
+{
+	// The broadcast endpoint cannot change video tags. Fetch current metadata
+	// first: no videos.update request or its quota cost if tags already match.
+	const auto videoUrl = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/videos"),
+		{{QStringLiteral("part"), QStringLiteral("snippet")}, {QStringLiteral("id"), broadcastId}});
+	authorized(id, videoUrl, {}, [this, id, broadcastId, tags, heading, description, category](const HttpResult &result) {
+		const QJsonArray items = result.json.value(QStringLiteral("items")).toArray();
+		if (!result.ok || items.isEmpty()) {
+			emit broadcastResult(id, QStringLiteral("YouTube: теги не прочитаны: ") + result.error, false);
+			return;
+		}
+		const QJsonObject existing = items.first().toObject().value(QStringLiteral("snippet")).toObject();
+		QStringList current;
+		for (const QJsonValue &tag : existing.value(QStringLiteral("tags")).toArray())
+			if (tag.isString()) current << tag.toString();
+		if (current == tags) {
+			emit broadcastResult(id, QStringLiteral("YouTube: эфир и теги актуальны"), true);
+			return;
+		}
+		QJsonObject snippet{
+			{QStringLiteral("title"), heading.isEmpty() ? existing.value(QStringLiteral("title")) : QJsonValue(heading)},
+			{QStringLiteral("description"), description.left(5000)},
+			{QStringLiteral("categoryId"), category.isEmpty() ? existing.value(QStringLiteral("categoryId")) : QJsonValue(category)},
+			{QStringLiteral("tags"), QJsonArray::fromStringList(tags)}};
+		for (const QString &field : {QStringLiteral("defaultLanguage"), QStringLiteral("defaultAudioLanguage")})
+			if (existing.contains(field)) snippet.insert(field, existing.value(field));
+		if (snippet.value(QStringLiteral("title")).toString().isEmpty() ||
+		    snippet.value(QStringLiteral("categoryId")).toString().isEmpty()) {
+			emit broadcastResult(id, QStringLiteral("YouTube: нельзя обновить теги без названия и категории видео"), false);
+			return;
+		}
+		const QJsonObject request{{QStringLiteral("id"), broadcastId}, {QStringLiteral("snippet"), snippet}};
+		const auto updateUrl = QStringLiteral("https://www.googleapis.com/youtube/v3/videos?part=snippet");
+		jsonApi(id, updateUrl, QByteArray("PUT"), request, [this, id, tags](const HttpResult &updated) {
+			if (!updated.ok) {
+				emit broadcastResult(id, QStringLiteral("YouTube: теги не сохранены: ") + updated.error, false);
+				return;
+			}
+			QStringList confirmed;
+			for (const QJsonValue &tag : updated.json.value(QStringLiteral("snippet")).toObject()
+					.value(QStringLiteral("tags")).toArray())
+				if (tag.isString()) confirmed << tag.toString();
+			const bool matches = confirmed == tags;
+			emit broadcastResult(id, matches ? QStringLiteral("YouTube: эфир и теги обновлены")
+				: QStringLiteral("YouTube: API не подтвердил новые теги"), matches);
+		});
 	});
 }
 
