@@ -5,6 +5,7 @@
 #include "StudioAutomation.hpp"
 #include "ChatGateway.hpp"
 #include "EventCore.hpp"
+#include "AlertEngine.hpp"
 
 #include <OBSApp.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -1043,23 +1044,30 @@ void installOverlayWorkspace(OBSBasic *mainWindow, QDockWidget *sourceInspector)
 	// The overlay is a subscriber, not a second provider ingress path. Chat,
 	// follows, paid memberships and donations now share ordered delivery.
 	if (auto *events = mainWindow->findChild<EventCore *>(QStringLiteral("xinkxEventCore"))) {
-		QObject::connect(events, &EventCore::delivered, runtime,
-			[runtime](const StudioEvent &event) {
-				if (event.type == QStringLiteral("chat"))
-					runtime->publishChat(event.platform, event.name, event.message);
-				else
-					runtime->publishAlert(event.type, event.platform, event.name, event.amount, event.message);
+		if (auto *alerts = mainWindow->findChild<AlertEngine *>(QStringLiteral("xinkxAlertEngine"))) {
+			QObject::connect(alerts, &AlertEngine::chatReady, runtime, [runtime](const StudioEvent &event) {
+				runtime->publishChat(event.platform, event.name, event.message);
 			});
+			QObject::connect(alerts, &AlertEngine::alertReady, runtime, [runtime](const StudioEvent &event) {
+				runtime->publishAlert(event.type, event.platform, event.name, event.amount, event.message);
+			});
+		}
 		auto *metrics = new QLabel(content);
 		metrics->setObjectName(QStringLiteral("xinkxEventMetrics"));
 		metrics->setStyleSheet(QStringLiteral("font-size:11px;color:#a7bdc9"));
 		metrics->setTextInteractionFlags(Qt::TextSelectableByMouse);
 		const auto refreshMetrics = [events, metrics] {
 			const auto state = events->metrics();
-			metrics->setText(QStringLiteral("События: %1 · повторы: %2 · очередь: %3 · потери: %4 · журнал: %5")
-				.arg(state.accepted).arg(state.duplicates).arg(state.queued).arg(state.overflow).arg(state.stored));
+			QString text = QStringLiteral("События: %1 · повторы: %2 · очередь: %3 · потери: %4 · журнал: %5")
+				.arg(state.accepted).arg(state.duplicates).arg(state.queued).arg(state.overflow).arg(state.stored);
+			if (auto *alerts = events->parent()->findChild<AlertEngine *>(QStringLiteral("xinkxAlertEngine")))
+				text += QStringLiteral(" · бесплатно: %1 · платно: %2")
+					.arg(alerts->freeAlerts()).arg(alerts->paidAlerts());
+			metrics->setText(text);
 		};
 		QObject::connect(events, &EventCore::metricsChanged, metrics, refreshMetrics);
+		if (auto *alerts = mainWindow->findChild<AlertEngine *>(QStringLiteral("xinkxAlertEngine")))
+			QObject::connect(alerts, &AlertEngine::alertCountChanged, metrics, refreshMetrics);
 		QObject::connect(events, &EventCore::storageWarning, metrics, [metrics](const QString &message) {
 			metrics->setToolTip(message);
 			writeDiagnostic(QStringLiteral("event-core"), message);

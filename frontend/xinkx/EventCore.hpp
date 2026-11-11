@@ -18,6 +18,8 @@ struct StudioEvent {
 	QString platform;        // twitch, youtube, kick, donationalerts, ...
 	QString accountId;       // Local account ID; may be empty for donation feeds.
 	QString type;            // chat, follow, sub, donation, raid, ...
+	QString subtype;         // Provider-specific event subtype, not a raw payload.
+	bool paid = false;       // Explicit paid event (e.g. Super Chat or Bits).
 	QString name;
 	QString message;
 	QString amount;

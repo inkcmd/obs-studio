@@ -11,7 +11,7 @@ or `verified against live platforms`.
 | Phase | Scope | Status (2026-11-11) |
 | --- | --- | --- |
 | **1. Event Core** | Unified incoming real events from chat, follows, memberships, raids, donations; stable IDs, dedup, bounded ordered fan-out, local journal, health counters | **Source implementation complete; Windows compile and live verification pending** |
-| **2. Chat / Alerts / Automation** | Separate provider capability adapters, full free/paid event taxonomy, all permitted Twitch/YouTube/Kick subscriptions, moderation, rule-based event/action workflow and alerts editor | Planned; existing chat, limited Twitch EventSub, YouTube paid-chat, DonationAlerts, reactions and bot commands remain functional |
+| **2. Chat / Alerts / Automation** | Separate provider capability adapters, full free/paid event taxonomy, all permitted Twitch/YouTube/Kick subscriptions, moderation, rule-based event/action workflow and alerts editor | **Partial native implementation:** AlertEngine, paid/subtype metadata and local rules UI added; provider expansion and moderation pending; Windows build pending |
 | **3. Scene Elements** | One OBS source/item model for 16:9 and 9:16; native shapes/text/gradients/masks/path drawing, keyframe animation, alignment, grouping, presets, property inspector, undo/redo | Planned; existing libobs sources, HTML-backed widgets and dual canvas editor remain functional |
 | **4. LLM / Speech** | Optional local model adapters (Ollama), explicit safe tool permissions, contextual memory, TTS/STT, voice routing and in-studio commands | Planned; existing `StudioAutomation` allowlisted command executor is the starting point, not an LLM runtime |
 | **5. Unified Studio / SDK** | Consolidate account/session models and workspace UI, extensible engines, diagnostics and plugin interfaces, installer and update/OBS upstream merge routine | Planned; existing OBS fork is operational source baseline |
@@ -73,3 +73,25 @@ or `verified against live platforms`.
 - Disk failures currently produce a visible local warning. Journal durability
   depends on filesystem write success; OS crash between buffered writes may
   lose the most recent 1.5 seconds of history.
+
+## Phase 2 — implemented slice and verification
+
+- A new `AlertEngine` consumes the accepted EventCore stream and routes live
+  chat versus real alerts to the original OBS overlays. Free/paid counters
+  appear beside EventCore delivery health; explicit YouTube/Twitch subtypes
+  and purchase flags survive the journal. A gifted membership recipient is
+  not counted as a new purchase by that recipient.
+- `EventAutomation` stores up to 100 opt-in rules atomically in
+  `event-rules.json` (portable XINKX settings folder). A **Правила** tab creates
+  or removes rules, selecting event type, provider, text condition, cooldown
+  and an allowed OBS action. Rules never run on replayed journal history.
+- Allowed commands: activate an existing scene, show an existing source,
+  trigger a known reaction or control the timer. Only `StudioAutomation` can
+  perform actions. No arbitrary shell, scripts, public listener, hidden stream
+  start/stop or unsupervised network API write is introduced.
+- **Windows checks:** build, add donation → `effect.trigger` rule; trigger two
+  identical events in quick succession and confirm cooldown; activate a scene
+  using a manually generated chat event; restart and verify rule persistence.
+- **Not claimed:** full Kick follow/sub webhooks, platform moderation,
+  configurable native alert visuals, paid/free emote tiers or editable rule
+  condition graphs. Those are still work within the broad Stage 2 scope.

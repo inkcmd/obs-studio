@@ -9,6 +9,8 @@
 #include "DonationGateway.hpp"
 #include "StudioAutomation.hpp"
 #include "EventCore.hpp"
+#include "AlertEngine.hpp"
+#include "EventAutomation.hpp"
 #include "WheelFocusGuard.hpp"
 #include "PortraitCanvas.hpp"
 #include "StreamAccounts.hpp"
@@ -546,8 +548,10 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	const QString eventsFile = settingsFile.isEmpty() ? QString{} :
 		QFileInfo(settingsFile).absoluteDir().filePath(QStringLiteral("events.jsonl"));
 	new EventCore(eventsFile, mainWindow);
+	new AlertEngine(mainWindow);
 	installOverlayWorkspace(mainWindow, inspector);
 	installChatWorkspace(mainWindow);
+	installEventAutomationWorkspace(mainWindow);
 	installPresentationWorkspace(mainWindow);
 	installBroadcastWorkspace(mainWindow);
 	installGameProfilesWorkspace(mainWindow);

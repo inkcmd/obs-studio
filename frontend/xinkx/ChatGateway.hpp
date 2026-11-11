@@ -27,6 +27,8 @@ struct ChatLine {
 	QString name;
 	QString text;
 	QString type = QStringLiteral("chat");
+	QString subtype;
+	bool paid = false;
 	QString amount;
 	QString messageId;
 	qint64 receivedAt = 0;

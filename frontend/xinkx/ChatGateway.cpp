@@ -112,6 +112,8 @@ ChatGateway::ChatGateway(OBSBasic *window) : QObject(window), mainWindow(window)
 			line.name = event.name;
 			line.text = event.message;
 			line.type = event.type;
+			line.subtype = event.subtype;
+			line.paid = event.paid;
 			line.amount = event.amount;
 			line.receivedAt = event.receivedAt;
 			emit incoming(line);
@@ -1198,13 +1200,18 @@ void ChatGateway::handleYouTubePage(const QString &id, const QJsonObject &page)
 		line.text = snippet.value(QStringLiteral("displayMessage")).toString(
 				snippet.value(QStringLiteral("textMessageDetails")).toObject()
 				.value(QStringLiteral("messageText")).toString());
+		line.subtype = type;
 		if (type == QStringLiteral("superChatEvent") || type == QStringLiteral("superStickerEvent")) {
 			line.type = QStringLiteral("donation");
+			line.paid = true;
 			const auto details = snippet.value(type == QStringLiteral("superChatEvent")
 					? QStringLiteral("superChatDetails") : QStringLiteral("superStickerDetails")).toObject();
 			line.amount = details.value(QStringLiteral("amountDisplayString")).toString();
 			line.text = details.value(QStringLiteral("userComment")).toString(line.text);
-		} else if (type != QStringLiteral("textMessageEvent")) line.type = QStringLiteral("sub");
+		} else if (type != QStringLiteral("textMessageEvent")) {
+			line.type = QStringLiteral("sub");
+			line.paid = type != QStringLiteral("giftMembershipReceivedEvent");
+		}
 		dispatch(std::move(line));
 	}
 }
@@ -1707,6 +1714,7 @@ void ChatGateway::handleTwitchFrame(const QString &id, const QByteArray &frame)
 	line.platform = QStringLiteral("twitch");
 	line.accountId = id;
 	line.messageId = metadata.value(QStringLiteral("message_id")).toString();
+	line.subtype = subtype;
 	line.name = event.value(QStringLiteral("chatter_user_name")).toString(
 			event.value(QStringLiteral("user_name")).toString(QStringLiteral("Зритель")));
 	if (subtype == QStringLiteral("channel.chat.message")) {
@@ -1717,6 +1725,7 @@ void ChatGateway::handleTwitchFrame(const QString &id, const QByteArray &frame)
 		   subtype == QStringLiteral("channel.subscription.message") ||
 		   subtype == QStringLiteral("channel.subscription.gift")) {
 		line.type = QStringLiteral("sub");
+		line.paid = true;
 		line.text = event.value(QStringLiteral("message")).toObject().value(QStringLiteral("text")).toString();
 	} else if (subtype == QStringLiteral("channel.raid")) {
 		line.type = QStringLiteral("raid");
@@ -1724,6 +1733,7 @@ void ChatGateway::handleTwitchFrame(const QString &id, const QByteArray &frame)
 		line.text = QStringLiteral("Зрителей: %1").arg(event.value(QStringLiteral("viewers")).toInt());
 	} else if (subtype == QStringLiteral("channel.cheer")) {
 		line.type = QStringLiteral("donation");
+		line.paid = true;
 		line.amount = QStringLiteral("%1 Bits").arg(event.value(QStringLiteral("bits")).toInt());
 		line.text = event.value(QStringLiteral("message")).toString();
 	} else return;
@@ -1757,6 +1767,8 @@ void ChatGateway::dispatch(ChatLine line)
 	event.platform = line.platform;
 	event.accountId = line.accountId;
 	event.type = line.type;
+	event.subtype = line.subtype;
+	event.paid = line.paid;
 	event.name = line.name;
 	event.message = line.text;
 	event.amount = line.amount;

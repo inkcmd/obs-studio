@@ -39,6 +39,8 @@ QJsonObject serialize(const StudioEvent &event)
 		{QStringLiteral("platform"), event.platform},
 		{QStringLiteral("accountId"), event.accountId},
 		{QStringLiteral("type"), event.type},
+		{QStringLiteral("subtype"), event.subtype},
+		{QStringLiteral("paid"), event.paid},
 		{QStringLiteral("name"), event.name},
 		{QStringLiteral("message"), event.message},
 		{QStringLiteral("amount"), event.amount},
@@ -54,6 +56,8 @@ StudioEvent deserialize(const QJsonObject &object)
 	event.platform = object.value(QStringLiteral("platform")).toString();
 	event.accountId = object.value(QStringLiteral("accountId")).toString();
 	event.type = object.value(QStringLiteral("type")).toString();
+	event.subtype = object.value(QStringLiteral("subtype")).toString();
+	event.paid = object.value(QStringLiteral("paid")).toBool();
 	event.name = object.value(QStringLiteral("name")).toString();
 	event.message = object.value(QStringLiteral("message")).toString();
 	event.amount = object.value(QStringLiteral("amount")).toString();
@@ -85,6 +89,7 @@ bool EventCore::sanitize(StudioEvent &event)
 	event.sourceId = cleaned(event.sourceId, 128);
 	event.accountId = cleaned(event.accountId, 128);
 	event.externalId = cleaned(event.externalId, 180);
+	event.subtype = cleaned(event.subtype, 64);
 	event.name = cleaned(event.name, 80);
 	event.message = cleaned(event.message, 500);
 	event.amount = cleaned(event.amount, 60);

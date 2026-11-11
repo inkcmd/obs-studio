@@ -36,7 +36,7 @@ assert.match(gateway, /alertDeliveryWarnings/);
 // Provider alerts enter the EventCore once. Overlay delivery is subscribed
 // to that core rather than being called directly by every provider adapter.
 assert.match(gateway, /events->publish\(std::move\(event\)\)/);
-assert.match(overlay, /events, &EventCore::delivered, runtime/);
+assert.match(overlay, /alerts, &AlertEngine::alertReady, runtime/);
 assert.match(overlay, /runtime->publishAlert\(event\.type, event\.platform/);
 assert.match(overlay, /Kick: фолловеры\/подписки требуют официального webhook/);
 

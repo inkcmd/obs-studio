@@ -10,6 +10,10 @@ target_sources(
     xinkx/StudioAutomation.hpp
     xinkx/EventCore.cpp
     xinkx/EventCore.hpp
+    xinkx/AlertEngine.cpp
+    xinkx/AlertEngine.hpp
+    xinkx/EventAutomation.cpp
+    xinkx/EventAutomation.hpp
     xinkx/MultiStreamManager.cpp
     xinkx/MultiStreamManager.hpp
     xinkx/PortraitCanvas.cpp

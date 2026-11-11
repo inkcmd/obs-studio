@@ -9,6 +9,7 @@ const donation = read('DonationGateway.cpp');
 const donationHeader = read('DonationGateway.hpp');
 const donationsUI = read('DonationsWorkspace.cpp');
 const overlay = read('OverlayRuntime.cpp');
+const alerts = read('AlertEngine.cpp');
 const workspace = read('StudioWorkspace.cpp');
 const build = read('../cmake/feature-xinkx-studio.cmake');
 
@@ -27,7 +28,9 @@ assert.match(donation, /emit donationDetailed\(it->config.name, id, eventId/);
 assert.match(donation, /emit donationDetailed\(QStringLiteral\("DonationAlerts"\), QStringLiteral\("donationalerts"\), eventId/);
 assert.match(donationsUI, /&DonationGateway::donationDetailed, events/);
 assert.doesNotMatch(donationsUI, /&DonationGateway::donationEvent, runtime/);
-assert.match(overlay, /events, &EventCore::delivered, runtime/);
+assert.match(alerts, /events, &EventCore::delivered, this/);
+assert.match(overlay, /alerts, &AlertEngine::alertReady, runtime/);
+assert.match(overlay, /alerts, &AlertEngine::chatReady, runtime/);
 assert.match(overlay, /runtime->publishChat\(event.platform/);
 assert.match(overlay, /runtime->publishAlert\(event.type/);
 assert.doesNotMatch(gateway, /overlay->publishChat\(line.platform/);
@@ -58,7 +61,7 @@ assert.doesNotMatch(core.slice(core.indexOf('void EventCore::load()'), core.inde
 // Journal schema is an explicit allowlist. OAuth tokens, JSON response
 // bodies, stream keys and arbitrary account credentials are never serialized.
 const serialization = core.slice(core.indexOf('QJsonObject serialize('), core.indexOf('StudioEvent deserialize('));
-for (const term of ['externalId', 'sourceId', 'platform', 'accountId', 'type', 'name', 'message', 'amount', 'receivedAt']) {
+for (const term of ['externalId', 'sourceId', 'platform', 'accountId', 'type', 'subtype', 'paid', 'name', 'message', 'amount', 'receivedAt']) {
   assert.ok(serialization.includes(`QStringLiteral("${term}")`), `event field missing: ${term}`);
 }
 for (const forbidden of ['accessToken', 'refreshToken', 'streamKey', 'clientSecret', 'headers', 'metadata']) {

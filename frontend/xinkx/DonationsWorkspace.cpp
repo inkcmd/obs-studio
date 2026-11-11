@@ -34,6 +34,8 @@ void installDonationWorkspace(OBSBasic *mainWindow)
 				event.sourceId = sourceId;
 				event.platform = provider;
 				event.type = QStringLiteral("donation");
+				event.subtype = QStringLiteral("external-payment");
+				event.paid = true;
 				event.name = name;
 				event.amount = amount;
 				event.message = message;
