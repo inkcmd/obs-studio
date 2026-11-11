@@ -16,6 +16,7 @@ class SourceTreeModel : public QAbstractListModel {
 	SourceTree *st;
 	QVector<OBSSceneItem> items;
 	bool hasGroups = false;
+	bool eventRegistered = false;
 
 	static void OBSFrontendEvent(enum obs_frontend_event event, void *ptr);
 	void Clear();
@@ -38,6 +39,7 @@ class SourceTreeModel : public QAbstractListModel {
 
 public:
 	explicit SourceTreeModel(SourceTree *st);
+	~SourceTreeModel() override;
 
 	virtual int rowCount(const QModelIndex &parent) const override;
 	virtual QVariant data(const QModelIndex &index, int role) const override;

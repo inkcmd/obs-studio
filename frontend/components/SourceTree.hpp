@@ -6,6 +6,7 @@
 #include <QListView>
 #include <QStaticText>
 #include <QSvgRenderer>
+#include <functional>
 
 class SourceTree : public QListView {
 	Q_OBJECT
@@ -22,6 +23,7 @@ class SourceTree : public QListView {
 	OBSData undoSceneData;
 
 	bool iconsVisible = true;
+	std::function<OBSScene()> sceneProvider;
 
 	void UpdateNoSourcesMessage();
 
@@ -38,7 +40,9 @@ public:
 		return reinterpret_cast<SourceTreeItem *>(widget);
 	}
 
-	explicit SourceTree(QWidget *parent = nullptr);
+	explicit SourceTree(QWidget *parent = nullptr, std::function<OBSScene()> sceneProvider = {});
+	OBSScene Scene() const;
+	bool HasOwnScene() const { return bool(sceneProvider); }
 
 	inline bool IgnoreReorder() const { return ignoreReorder; }
 	inline void Clear() { GetStm()->Clear(); }

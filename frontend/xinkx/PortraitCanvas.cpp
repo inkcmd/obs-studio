@@ -3,7 +3,10 @@
 #include "StreamAccounts.hpp"
 #include "StudioDiagnostics.hpp"
 
+#include <components/SourceTree.hpp>
+#include <dialogs/OBSBasicSourceSelect.hpp>
 #include <utility/display-helpers.hpp>
+#include <widgets/OBSBasic.hpp>
 #include <widgets/OBSQTDisplay.hpp>
 
 #include <obs-frontend-api.h>
@@ -18,12 +21,14 @@
 #include <QCryptographicHash>
 #include <QHash>
 #include <QHBoxLayout>
+#include <QGridLayout>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QListWidget>
+#include <QItemSelectionModel>
 #include <QMainWindow>
 #include <QMenu>
 #include <QMouseEvent>
@@ -36,6 +41,7 @@
 #include <QSizePolicy>
 #include <QSplitter>
 #include <QTimer>
+#include <QToolBar>
 #include <QUuid>
 #include <QVBoxLayout>
 
@@ -320,30 +326,18 @@ private:
 		const int h = int(scale * portraitHeight);
 		gs_projection_push();
 		gs_viewport_push();
-		// Draw an explicit canvas edge, even when every source is transparent or
-		// black. This guide lives only in the editor display, never in the output.
+		// Match OBS's plain black canvas background. Do not fill unoccupied
+		// areas with the former blue editor guide colour.
 		gs_set_viewport(0, 0, cx, cy);
 		gs_ortho(0.f, float(cx), 0.f, float(cy), -100.f, 100.f);
 		gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_SOLID);
 		vec4 outline{};
-		vec4_set(&outline, .38f, .49f, .60f, 1.f);
+		vec4_set(&outline, 0.f, 0.f, 0.f, 1.f);
 		gs_effect_set_vec4(gs_effect_get_param_by_name(effect, "color"), &outline);
-		while (gs_effect_loop(effect, "Solid")) solidRect(float(x - 3), float(y - 3), float(w + 6), float(h + 6));
+		while (gs_effect_loop(effect, "Solid")) solidRect(float(x), float(y), float(w), float(h));
 		gs_set_viewport(x, y, w, h);
 		gs_ortho(0.f, float(portraitWidth), 0.f, float(portraitHeight), -100.f, 100.f);
 		obs_source_video_render(self->sceneSource);
-		// These four visible inside edges are editor-only and cannot be cropped
-		// by a source covering the entire output video.
-		vec4 guide{};
-		vec4_set(&guide, .48f, .64f, .81f, 1.f);
-		gs_effect_set_vec4(gs_effect_get_param_by_name(effect, "color"), &guide);
-		while (gs_effect_loop(effect, "Solid")) {
-			const float thickness = 5.f;
-			solidRect(0.f, 0.f, float(portraitWidth), thickness);
-			solidRect(0.f, float(portraitHeight) - thickness, float(portraitWidth), thickness);
-			solidRect(0.f, 0.f, thickness, float(portraitHeight));
-			solidRect(float(portraitWidth) - thickness, 0.f, thickness, float(portraitHeight));
-		}
 		if (self->hasSelection.load()) {
 			std::array<QPointF, 4> corners;
 			for (int i = 0; i < 4; ++i)
@@ -567,7 +561,19 @@ void PortraitCanvas::rebuild(obs_scene_t *mainScene, const QString &name, const 
 
 void PortraitCanvas::save()
 {
-	if (sceneName.isEmpty()) return;
+	if (sceneName.isEmpty() || !scene) return;
+	// Native SourceTree supports drag-and-drop reordering. Persist the actual
+	// libobs z-order, never the order of the obsolete private QListWidget.
+	std::vector<obs_sceneitem_t *> actualItems;
+	obs_scene_enum_items(scene, collectItemRefs, &actualItems);
+	QVector<Layer> reordered;
+	for (auto *item : actualItems) {
+		const auto found = std::find_if(layers.cbegin(), layers.cend(),
+			[item](const Layer &layer) { return layer.item == item; });
+		if (found != layers.cend()) reordered.push_back(*found);
+		obs_sceneitem_release(item);
+	}
+	layers = std::move(reordered);
 	QJsonObject objects;
 	for (int index = 0; index < layers.size(); ++index) {
 		const auto &layer = layers.at(index);
@@ -595,15 +601,29 @@ void PortraitCanvas::save()
 	// Keep a complete source snapshot so they survive an application restart.
 	auto extras = QJsonDocument::fromJson(store.value(extraKey(sceneName)).toByteArray()).array();
 	bool updated = false;
+	QSet<QString> present;
+	for (const auto &layer : std::as_const(layers)) {
+		obs_source_t *source = obs_sceneitem_get_source(layer.item);
+		if (source) present.insert(QString::fromUtf8(obs_source_get_uuid(source)));
+	}
+	for (int index = extras.size() - 1; index >= 0; --index) {
+		const auto record = extras.at(index).toObject();
+		const QString uuid = extras.at(index).isString() ? extras.at(index).toString()
+			: record.value(QStringLiteral("uuid")).toString();
+		if (present.contains(uuid)) continue;
+		extras.removeAt(index);
+		updated = true;
+	}
 	for (int index = 0; index < extras.size(); ++index) {
 		const QJsonObject record = extras.at(index).toObject();
-		if (!record.contains(QStringLiteral("source"))) continue;
-		const QString uuid = record.value(QStringLiteral("uuid")).toString();
+		const QString uuid = extras.at(index).isString() ? extras.at(index).toString()
+			: record.value(QStringLiteral("uuid")).toString();
 		OBSSourceAutoRelease source = obs_get_source_by_uuid(uuid.toUtf8().constData());
 		if (!source) continue;
 		OBSDataAutoRelease sourceData = obs_save_source(source);
 		const char *json = obs_data_get_json(sourceData);
 		QJsonObject copy = record;
+		copy.insert(QStringLiteral("uuid"), uuid);
 		copy.insert(QStringLiteral("source"), QJsonDocument::fromJson(QByteArray(json ? json : "{}" )).object());
 		extras.replace(index, copy);
 		updated = true;
@@ -642,23 +662,21 @@ void PortraitCanvas::edit(QWidget *parent)
 	}
 	if (!ensure()) return;
 	sync();
-	auto *canvasEditor = mainWindow->findChild<QWidget *>(QStringLiteral("canvasEditor"));
-	auto *previewLayout = canvasEditor ? static_cast<QHBoxLayout *>(canvasEditor->layout()) : nullptr;
-	if (!previewLayout) {
-		writeDiagnostic(QStringLiteral("portrait"), QStringLiteral("Main OBS canvas layout unavailable"));
+	auto *previewContainer = mainWindow->findChild<QWidget *>(QStringLiteral("previewContainer"));
+	auto *nativePreview = mainWindow->findChild<QWidget *>(QStringLiteral("preview"));
+	auto *previewGrid = previewContainer ? previewContainer->findChild<QGridLayout *>(QStringLiteral("gridLayout")) : nullptr;
+	if (!previewGrid || !nativePreview) {
+		writeDiagnostic(QStringLiteral("portrait"), QStringLiteral("Main OBS preview grid unavailable"));
 		return;
 	}
 	editing = true;
-	auto *side = new QWidget(canvasEditor);
+	auto *side = new QWidget(previewContainer);
 	side->setObjectName(QStringLiteral("xinkxPortraitEditor"));
-	side->setMinimumWidth(200);
+	side->setMinimumWidth(120);
 	side->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 	auto *column = new QVBoxLayout(side);
-	column->setContentsMargins(1, 1, 1, 1);
-	column->setSpacing(2);
-	auto *header = new QHBoxLayout();
-	header->addWidget(new QLabel(QStringLiteral("Вертикальный холст · 9:16 · 1080×1920"), side));
-	column->addLayout(header);
+	column->setContentsMargins(0, 0, 0, 0);
+	column->setSpacing(0);
 	auto *preview = new PortraitDisplay(obs_scene_get_source(scene), side);
 	preview->setToolTip(QStringLiteral("Ctrl + колесо — масштаб · средняя кнопка — перемещение · ПКМ — команды и сброс масштаба"));
 	column->addWidget(preview, 1);
@@ -676,6 +694,8 @@ void PortraitCanvas::edit(QWidget *parent)
 	toolbar->addWidget(snap);
 	auto *list = new QListWidget(side);
 	list->setObjectName(QStringLiteral("xinkxPortraitSourceList"));
+	list->hide(); // Internal selection bridge; the visible list is OBS's native SourceTree.
+	SourceTree *nativePortraitTree = nullptr;
 	list->setToolTip(QStringLiteral("Только вертикальная композиция. Удаление здесь не удаляет источник из 16:9."));
 	// OBS owns the horizontal source tree and its native editing commands.
 	// This list owns only portrait scene items, directly below that tree.
@@ -694,8 +714,25 @@ void PortraitCanvas::edit(QWidget *parent)
 				auto *sourceHeading = new QLabel(QStringLiteral("9:16 · Вертикальные источники"), portraitSources);
 				sourceHeading->setStyleSheet(QStringLiteral("font-weight:600;color:#82d8ec"));
 				sourceColumn->addWidget(sourceHeading);
-				sourceColumn->addWidget(list, 1);
-				sourceColumn->addWidget(toolbarWidget);
+				nativePortraitTree = new SourceTree(portraitSources, [this] { return OBSScene(scene); });
+				nativePortraitTree->setObjectName(QStringLiteral("xinkxPortraitNativeSourceTree"));
+				nativePortraitTree->setSelectionMode(QAbstractItemView::SingleSelection);
+				nativePortraitTree->setDragDropMode(QAbstractItemView::InternalMove);
+				sourceColumn->addWidget(nativePortraitTree, 1);
+				auto *portraitToolbar = new QToolBar(portraitSources);
+				portraitToolbar->setObjectName(QStringLiteral("xinkxPortraitSourcesToolbar"));
+				portraitToolbar->setIconSize(QSize(16, 16));
+				portraitToolbar->setFloatable(false);
+				for (const char *name : {"actionAddSource", "actionRemoveSource", "", "actionSourceProperties", "",
+				                         "actionSourceUp", "actionSourceDown"}) {
+					if (!*name) { portraitToolbar->addSeparator(); continue; }
+					if (QAction *original = mainWindow->findChild<QAction *>(QString::fromLatin1(name))) {
+						auto *action = portraitToolbar->addAction(original->icon(), original->text());
+						action->setToolTip(original->toolTip());
+						action->setObjectName(QStringLiteral("portrait_") + QString::fromLatin1(name));
+					}
+				}
+				sourceColumn->addWidget(portraitToolbar);
 				dockLayout->removeWidget(nativeFrame);
 				auto *splitter = new QSplitter(Qt::Vertical, contents);
 				splitter->setObjectName(QStringLiteral("xinkxSourcesSplitter"));
@@ -714,39 +751,26 @@ void PortraitCanvas::edit(QWidget *parent)
 					layout->removeWidget(guardedSplitter);
 					guardedFrame->setParent(guardedContents);
 					layout->insertWidget(0, guardedFrame);
-					guardedSplitter->deleteLater();
+					delete guardedSplitter;
 				});
 			}
 		}
 	}
-	if (!list->parentWidget() || list->parentWidget() == side) {
-		column->addWidget(list);
-		column->addWidget(toolbarWidget);
-	}
-	// Keep both libobs GPU displays in one resizable canvas workspace. Move
-	// OBS's normal preview (and its disabled placeholder) as widgets; never
-	// recreate its graphics display or replace the OBSBasic preview controller.
-	if (auto *nativePreviewPane = mainWindow->findChild<QWidget *>(QStringLiteral("previewContainer"))) {
-		auto *disabledPreview = mainWindow->findChild<QWidget *>(QStringLiteral("previewDisabledWidget"));
-		auto *landscapePane = new QWidget(canvasEditor);
-		landscapePane->setObjectName(QStringLiteral("xinkxLandscapePane"));
-		auto *landscapeLayout = new QHBoxLayout(landscapePane);
-		landscapeLayout->setContentsMargins(0, 0, 0, 0);
-		landscapeLayout->setSpacing(0);
-		if (disabledPreview) {
-			previewLayout->removeWidget(disabledPreview);
-			landscapeLayout->addWidget(disabledPreview);
-		}
-		previewLayout->removeWidget(nativePreviewPane);
-		landscapeLayout->addWidget(nativePreviewPane, 1);
-		auto *splitter = new QSplitter(Qt::Horizontal, canvasEditor);
+	if (!nativePortraitTree)
+		writeDiagnostic(QStringLiteral("portrait"), QStringLiteral("Native Sources dock unavailable"));
+	// Both editable GPU surfaces live inside OBS's ONE previewContainer and
+	// share its zoom/status toolbar. This is a single composition workspace,
+	// not an adjacent second canvasEditor window or sidecar.
+	{
+		previewGrid->removeWidget(nativePreview);
+		auto *splitter = new QSplitter(Qt::Horizontal, previewContainer);
 		splitter->setObjectName(QStringLiteral("xinkxCanvasSplitter"));
 		splitter->setChildrenCollapsible(false);
-		splitter->setHandleWidth(5);
-		splitter->addWidget(landscapePane);
+		splitter->setHandleWidth(4);
+		splitter->addWidget(nativePreview);
 		splitter->addWidget(side);
-		splitter->setStretchFactor(0, 3);
-		splitter->setStretchFactor(1, 2);
+		splitter->setStretchFactor(0, 2);
+		splitter->setStretchFactor(1, 1);
 		{
 			QSettings store(studioSettingsPath(), QSettings::IniFormat);
 			const QByteArray savedSizes = store.value(QStringLiteral("canvas/splitterSizes")).toByteArray();
@@ -756,35 +780,29 @@ void PortraitCanvas::edit(QWidget *parent)
 			QSettings store(studioSettingsPath(), QSettings::IniFormat);
 			store.setValue(QStringLiteral("canvas/splitterSizes"), splitter->saveState());
 		});
-		previewLayout->addWidget(splitter);
-		QPointer<QWidget> guardedLandscape(landscapePane);
-		QPointer<QWidget> guardedPreview(nativePreviewPane);
-		QPointer<QWidget> guardedDisabled(disabledPreview);
+		previewGrid->addWidget(splitter, 1, 0, 1, 2);
+		QPointer<QWidget> guardedPreview(nativePreview);
 		QPointer<QSplitter> guardedSplitter(splitter);
-		QPointer<QWidget> guardedEditor(canvasEditor);
-		QObject::connect(side, &QObject::destroyed, canvasEditor, [=] {
-			if (!guardedLandscape || !guardedPreview || !guardedSplitter || !guardedEditor) return;
-			auto *layout = qobject_cast<QHBoxLayout *>(guardedEditor->layout());
-			auto *original = qobject_cast<QHBoxLayout *>(guardedLandscape->layout());
-			if (!layout || !original) return;
-			layout->removeWidget(guardedSplitter);
-			if (guardedDisabled) {
-				original->removeWidget(guardedDisabled);
-				guardedDisabled->setParent(canvasEditor);
-				layout->insertWidget(0, guardedDisabled);
+		QPointer<QWidget> guardedContainer(previewContainer);
+		QObject::connect(side, &QObject::destroyed, previewContainer, [=] {
+			if (!guardedContainer || !guardedPreview || !guardedSplitter) return;
+			if (auto *grid = guardedContainer->findChild<QGridLayout *>(QStringLiteral("gridLayout"))) {
+				grid->removeWidget(guardedSplitter);
+				guardedPreview->setParent(guardedContainer);
+				grid->addWidget(guardedPreview, 1, 0, 1, 2);
 			}
-			original->removeWidget(guardedPreview);
-			guardedPreview->setParent(canvasEditor);
-			layout->insertWidget(guardedDisabled ? 1 : 0, guardedPreview);
 			guardedSplitter->deleteLater();
 		});
-	} else previewLayout->addWidget(side);
+	}
 	// Dragging changes only this scene item's transform. Do not write an INI file
 	// on every mouse-move; persist once the user stops interacting.
 	auto *saveDelay = new QTimer(side);
 	saveDelay->setSingleShot(true);
 	saveDelay->setInterval(350);
 	QObject::connect(saveDelay, &QTimer::timeout, side, [this] { save(); });
+	if (nativePortraitTree)
+		QObject::connect(nativePortraitTree->model(), &QAbstractItemModel::rowsMoved, side,
+			[=] { saveDelay->start(); });
 	auto initialTransform = std::make_shared<obs_transform_info>();
 	auto initialBounds = std::make_shared<std::array<float, 4>>();
 	const auto sourceUuid = [](obs_sceneitem_t *item) {
@@ -812,6 +830,16 @@ void PortraitCanvas::edit(QWidget *parent)
 		}
 		list->setCurrentRow(-1);
 	};
+	if (nativePortraitTree) {
+		QObject::connect(nativePortraitTree->selectionModel(), &QItemSelectionModel::currentChanged,
+			side, [=](const QModelIndex &index) {
+				if (!index.isValid()) { selectLayer(-1); return; }
+				OBSSceneItem item = nativePortraitTree->Get(index.row());
+				for (int row = 0; row < layers.size(); ++row) {
+					if (layers.at(row).item == item) { selectLayer(row); return; }
+				}
+			});
+	}
 
 	const auto refreshList = [=] {
 		const QString selected = list->currentItem() ? list->currentItem()->data(Qt::UserRole + 1).toString() : QString{};
@@ -830,9 +858,11 @@ void PortraitCanvas::edit(QWidget *parent)
 		for (int i = 0; i < list->count(); ++i) {
 			if (list->item(i)->data(Qt::UserRole + 1).toString() != selected) continue;
 			list->setCurrentRow(i);
+			if (nativePortraitTree) nativePortraitTree->RefreshItems();
 			return;
 		}
 		list->setCurrentRow(-1);
+		if (nativePortraitTree) nativePortraitTree->RefreshItems();
 	};
 	const auto updateSelection = [=] {
 		const int row = selectedLayer();
@@ -1019,6 +1049,17 @@ void PortraitCanvas::edit(QWidget *parent)
 			info.pos.y + s * anchorX + c * anchorY, width, height);
 	};
 	QObject::connect(list, &QListWidget::currentRowChanged, side, [=] {
+		if (nativePortraitTree && nativePortraitTree->selectionModel()) {
+			const int row = selectedLayer();
+			if (row >= 0) {
+				nativePortraitTree->SelectItem(layers.at(row).item, true);
+				const auto indexes = nativePortraitTree->selectionModel()->selectedIndexes();
+				if (!indexes.isEmpty()) nativePortraitTree->setCurrentIndex(indexes.first());
+			} else {
+				nativePortraitTree->selectionModel()->clearSelection();
+				nativePortraitTree->setCurrentIndex(QModelIndex());
+			}
+		}
 		updateSelection();
 	});
 	QObject::connect(list, &QListWidget::itemChanged, side, [=](QListWidgetItem *entry) {
@@ -1068,7 +1109,7 @@ void PortraitCanvas::edit(QWidget *parent)
 		saveDelay->start();
 		updateSelection();
 	};
-	const auto addSource = [=](obs_source_t *source, bool separateProperties) {
+	const auto addSource = [=](obs_source_t *source, bool /* newSource */) {
 		if (!source) return;
 		obs_sceneitem_t *item = obs_scene_add(scene, source);
 		if (!item) return;
@@ -1085,20 +1126,45 @@ void PortraitCanvas::edit(QWidget *parent)
 		layers.push_back({QStringLiteral("portrait:%1").arg(uuid), name, item});
 		QSettings settings(studioSettingsPath(), QSettings::IniFormat);
 		auto extras = QJsonDocument::fromJson(settings.value(extraKey(sceneName)).toByteArray()).array();
-		if (separateProperties) {
-			OBSDataAutoRelease snapshot = obs_save_source(source);
-			const char *json = snapshot ? obs_data_get_json(snapshot) : nullptr;
-			extras.append(QJsonObject{{QStringLiteral("uuid"), uuid},
-				{QStringLiteral("source"), QJsonDocument::fromJson(QByteArray(json ? json : "{}")).object()}});
-		} else {
-			// The input is shared, but its scene-item geometry is independent.
-			extras.append(uuid);
-		}
+		// Snapshot even shared inputs: deleting the horizontal scene item
+		// must not erase a portrait-only item on the next app launch.
+		OBSDataAutoRelease snapshot = obs_save_source(source);
+		const char *json = snapshot ? obs_data_get_json(snapshot) : nullptr;
+		extras.append(QJsonObject{{QStringLiteral("uuid"), uuid},
+			{QStringLiteral("source"), QJsonDocument::fromJson(QByteArray(json ? json : "{}")).object()}});
 		settings.setValue(extraKey(sceneName), QJsonDocument(extras).toJson(QJsonDocument::Compact));
 		save();
 		refreshList();
 		selectLayer(layers.size() - 1);
 	};
+	const auto nativeAddDialog = [=] {
+		auto *main = OBSBasic::Get();
+		if (!main) return;
+		auto *dialog = new OBSBasicSourceSelect(main, main->undo_s,
+			[=](obs_source_t *source, bool newSource) { addSource(source, newSource); });
+		dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+		QObject::connect(side, &QObject::destroyed, dialog, &QObject::deleteLater);
+		dialog->show();
+	};
+	if (auto *actions = mainWindow->findChild<QToolBar *>(QStringLiteral("xinkxPortraitSourcesToolbar"))) {
+		const auto connectAction = [=](const char *name, const std::function<void()> &command) {
+			if (auto *action = actions->findChild<QAction *>(QStringLiteral("portrait_") + QString::fromLatin1(name)))
+				QObject::connect(action, &QAction::triggered, side, command);
+		};
+		connectAction("actionAddSource", nativeAddDialog);
+		connectAction("actionRemoveSource", [=] { remove->click(); });
+		connectAction("actionSourceProperties", [=] { properties->click(); });
+		const auto moveLayer = [=](bool up) {
+			const int row = selectedLayer();
+			const int target = row + (up ? 1 : -1);
+			if (row < 0 || target < 0 || target >= layers.size()) return;
+			obs_sceneitem_set_order(layers.at(row).item, up ? OBS_ORDER_MOVE_UP : OBS_ORDER_MOVE_DOWN);
+			layers.swapItemsAt(row, target);
+			save(); refreshList(); selectLayer(target); updateSelection();
+		};
+		connectAction("actionSourceUp", [=] { moveLayer(true); });
+		connectAction("actionSourceDown", [=] { moveLayer(false); });
+	}
 	QObject::connect(add, &QPushButton::clicked, side, [=] {
 		QMenu menu(side);
 		// Copy the selected OBS scene item into the portrait composition. The
@@ -1202,7 +1268,7 @@ void PortraitCanvas::edit(QWidget *parent)
 		menu.addSeparator();
 		if (row < 0 || row >= layers.size()) {
 			auto *addAction = menu.addAction(QStringLiteral("Добавить источник…"));
-			QObject::connect(addAction, &QAction::triggered, side, [=] { add->click(); });
+			QObject::connect(addAction, &QAction::triggered, side, nativeAddDialog);
 			menu.exec(globalPoint);
 			return;
 		}
@@ -1316,6 +1382,19 @@ void PortraitCanvas::edit(QWidget *parent)
 		if (auto *clicked = list->itemAt(position)) list->setCurrentItem(clicked);
 		showContext(selectedLayer(), list->viewport()->mapToGlobal(position));
 	});
+	if (nativePortraitTree) {
+		nativePortraitTree->setContextMenuPolicy(Qt::CustomContextMenu);
+		QObject::connect(nativePortraitTree, &QWidget::customContextMenuRequested, side, [=](const QPoint &position) {
+			const QModelIndex index = nativePortraitTree->indexAt(position);
+			if (index.isValid()) {
+				OBSSceneItem item = nativePortraitTree->Get(index.row());
+				for (int row = 0; row < layers.size(); ++row) {
+					if (layers.at(row).item == item) { selectLayer(row); break; }
+				}
+			}
+			showContext(selectedLayer(), nativePortraitTree->viewport()->mapToGlobal(position));
+		});
+	}
 	QObject::connect(side, &QObject::destroyed, mainWindow, [this] { editing = false; });
 	const auto sourceListSignature = [=] {
 		QString state = sceneName;
@@ -1330,10 +1409,17 @@ void PortraitCanvas::edit(QWidget *parent)
 	watchScene->setInterval(600);
 	QObject::connect(watchScene, &QTimer::timeout, side, [=] {
 		const QString before = signature;
+		OBSSourceAutoRelease currentScene = obs_frontend_get_current_scene();
+		if (currentScene && QString::fromUtf8(obs_source_get_name(currentScene)) != sceneName)
+			save(); // Preserve native eye/lock/order edits before rebuilding for a different OBS scene.
 		if (saveDelay->isActive()) { saveDelay->stop(); save(); }
 		editing = false;
 		sync();
 		editing = true;
+		for (auto &layer : layers) {
+			obs_source_t *source = obs_sceneitem_get_source(layer.item);
+			if (source) layer.name = QString::fromUtf8(obs_source_get_name(source));
+		}
 		const QString modelState = sourceListSignature();
 		if (before != signature || *lastSourceListSignature != modelState) {
 			*lastSourceListSignature = modelState;
@@ -1355,6 +1441,7 @@ void PortraitCanvas::edit(QWidget *parent)
 }
 void PortraitCanvas::shutdown()
 {
+	if (scene) save();
 	// Stop display callbacks and scene-switch timers before releasing the libobs canvas.
 	if (auto *window = static_cast<QMainWindow *>(obs_frontend_get_main_window())) {
 		if (auto *landscape = window->findChild<QWidget *>(QStringLiteral("xinkxLandscapePane")))

@@ -32,7 +32,7 @@ assert.match(portrait, /xinkxPortraitEditor/);
 assert.match(portrait, /obs_sceneitem_get_box_transform\(layers\.at\(row\)\.item, &box\)/);
 assert.match(portrait, /preview->pressed =/);
 assert.match(portrait, /preview->resized =/);
-assert.match(portrait, /previewLayout->addWidget\(side\)/);
+assert.match(portrait, /previewGrid->addWidget\(splitter, 1, 0, 1, 2\)/);
 assert.match(portrait, /extraKey\(sceneName\)/);
 
 console.log('XINKX native source presets, inline YouTube streams and portrait editor contract OK');

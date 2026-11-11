@@ -651,19 +651,27 @@ void ChatGateway::inspectBroadcast(const QString &id, const QString &youtubeBroa
 					{QStringLiteral("categoryName"), category.value(QStringLiteral("name"))}});
 			});
 	} else if (account.platform == QStringLiteral("youtube")) {
-		const auto url = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts"),
-			{{QStringLiteral("part"), QStringLiteral("id,snippet,status,contentDetails")},
-			 {QStringLiteral("mine"), QStringLiteral("true")},
-			 {QStringLiteral("broadcastType"), QStringLiteral("all")},
-			 {QStringLiteral("maxResults"), QStringLiteral("50")}});
-		authorized(id, url, {}, [this, id, youtubeBroadcastId](const HttpResult &result) {
-			if (!result.ok) { emit broadcastResult(id, result.error, false); return; }
+		// A "mine=true" first page can contain 50 completed broadcasts and
+		// hide the currently running one. Query the two relevant YouTube API
+		// states explicitly; archived video IDs must not become selectable.
+		struct Lookup {
+			int pending = 2;
+			QJsonArray items;
+			QStringList errors;
+		};
+		auto lookup = std::make_shared<Lookup>();
+		const auto complete = [this, id, youtubeBroadcastId, lookup] {
+			if (lookup->items.isEmpty() && !lookup->errors.isEmpty()) {
+				emit broadcastResult(id, QStringLiteral("YouTube: не удалось получить эфиры: ") +
+					lookup->errors.join(QStringLiteral("; ")), false);
+				return;
+			}
 			QJsonArray broadcasts;
 			QJsonObject selected;
 			QJsonArray active;
 			QJsonArray boundToConfiguredStream;
 			const QString configuredStream = known.value(id).youtubeStreamId;
-			for (const auto &entry : result.json.value(QStringLiteral("items")).toArray()) {
+			for (const auto &entry : lookup->items) {
 				const auto item = entry.toObject();
 				const auto status = item.value(QStringLiteral("status")).toObject();
 				const QString lifecycle = status.value(QStringLiteral("lifeCycleStatus")).toString();
@@ -729,7 +737,21 @@ void ChatGateway::inspectBroadcast(const QString &id, const QString &youtubeBroa
 						remoteKey == configured.destination.streamKey);
 				emit broadcastInfo(id, output);
 			});
-		});
+		};
+		for (const QString &status : {QStringLiteral("active"), QStringLiteral("upcoming")}) {
+			const auto url = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts"),
+				{{QStringLiteral("part"), QStringLiteral("id,snippet,status,contentDetails")},
+				 {QStringLiteral("broadcastStatus"), status},
+				 {QStringLiteral("broadcastType"), QStringLiteral("all")},
+				 {QStringLiteral("maxResults"), QStringLiteral("50")}});
+			authorized(id, url, {}, [lookup, complete](const HttpResult &result) {
+				if (result.ok)
+					for (const auto &item : result.json.value(QStringLiteral("items")).toArray())
+						lookup->items.append(item);
+				else lookup->errors.append(result.error);
+				if (--lookup->pending == 0) complete();
+			});
+		}
 	}
 }
 

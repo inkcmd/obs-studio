@@ -225,10 +225,12 @@ std::optional<OBSSource> setupNewSource(QWidget *parent, const char *id, const c
 }
 } // namespace
 
-OBSBasicSourceSelect::OBSBasicSourceSelect(OBSBasic *parent, undo_stack &undo_s)
+OBSBasicSourceSelect::OBSBasicSourceSelect(OBSBasic *parent, undo_stack &undo_s,
+					 std::function<void(obs_source_t *, bool)> targetAdd)
 	: QDialog(parent),
 	  ui(new Ui::OBSBasicSourceSelect),
 	  undo_s(undo_s),
+	  targetSceneAdd(std::move(targetAdd)),
 	  selectedTypeId(kRecentTypeId.toString()),
 	  sourceButtons(new QButtonGroup(this))
 {
@@ -762,6 +764,12 @@ void OBSBasicSourceSelect::createNew()
 	if (strcmp(obs_source_get_id(newSource), "group") == 0) {
 		return;
 	}
+	if (targetSceneAdd) {
+		targetSceneAdd(newSource, true);
+		OBSBasic::Get()->CreatePropertiesWindow(newSource);
+		close();
+		return;
+	}
 
 	std::optional<OBSSceneItem> addResult = setupExistingSource(obs_source_get_uuid(newSource), visible, false);
 	if (!addResult.has_value()) {
@@ -829,6 +837,10 @@ void OBSBasicSourceSelect::addExisting(const std::string &uuid, bool visible)
 	}
 
 	QString name = obs_source_get_name(source);
+	if (targetSceneAdd) {
+		targetSceneAdd(source, false);
+		return;
+	}
 	setupExistingSource(uuid, visible, false);
 
 	OBSBasic *main = OBSBasic::Get();

@@ -17,7 +17,7 @@ for (const text of [
 
 for (const text of [
   'xinkxPortraitEditor',
-  'previewLayout->addWidget(side)',
+  'previewGrid->addWidget(splitter, 1, 0, 1, 2)',
   'preview->pressed =',
   'preview->resized =',
   'obs_sceneitem_get_box_transform',
@@ -29,4 +29,4 @@ for (const text of [
   'delete editor;',
 ]) assert.ok(portrait.includes(text), `missing portrait sidecar behavior: ${text}`);
 
-console.log('XINKX dual-mode YouTube OAuth and adjacent native portrait canvas source contract OK');
+console.log('XINKX dual-mode YouTube OAuth and shared preview-container portrait canvas source contract OK');

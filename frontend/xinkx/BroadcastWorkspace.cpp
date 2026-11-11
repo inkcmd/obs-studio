@@ -165,11 +165,13 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 	QObject::connect(checkYouTube, &QPushButton::clicked, panel, [=] {
 		const auto account = youtubeAccount();
 		const QString broadcastId = youtubeEvent->currentData().toString();
-		if (account.id.isEmpty() || broadcastId.isEmpty()) {
-			youtubeHealth->setText(QStringLiteral("Выбери YouTube-эфир и подключи OAuth."));
+		if (account.id.isEmpty()) {
+			youtubeHealth->setText(QStringLiteral("Подключи YouTube через OAuth."));
 			return;
 		}
-		youtubeHealth->setText(QStringLiteral("YouTube: проверяем привязку и приём сигнала…"));
+		youtubeHealth->setText(broadcastId.isEmpty()
+			? QStringLiteral("YouTube: ищем текущий и запланированные эфиры…")
+			: QStringLiteral("YouTube: проверяем привязку и приём сигнала…"));
 		gateway->inspectBroadcast(account.id, broadcastId);
 	});
 	const auto resolveVideo = [=](const QString &accountId) {
@@ -411,12 +413,14 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 		if (activeIndex > 0) youtubeEvent->setCurrentIndex(activeIndex);
 		else if (previousIndex > 0) youtubeEvent->setCurrentIndex(previousIndex);
 		else if (!previously.isEmpty()) {
-			const QString savedLabel = local->value(key(QStringLiteral("youtubeBroadcastName"))).toString();
-			youtubeEvent->addItem(QStringLiteral("Недоступен / завершён · %1")
-				.arg(savedLabel.isEmpty() ? previously : savedLabel), previously);
-			youtubeEvent->setCurrentIndex(youtubeEvent->count() - 1);
-			youtubeHealth->setText(QStringLiteral("Сохранённый эфир отсутствует в доступных трансляциях YouTube. "
-				"Выбери новый эфир; старый ID пока сохранён."));
+			youtubeHealth->setText(QStringLiteral("Сохранённый ID больше не относится к активным "
+				"или запланированным эфирам. Выбери актуальный эфир YouTube."));
+			local->remove(key(QStringLiteral("youtubeBroadcast")));
+			local->remove(key(QStringLiteral("youtubeBroadcastName")));
+			flush->start();
+		} else if (youtubeEvent->count() == 1) {
+			youtubeHealth->setText(QStringLiteral("На подключённом YouTube-канале нет активных "
+				"или запланированных эфиров. Создай эфир в YouTube Studio."));
 		}
 		const QString currentId = youtubeEvent->currentData().toString();
 		if (!currentId.isEmpty() && currentId == selectedId) {

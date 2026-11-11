@@ -6,12 +6,6 @@
 
 #include "moc_SourceTreeModel.cpp"
 
-static inline OBSScene GetCurrentScene()
-{
-	OBSBasic *main = OBSBasic::Get();
-	return main->GetCurrentScene();
-}
-
 void SourceTreeModel::OBSFrontendEvent(enum obs_frontend_event event, void *ptr)
 {
 	SourceTreeModel *stm = static_cast<SourceTreeModel *>(ptr);
@@ -23,6 +17,7 @@ void SourceTreeModel::OBSFrontendEvent(enum obs_frontend_event event, void *ptr)
 	case OBS_FRONTEND_EVENT_EXIT:
 		stm->Clear();
 		obs_frontend_remove_event_callback(OBSFrontendEvent, stm);
+		stm->eventRegistered = false;
 		break;
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP:
 		stm->Clear();
@@ -67,7 +62,7 @@ static bool enumItem(obs_scene_t *, obs_sceneitem_t *item, void *ptr)
 
 void SourceTreeModel::SceneChanged()
 {
-	OBSScene scene = GetCurrentScene();
+	OBSScene scene = st->Scene();
 
 	beginResetModel();
 	items.clear();
@@ -97,7 +92,7 @@ static inline void MoveItem(QVector<OBSSceneItem> &items, int oldIdx, int newIdx
 /* reorders list optimally with model reorder funcs */
 void SourceTreeModel::ReorderItems()
 {
-	OBSScene scene = GetCurrentScene();
+	OBSScene scene = st->Scene();
 
 	QVector<OBSSceneItem> newitems;
 	obs_scene_enum_items(scene, enumItem, &newitems);
@@ -240,6 +235,14 @@ OBSSceneItem SourceTreeModel::Get(int idx)
 SourceTreeModel::SourceTreeModel(SourceTree *st_) : QAbstractListModel(st_), st(st_)
 {
 	obs_frontend_add_event_callback(OBSFrontendEvent, this);
+	eventRegistered = true;
+}
+
+SourceTreeModel::~SourceTreeModel()
+{
+	// The independent 9:16 dock can be recreated without OBS exiting.
+	// A callback against a deleted Qt model would be a use-after-free.
+	if (eventRegistered) obs_frontend_remove_event_callback(OBSFrontendEvent, this);
 }
 
 int SourceTreeModel::rowCount(const QModelIndex &parent) const
@@ -278,7 +281,7 @@ Qt::DropActions SourceTreeModel::supportedDropActions() const
 
 QString SourceTreeModel::GetNewGroupName()
 {
-	OBSScene scene = GetCurrentScene();
+	OBSScene scene = st->Scene();
 	QString name = QTStr("Group");
 
 	int i = 2;
@@ -296,7 +299,7 @@ QString SourceTreeModel::GetNewGroupName()
 void SourceTreeModel::AddGroup()
 {
 	QString name = GetNewGroupName();
-	obs_sceneitem_t *group = obs_scene_add_group(GetCurrentScene(), QT_TO_UTF8(name));
+	obs_sceneitem_t *group = obs_scene_add_group(st->Scene(), QT_TO_UTF8(name));
 	if (!group) {
 		return;
 	}
@@ -318,7 +321,7 @@ void SourceTreeModel::GroupSelectedItems(QModelIndexList &indices)
 	}
 
 	OBSBasic *main = OBSBasic::Get();
-	OBSScene scene = GetCurrentScene();
+	OBSScene scene = st->Scene();
 	QString name = GetNewGroupName();
 
 	QVector<obs_sceneitem_t *> item_order;
@@ -363,7 +366,7 @@ void SourceTreeModel::UngroupSelectedGroups(QModelIndexList &indices)
 		return;
 	}
 
-	OBSScene scene = main->GetCurrentScene();
+	OBSScene scene = st->Scene();
 	OBSData undoData = main->BackupScene(scene);
 
 	for (int i = indices.count() - 1; i >= 0; i--) {

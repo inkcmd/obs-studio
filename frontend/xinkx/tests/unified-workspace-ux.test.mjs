@@ -34,7 +34,8 @@ assert.match(streamer, /enable->setChecked\(true\)/);
 
 assert.match(profiles, /lastSelectedProfile/);
 assert.match(profiles, /storeProfiles\(\*root\)/);
-assert.match(broadcast, /Недоступен \/ завершён/);
+assert.doesNotMatch(broadcast, /youtubeEvent->addItem\(QStringLiteral\("Недоступен \/ завершён/);
+assert.match(broadcast, /gateway->inspectBroadcast\(account.id, broadcastId\)/);
 assert.match(broadcast, /if \(activeIndex > 0\) youtubeEvent->setCurrentIndex\(activeIndex\)/);
 
 assert.match(catalog, /Готовые примеры XINKX/);

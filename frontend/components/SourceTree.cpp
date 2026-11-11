@@ -7,12 +7,6 @@
 
 #include "moc_SourceTree.cpp"
 
-static inline OBSScene GetCurrentScene()
-{
-	OBSBasic *main = OBSBasic::Get();
-	return main->GetCurrentScene();
-}
-
 /* moves a scene item index (blame linux distros for using older Qt builds) */
 static inline void MoveItem(QVector<OBSSceneItem> &items, int oldIdx, int newIdx)
 {
@@ -21,7 +15,8 @@ static inline void MoveItem(QVector<OBSSceneItem> &items, int oldIdx, int newIdx
 	items.insert(newIdx, item);
 }
 
-SourceTree::SourceTree(QWidget *parent_) : QListView(parent_)
+SourceTree::SourceTree(QWidget *parent_, std::function<OBSScene()> provider)
+	: QListView(parent_), sceneProvider(std::move(provider))
 {
 	SourceTreeModel *stm_ = new SourceTreeModel(this);
 	setModel(stm_);
@@ -41,6 +36,11 @@ SourceTree::SourceTree(QWidget *parent_) : QListView(parent_)
 	setItemDelegate(new SourceTreeDelegate(this));
 }
 
+OBSScene SourceTree::Scene() const
+{
+	return sceneProvider ? sceneProvider() : OBSBasic::Get()->GetCurrentScene();
+}
+
 void SourceTree::UpdateIcons()
 {
 	SourceTreeModel *stm = GetStm();
@@ -57,7 +57,7 @@ void SourceTree::SetIconsVisible(bool visible)
 
 void SourceTree::ResetWidgets()
 {
-	OBSScene scene = GetCurrentScene();
+	OBSScene scene = Scene();
 
 	SourceTreeModel *stm = GetStm();
 	stm->UpdateGroupState(false);
@@ -126,7 +126,7 @@ void SourceTree::dropEvent(QDropEvent *event)
 
 	OBSBasic *main = OBSBasic::Get();
 
-	OBSScene scene = GetCurrentScene();
+	OBSScene scene = Scene();
 	obs_source_t *scenesource = obs_scene_get_source(scene);
 	SourceTreeModel *stm = GetStm();
 	auto &items = stm->items;
@@ -235,7 +235,8 @@ void SourceTree::dropEvent(QDropEvent *event)
 	if (dropGroup) {
 		sources.push_back(obs_sceneitem_get_source(dropGroup));
 	}
-	OBSData undo_data = main->BackupScene(scene, &sources);
+	OBSData undo_data;
+	if (!HasOwnScene()) undo_data = main->BackupScene(scene, &sources);
 
 	/* --------------------------------------- */
 	/* if selection includes base group items, */
@@ -396,14 +397,15 @@ void SourceTree::dropEvent(QDropEvent *event)
 	/* --------------------------------------- */
 	/* save redo data                          */
 
-	OBSData redo_data = main->BackupScene(scene, &sources);
+	OBSData redo_data;
+	if (!HasOwnScene()) redo_data = main->BackupScene(scene, &sources);
 
 	/* --------------------------------------- */
 	/* add undo/redo action                    */
 
 	const char *scene_name = obs_source_get_name(scenesource);
 	QString action_name = QTStr("Undo.ReorderSources").arg(scene_name);
-	main->CreateSceneUndoRedoAction(action_name, undo_data, redo_data);
+	if (!HasOwnScene()) main->CreateSceneUndoRedoAction(action_name, undo_data, redo_data);
 
 	/* --------------------------------------- */
 	/* remove items if dropped in to collapsed */
@@ -482,7 +484,7 @@ void SourceTree::NewGroupEdit(int row)
 				  "not be exactly. But again, yea. This "
 				  "really\nshould not be possible.");
 
-		OBSData redoSceneData = main->BackupScene(GetCurrentScene());
+		OBSData redoSceneData = main->BackupScene(Scene());
 
 		QString text = QTStr("Undo.GroupItems").arg("Unknown");
 		main->CreateSceneUndoRedoAction(text, undoSceneData, redoSceneData);
@@ -518,7 +520,7 @@ bool SourceTree::MultipleBaseSelected() const
 	SourceTreeModel *stm = GetStm();
 	QModelIndexList selectedIndices = selectedIndexes();
 
-	OBSScene scene = GetCurrentScene();
+	OBSScene scene = Scene();
 
 	if (selectedIndices.size() < 1) {
 		return false;
@@ -544,7 +546,7 @@ bool SourceTree::GroupsSelected() const
 	SourceTreeModel *stm = GetStm();
 	QModelIndexList selectedIndices = selectedIndexes();
 
-	OBSScene scene = GetCurrentScene();
+	OBSScene scene = Scene();
 
 	if (selectedIndices.size() < 1) {
 		return false;
@@ -564,7 +566,7 @@ bool SourceTree::GroupedItemsSelected() const
 {
 	SourceTreeModel *stm = GetStm();
 	QModelIndexList selectedIndices = selectedIndexes();
-	OBSScene scene = GetCurrentScene();
+	OBSScene scene = Scene();
 
 	if (!selectedIndices.size()) {
 		return false;
@@ -586,7 +588,7 @@ void SourceTree::Remove(OBSSceneItem item, OBSScene scene)
 {
 	OBSBasic *main = OBSBasic::Get();
 	GetStm()->Remove(item);
-	main->SaveProject();
+	if (!HasOwnScene()) main->SaveProject();
 
 	if (!main->SavingDisabled()) {
 		obs_source_t *sceneSource = obs_scene_get_source(scene);

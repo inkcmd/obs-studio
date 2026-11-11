@@ -18,12 +18,6 @@
 
 #include "moc_SourceTreeItem.cpp"
 
-static inline OBSScene GetCurrentScene()
-{
-	OBSBasic *main = OBSBasic::Get();
-	return main->GetCurrentScene();
-}
-
 SourceTreeItem::SourceTreeItem(SourceTree *tree_, OBSSceneItem sceneitem_) : tree(tree_), sceneitem(sceneitem_)
 {
 	setAttribute(Qt::WA_TranslucentBackground);
@@ -144,10 +138,12 @@ SourceTreeItem::SourceTreeItem(SourceTree *tree_, OBSSceneItem sceneitem_) : tre
 
 		QString str = QTStr(val ? "Undo.ShowSceneItem" : "Undo.HideSceneItem");
 
-		OBSBasic *main = OBSBasic::Get();
-		main->undo_s.add_action(str.arg(obs_source_get_name(source), name),
-					std::bind(undo_redo, std::placeholders::_1, id, !val),
-					std::bind(undo_redo, std::placeholders::_1, id, val), uuid, uuid);
+		if (!tree->HasOwnScene()) {
+			OBSBasic *main = OBSBasic::Get();
+			main->undo_s.add_action(str.arg(obs_source_get_name(source), name),
+						std::bind(undo_redo, std::placeholders::_1, id, !val),
+						std::bind(undo_redo, std::placeholders::_1, id, val), uuid, uuid);
+		}
 
 		QSignalBlocker sourcesSignalBlocker(this);
 		obs_sceneitem_set_visible(sceneitem, val);
@@ -316,6 +312,7 @@ void SourceTreeItem::mouseDoubleClickEvent(QMouseEvent *event)
 void SourceTreeItem::enterEvent(QEnterEvent *event)
 {
 	QWidget::enterEvent(event);
+	if (tree->HasOwnScene()) return;
 
 	OBSBasicPreview *preview = OBSBasicPreview::Get();
 
@@ -327,6 +324,7 @@ void SourceTreeItem::enterEvent(QEnterEvent *event)
 void SourceTreeItem::leaveEvent(QEvent *event)
 {
 	QWidget::leaveEvent(event);
+	if (tree->HasOwnScene()) return;
 
 	OBSBasicPreview *preview = OBSBasicPreview::Get();
 
@@ -360,7 +358,7 @@ void SourceTreeItem::ExitEditMode(bool save)
 		OBSBasic *main = OBSBasic::Get();
 		main->undo_s.pop_disabled();
 
-		OBSData redoSceneData = main->BackupScene(GetCurrentScene());
+		OBSData redoSceneData = main->BackupScene(tree->Scene());
 
 		QString text = QTStr("Undo.GroupItems").arg(newName.c_str());
 		main->CreateSceneUndoRedoAction(text, tree->undoSceneData, redoSceneData);
@@ -376,7 +374,7 @@ void SourceTreeItem::ExitEditModeInternal(bool save)
 	}
 
 	OBSBasic *main = OBSBasic::Get();
-	OBSScene scene = main->GetCurrentScene();
+	OBSScene scene = tree->Scene();
 
 	newName = editor->text().toStdString();
 
@@ -425,7 +423,7 @@ void SourceTreeItem::ExitEditModeInternal(bool save)
 
 	QSignalBlocker sourcesSignalBlocker(this);
 	std::string prevName(obs_source_get_name(source));
-	std::string scene_uuid = obs_source_get_uuid(main->GetCurrentSceneSource());
+	std::string scene_uuid = obs_source_get_uuid(obs_scene_get_source(scene));
 	auto undo = [scene_uuid, prevName, main](const std::string &data) {
 		OBSSourceAutoRelease source = obs_get_source_by_uuid(data.c_str());
 		obs_source_set_name(source, prevName.c_str());
@@ -445,7 +443,8 @@ void SourceTreeItem::ExitEditModeInternal(bool save)
 	};
 
 	const char *uuid = obs_source_get_uuid(source);
-	main->undo_s.add_action(QTStr("Undo.Rename").arg(newName.c_str()), undo, redo, uuid, uuid);
+	if (!tree->HasOwnScene())
+		main->undo_s.add_action(QTStr("Undo.Rename").arg(newName.c_str()), undo, redo, uuid, uuid);
 
 	obs_source_set_name(source, newName.c_str());
 }
@@ -485,7 +484,7 @@ void SourceTreeItem::LockedChanged(bool locked)
 
 void SourceTreeItem::Update(bool force)
 {
-	OBSScene scene = GetCurrentScene();
+	OBSScene scene = tree->Scene();
 	obs_scene_t *itemScene = obs_sceneitem_get_scene(sceneitem);
 
 	Type newType;

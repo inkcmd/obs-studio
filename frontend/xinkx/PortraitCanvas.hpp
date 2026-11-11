@@ -20,8 +20,8 @@ public:
 	// layout at the same time, retaining independent transform storage.
 	void duplicateLayout(const QString &fromScene, const QString &toScene);
 	void edit(QWidget *parent);
-	// The active OBS scene drives both compositions; this only changes which
-	// preview(s) are visible: 0 = landscape, 1 = portrait, 2 = both.
+	// The active OBS scene drives both compositions. The 16:9 and 9:16
+	// previews remain visible together in the normal OBS preview container.
 	void setViewMode(int mode);
 	void closeEditor();
 	void shutdown();
