@@ -397,14 +397,27 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 		youtubeEvent->addItem(QStringLiteral("Выберите эфир YouTube"), QString{});
 		for (const auto &entry : info.value(QStringLiteral("broadcasts")).toArray()) {
 			const auto item = entry.toObject();
-			youtubeEvent->addItem(item.value(QStringLiteral("title")).toString(), item.value(QStringLiteral("id")).toString());
+			const QString lifecycle = item.value(QStringLiteral("lifecycle")).toString();
+			const QString label = item.value(QStringLiteral("title")).toString();
+			youtubeEvent->addItem(lifecycle == QStringLiteral("live")
+				? QStringLiteral("● LIVE · %1").arg(label) : label,
+				item.value(QStringLiteral("id")).toString());
 		}
-		// A saved event can be completed or deleted. Never silently keep its
-		// stale ID when a different live broadcast is now selected.
+		// Prefer the current live/bound event found by the gateway. A profile
+		// may still explicitly name another upcoming event, and it remains
+		// available in the list for deliberate manual selection.
 		const int previousIndex = youtubeEvent->findData(previously);
 		const int activeIndex = youtubeEvent->findData(selectedId);
-		if (previousIndex > 0) youtubeEvent->setCurrentIndex(previousIndex);
-		else if (activeIndex > 0) youtubeEvent->setCurrentIndex(activeIndex);
+		if (activeIndex > 0) youtubeEvent->setCurrentIndex(activeIndex);
+		else if (previousIndex > 0) youtubeEvent->setCurrentIndex(previousIndex);
+		else if (!previously.isEmpty()) {
+			const QString savedLabel = local->value(key(QStringLiteral("youtubeBroadcastName"))).toString();
+			youtubeEvent->addItem(QStringLiteral("Недоступен / завершён · %1")
+				.arg(savedLabel.isEmpty() ? previously : savedLabel), previously);
+			youtubeEvent->setCurrentIndex(youtubeEvent->count() - 1);
+			youtubeHealth->setText(QStringLiteral("Сохранённый эфир отсутствует в доступных трансляциях YouTube. "
+				"Выбери новый эфир; старый ID пока сохранён."));
+		}
 		const QString currentId = youtubeEvent->currentData().toString();
 		if (!currentId.isEmpty() && currentId == selectedId) {
 			QStringList diagnostics;
@@ -430,9 +443,11 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 			}
 			youtubeHealth->setText(diagnostics.join(QLatin1Char('\n')));
 		}
-		local->setValue(key(QStringLiteral("youtubeBroadcast")), youtubeEvent->currentData().toString());
-		local->setValue(key(QStringLiteral("youtubeBroadcastName")), youtubeEvent->currentText());
-		flush->start();
+		if (!youtubeEvent->currentData().toString().isEmpty() && activeIndex > 0) {
+			local->setValue(key(QStringLiteral("youtubeBroadcast")), youtubeEvent->currentData().toString());
+			local->setValue(key(QStringLiteral("youtubeBroadcastName")), youtubeEvent->currentText());
+			flush->start();
+		}
 	});
 
 	QObject::connect(gateway, &ChatGateway::broadcastResult, panel, [=](const QString &id, const QString &message, bool success) {

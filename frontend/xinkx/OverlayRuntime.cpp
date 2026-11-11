@@ -766,7 +766,13 @@ void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *p
 	auto *items = new QListWidget(dialog);
 	items->setIconSize(QSize(128, 72));
 	items->setMinimumWidth(345);
-	page->addWidget(items, 1);
+	auto *libraryColumn = new QVBoxLayout();
+	auto *libraryMode = new QComboBox(dialog);
+	libraryMode->addItem(QStringLiteral("Готовые примеры XINKX"));
+	libraryMode->addItem(QStringLiteral("Мои сохранённые пресеты"));
+	libraryColumn->addWidget(libraryMode);
+	libraryColumn->addWidget(items, 1);
+	page->addLayout(libraryColumn, 1);
 	auto *detail = new QVBoxLayout();
 	auto *preview = new QLabel(dialog);
 	preview->setMinimumSize(430, 242);
@@ -832,18 +838,31 @@ void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *p
 
 	auto catalog = std::make_shared<QList<SourcePreset>>();
 	const int builtinCount = 19;
+	const auto selectedIndex = [=] {
+		return items->currentItem() ? items->currentItem()->data(Qt::UserRole).toInt() : -1;
+	};
 	const auto rebuild = [=] {
 		*catalog = catalogPresets();
 		items->clear();
-		for (const auto &entry : std::as_const(*catalog)) {
+		for (int index = 0; index < catalog->size(); ++index) {
+			const bool own = index >= builtinCount;
+			if (own != (libraryMode->currentIndex() == 1)) continue;
+			const auto &entry = catalog->at(index);
 			auto *row = new QListWidgetItem(QIcon(catalogPreview(entry).scaled(128, 72, Qt::KeepAspectRatio,
 				Qt::SmoothTransformation)), entry.title, items);
+			row->setData(Qt::UserRole, index);
 			row->setSizeHint(QSize(320, 82));
 			row->setToolTip(entry.description);
 		}
-		if (!catalog->isEmpty()) items->setCurrentRow(0);
+		if (items->count()) items->setCurrentRow(0);
+		else {
+			preview->clear();
+			description->setText(QStringLiteral("Здесь будут пресеты, которые ты сохранил из готовых примеров или свойств источника OBS."));
+		}
 	};
-	QObject::connect(items, &QListWidget::currentRowChanged, dialog, [=](int index) {
+	QObject::connect(libraryMode, &QComboBox::currentIndexChanged, dialog, rebuild);
+	QObject::connect(items, &QListWidget::currentRowChanged, dialog, [=](int) {
+		const int index = selectedIndex();
 		if (index < 0 || index >= catalog->size()) return;
 		const auto &entry = catalog->at(index);
 		preview->setPixmap(catalogPreview(entry).scaled(600, 340, Qt::KeepAspectRatio,
@@ -874,7 +893,7 @@ void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *p
 		removePreset->setEnabled(index >= builtinCount);
 	});
 	const auto refreshPreview = [=] {
-		const int index = items->currentRow();
+		const int index = selectedIndex();
 		if (index < 0 || index >= catalog->size()) return;
 		SourcePreset modified = catalog->at(index);
 		if (modified.layer == QStringLiteral("effects"))
@@ -932,7 +951,7 @@ void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *p
 		return settings.status() == QSettings::NoError;
 	};
 	QObject::connect(savePreset, &QPushButton::clicked, dialog, [=] {
-		const int index = items->currentRow();
+		const int index = selectedIndex();
 		if (index < 0 || index >= catalog->size()) return;
 		const auto &selected = catalog->at(index);
 		bool ok = false;
@@ -946,17 +965,21 @@ void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *p
 		}
 		entries.append(QJsonObject{{QStringLiteral("name"), title}, {QStringLiteral("layer"), selected.layer},
 			{QStringLiteral("settings"), configurationFor(selected)}});
-		if (writeCustom(entries)) { rebuild(); items->setCurrentRow(catalog->size() - 1); }
+		if (writeCustom(entries)) {
+			libraryMode->setCurrentIndex(1);
+			rebuild();
+			items->setCurrentRow(items->count() - 1);
+		}
 	});
 	QObject::connect(removePreset, &QPushButton::clicked, dialog, [=] {
-		const int index = items->currentRow() - builtinCount;
+		const int index = selectedIndex() - builtinCount;
 		auto entries = customEntries();
 		if (index < 0 || index >= entries.size()) return;
 		entries.removeAt(index);
 		if (writeCustom(entries)) rebuild();
 	});
 	QObject::connect(updateSelected, &QPushButton::clicked, dialog, [=] {
-		const int index = items->currentRow();
+		const int index = selectedIndex();
 		if (index < 0 || index >= catalog->size()) return;
 		OBSScene scene = mainWindow->GetCurrentScene();
 		if (!scene) return;
@@ -996,7 +1019,7 @@ void openSourceCatalog(OBSBasic *mainWindow, OverlayRuntime *runtime, QWidget *p
 		// Keep the library open for working with several OBS sources.
 	});
 	QObject::connect(add, &QPushButton::clicked, dialog, [=] {
-		const int index = items->currentRow();
+		const int index = selectedIndex();
 		if (index < 0 || index >= catalog->size()) return;
 		const auto &entry = catalog->at(index);
 		QString desired = name->text().trimmed();

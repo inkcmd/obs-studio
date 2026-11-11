@@ -460,6 +460,9 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 	auto *enable = new QCheckBox(QStringLiteral("Поверх всех окон · без реакции на мышь"), panel);
 	enable->setObjectName(QStringLiteral("xinkxStreamerOverlayEnabled"));
 	QObject::connect(enable, &QCheckBox::toggled, streamer, &StreamerOverlay::toggle);
+	// Show automatically on every startup; it remains click-through until the
+	// user explicitly enables placement mode in chat settings.
+	QTimer::singleShot(0, enable, [enable] { enable->setChecked(true); });
 	layout->addWidget(enable);
 	auto *surface = new QComboBox(panel);
 	surface->addItem(QStringLiteral("Для зрителей · OBS"), QStringLiteral("viewer"));

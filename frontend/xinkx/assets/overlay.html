@@ -8,7 +8,7 @@
   :root { color-scheme: dark; --cyan: #6be4ef; --indigo: #6f6af8; }
   * { box-sizing: border-box; }
   html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent !important; }
-  body { font-family: "Segoe UI", "Inter", sans-serif; color: white; pointer-events: none; }
+  body { position:relative; font-family: "Segoe UI", "Inter", sans-serif; color: white; pointer-events: none; }
   #surface, #chat, #timer, #viewers, #frame { zoom: var(--source-scale, 1); }
   #surface { position: absolute; inset: 0; overflow: hidden; }
   .effect { position: absolute; left: 50%; top: 26%; transform: translate(-50%, -50%);
@@ -109,6 +109,15 @@
   document.body.dataset.layer = layer;
   // Appearance is stored on the OBS source, independently of other XINKX layers.
   const sourceOptions = new URLSearchParams(location.search);
+  // OBS's browser viewport is supersampled, while CSS layout keeps the
+  // original logical scene size. GPU rendering scales this back losslessly.
+  const renderPixelRatio = Number(sourceOptions.get('renderPixelRatio'));
+  if (Number.isInteger(renderPixelRatio) && renderPixelRatio > 1 && renderPixelRatio <= 4) {
+    document.body.style.width = `${100 / renderPixelRatio}%`;
+    document.body.style.height = `${100 / renderPixelRatio}%`;
+    document.body.style.transformOrigin = 'top left';
+    document.body.style.transform = `scale(${renderPixelRatio})`;
+  }
   const selectedPreset = sourceOptions.get('preset') || 'default';
   if (['compact','glass','neon','minimal','gold','round'].includes(selectedPreset))
     document.body.dataset.preset = selectedPreset;

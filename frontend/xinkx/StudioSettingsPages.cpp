@@ -80,7 +80,7 @@ QWidget *chatPage(QWidget *parent, PresentationSettings *settings, const QString
 {
 	QVBoxLayout *layout;
 	const bool streamer = surface == QStringLiteral("streamer");
-	auto *page = section(parent, streamer ? QStringLiteral("Чат для меня") : QStringLiteral("Чат для зрителей"),
+	auto *page = section(parent, streamer ? QStringLiteral("Чат поверх игры · только для меня") : QStringLiteral("Чат на трансляции · для зрителей"),
 		streamer ? QStringLiteral("Локальный чат поверх игры. Отдельная настройка показа и режима перетаскивания мышью.") :
 		QStringLiteral("Оформление XINKX-чата в источнике OBS. Расположение и размер меняются на холсте."), &layout);
 	const auto source = settings->snapshot().value(surface).toObject();
@@ -163,7 +163,17 @@ QWidget *chatPage(QWidget *parent, PresentationSettings *settings, const QString
 	auto *background = colorRow(QStringLiteral("backgroundColor"), QStringLiteral("Фон сообщения"));
 	auto *panelColor = colorRow(QStringLiteral("panelColor"), QStringLiteral("Фон всей области чата"));
 	if (panelColor->text().isEmpty()) panelColor->setText(QStringLiteral("#09152c"));
-	layout->addLayout(form);
+	auto *chatWorkspace = new QHBoxLayout();
+	chatWorkspace->setSpacing(16);
+	auto *optionsPanel = new QWidget(page);
+	optionsPanel->setLayout(form);
+	optionsPanel->setMinimumWidth(440);
+	chatWorkspace->addWidget(optionsPanel, 3);
+	auto *previewPanel = new QWidget(page);
+	auto *previewColumn = new QVBoxLayout(previewPanel);
+	previewColumn->setContentsMargins(0, 0, 0, 0);
+	previewColumn->addWidget(new QLabel(QStringLiteral("Предпросмотр · %1")
+		.arg(streamer ? QStringLiteral("для меня") : QStringLiteral("для зрителей")), previewPanel));
 	auto *preview = new QFrame(page);
 	preview->setObjectName(QStringLiteral("xinkxChatPreview"));
 	auto *previewLayout = new QVBoxLayout(preview);
@@ -174,15 +184,16 @@ QWidget *chatPage(QWidget *parent, PresentationSettings *settings, const QString
 	auto *bubbleLayout = new QVBoxLayout(bubble);
 	bubbleLayout->setContentsMargins(10, 8, 10, 8);
 	bubbleLayout->setSpacing(4);
-	auto *previewTitle = new QLabel(QStringLiteral("Предпросмотр сообщения"), page);
-	layout->addWidget(previewTitle);
-	auto *previewName = new QLabel(QStringLiteral("Twitch · x_ink_x"), bubble);
+	auto *previewName = new QLabel(QStringLiteral("Twitch · ink"), bubble);
 	auto *previewText = new QLabel(QStringLiteral("Привет! Так сообщение будет выглядеть в эфире."), bubble);
 	previewText->setWordWrap(true);
 	bubbleLayout->addWidget(previewName);
 	bubbleLayout->addWidget(previewText);
 	previewLayout->addWidget(bubble);
-	layout->addWidget(preview);
+	previewColumn->addWidget(preview);
+	previewColumn->addStretch(1);
+	chatWorkspace->addWidget(previewPanel, 2);
+	layout->addLayout(chatWorkspace);
 	const auto updatePreview = [=] {
 		const auto valid = [](const QString &color, const QString &fallback) {
 			const QColor value(color);
@@ -205,7 +216,7 @@ QWidget *chatPage(QWidget *parent, PresentationSettings *settings, const QString
 		previewText->setFont(chatFont);
 		previewName->setStyleSheet(QStringLiteral("color:%1;").arg(valid(nameColor->text(), QStringLiteral("#8de9fb"))));
 		previewText->setStyleSheet(QStringLiteral("color:%1;").arg(valid(textColor->text(), QStringLiteral("#f6faff"))));
-		preview->setMaximumWidth(qMax(240, width->value() * 6));
+		preview->setMinimumWidth(240);
 	};
 	QObject::connect(font, &QLineEdit::textChanged, page, updatePreview);
 	for (auto *field : {fontSize, weight, radius, width, opacity, panelOpacity})

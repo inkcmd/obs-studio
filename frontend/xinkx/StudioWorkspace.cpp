@@ -42,6 +42,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSettings>
+#include <QSizePolicy>
 #include <QSet>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -95,6 +96,18 @@ QTabWidget *studioTabs(OBSBasic *mainWindow)
 
 void installStudioWorkspace(OBSBasic *mainWindow)
 {
+	// OBS's context toolbar must consume only its actual content height.
+	// On some restored dock layouts it otherwise expands to half the window,
+	// leaving a large empty area beneath both preview canvases.
+	if (auto *context = mainWindow->findChild<QWidget *>(QStringLiteral("contextContainer"))) {
+		context->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+		if (auto *center = mainWindow->findChild<QWidget *>(QStringLiteral("centralwidget")))
+			if (auto *vertical = qobject_cast<QVBoxLayout *>(center->layout())) {
+				if (auto *canvas = mainWindow->findChild<QWidget *>(QStringLiteral("canvasEditor")))
+					vertical->setStretchFactor(canvas, 1);
+				vertical->setStretchFactor(context, 0);
+			}
+	}
 	registerNativeSources();
 	auto *controller = new StudioController(mainWindow);
 	auto *manager = new MultiStreamManager(mainWindow);
@@ -533,16 +546,6 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	auto *studioPages = new QTabWidget(studio);
 	studioPages->setObjectName(QStringLiteral("xinkxStudioTabs"));
 	studioPages->setDocumentMode(true);
-	auto *canvasMode = new QComboBox(studioPages);
-	canvasMode->setObjectName(QStringLiteral("xinkxCanvasMode"));
-	canvasMode->setToolTip(QStringLiteral("Отображение холстов OBS; трансляции продолжаются независимо"));
-	canvasMode->addItems({QStringLiteral("16:9"), QStringLiteral("9:16"), QStringLiteral("Оба")});
-	studioPages->setCornerWidget(canvasMode, Qt::TopRightCorner);
-	QObject::connect(canvasMode, QOverload<int>::of(&QComboBox::currentIndexChanged), mainWindow,
-		[=](int mode) {
-			PortraitCanvas::instance().setViewMode(mode);
-			if (settings) settings->setValue(QStringLiteral("workspace/canvasViewMode"), mode);
-		});
 	studio->setWidget(studioPages);
 	mainWindow->AddDockWidget(studio, Qt::RightDockWidgetArea);
 	new StudioAutomation(mainWindow);
@@ -564,25 +567,17 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	installEngineHub(mainWindow);
 	QTimer::singleShot(0, mainWindow, [mainWindow, inspector, studio, studioPages] {
 		studio->setFloating(false);
-		mainWindow->tabifyDockWidget(inspector, studio);
+		// The optional source inspector must not consume the central preview area.
+		// OBS already provides editing directly on its horizontal canvas.
+		inspector->hide();
 		studio->show();
 		studio->raise();
 		mainWindow->resizeDocks({studio}, {450}, Qt::Horizontal);
 		const int home = studioPages->indexOf(studioPages->widget(0));
 		if (home >= 0) studioPages->setCurrentIndex(home);
 	});
-	// Once OBS restores its layout, show both canvases automatically whenever
-	// a portrait output is enabled. Both canvases follow the same OBS scene.
-	QTimer::singleShot(250, mainWindow, [=] {
-		const auto accounts = loadStreamAccounts();
-		const bool hasPortrait = std::any_of(accounts.cbegin(), accounts.cend(), [](const StreamAccount &a) {
-			return a.enabled && a.destination.portrait;
-		});
-		const int mode = hasPortrait ? std::clamp(settings ?
-			settings->value(QStringLiteral("workspace/canvasViewMode"), 2).toInt() : 2, 0, 2) : 0;
-		canvasMode->setCurrentIndex(mode);
-		PortraitCanvas::instance().setViewMode(mode);
-	});
+	// Two persistent previews, regardless of the currently configured outputs.
+	QTimer::singleShot(250, mainWindow, [] { PortraitCanvas::instance().setViewMode(2); });
 }
 
 void shutdownStudioOutputs(OBSBasic *mainWindow)

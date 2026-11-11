@@ -114,17 +114,6 @@ void installEngineHub(OBSBasic *window)
 		grid->addWidget(group, index / 2, index % 2);
 	}
 	layout->addLayout(grid);
-	auto *open = new QHBoxLayout();
-	for (const auto &name : {QStringLiteral("Эфир"), QStringLiteral("Чат"),
-		QStringLiteral("Эффекты"), QStringLiteral("Правила"), QStringLiteral("AI и голос")}) {
-		auto *button = new QPushButton(name, page);
-		open->addWidget(button);
-		QObject::connect(button, &QPushButton::clicked, page, [tabs, name] {
-			for (int i = 0; i < tabs->count(); ++i)
-				if (tabs->tabText(i) == name) { tabs->setCurrentIndex(i); break; }
-		});
-	}
-	layout->addLayout(open);
 	layout->addStretch(1);
 	const auto refresh = [window, badges] {
 		if (auto *events = window->findChild<EventCore *>(QStringLiteral("xinkxEventCore"))) {

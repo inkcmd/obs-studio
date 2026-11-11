@@ -18,6 +18,7 @@
 #include <QVariant>
 
 #include <array>
+#include <algorithm>
 #include <cstring>
 #include <utility>
 
@@ -50,12 +51,20 @@ const LayerType &kind(const char *id)
 	return layers.front();
 }
 
+int preferredRenderQuality(const LayerType &type)
+{
+	if (std::strcmp(type.layer, "effects") == 0) return 1;
+	if (std::strcmp(type.layer, "timer") == 0 || std::strcmp(type.layer, "viewers") == 0) return 3;
+	return 2;
+}
+
 struct NativeSource {
 	obs_source_t *parent = nullptr;
 	obs_source_t *browser = nullptr;
 	const LayerType *type = nullptr;
 	uint32_t width = 0;
 	uint32_t height = 0;
+	uint32_t renderScale = 1;
 };
 
 QString userPresetId(const QJsonObject &entry)
@@ -158,10 +167,19 @@ void update(void *data, obs_data_t *settings)
 	const auto height = static_cast<int>(obs_data_get_int(settings, "height"));
 	source->width = static_cast<uint32_t>(width > 0 ? width : source->type->width);
 	source->height = static_cast<uint32_t>(height > 0 ? height : source->type->height);
+	// Render text and borders at device resolution, not at the small logical
+	// source size. Downscale in libobs afterwards so scene-item transforms stay
+	// compatible with OBS's standard resize/drag behavior.
+	const int configuredQuality = static_cast<int>(obs_data_get_int(settings, "renderQuality"));
+	const int requestedQuality = std::clamp(configuredQuality > 0 ? configuredQuality :
+		preferredRenderQuality(*source->type), 1, 4);
+	source->renderScale = static_cast<uint32_t>(std::max(1, std::min({requestedQuality,
+		int(4096 / source->width), int(4096 / source->height)})));
 
 	QUrl url(QStringLiteral("http://127.0.0.1:8766/overlay"));
 	QUrlQuery query;
 	query.addQueryItem(QStringLiteral("layer"), QString::fromLatin1(source->type->layer));
+	query.addQueryItem(QStringLiteral("renderPixelRatio"), QString::number(source->renderScale));
 	const QString requested = QString::fromUtf8(obs_data_get_string(settings, "preset"));
 	const QString appearance = requested.startsWith(QStringLiteral("xinkx-user-"))
 		? QString::fromUtf8(obs_data_get_string(settings, "xinkxAppearance")) : requested;
@@ -192,8 +210,8 @@ void update(void *data, obs_data_t *settings)
 
 	OBSDataAutoRelease browserSettings = obs_data_create();
 	obs_data_set_string(browserSettings, "url", url.toString(QUrl::FullyEncoded).toUtf8().constData());
-	obs_data_set_int(browserSettings, "width", source->width);
-	obs_data_set_int(browserSettings, "height", source->height);
+	obs_data_set_int(browserSettings, "width", source->width * source->renderScale);
+	obs_data_set_int(browserSettings, "height", source->height * source->renderScale);
 	obs_data_set_int(browserSettings, "fps", 30);
 	obs_data_set_bool(browserSettings, "shutdown", false);
 	obs_data_set_bool(browserSettings, "restart_when_active", true);
@@ -235,8 +253,13 @@ uint32_t height(void *data) { return static_cast<NativeSource *>(data)->height; 
 void render(void *data, gs_effect_t *)
 {
 	auto *source = static_cast<NativeSource *>(data);
-	if (source->browser)
+	if (source->browser) {
+		gs_matrix_push();
+		const float scale = 1.f / float(std::max(1u, source->renderScale));
+		gs_matrix_scale3f(scale, scale, 1.f);
 		obs_source_video_render(source->browser);
+		gs_matrix_pop();
+	}
 }
 
 void enumActiveSources(void *data, obs_source_enum_proc_t callback, void *param)
@@ -271,6 +294,7 @@ void defaultsForType(void *type_data, obs_data_t *settings)
 	const auto *type = static_cast<const LayerType *>(type_data);
 	obs_data_set_default_int(settings, "width", type->width);
 	obs_data_set_default_int(settings, "height", type->height);
+	obs_data_set_default_int(settings, "renderQuality", preferredRenderQuality(*type));
 }
 
 obs_properties_t *properties(void *data)
@@ -280,6 +304,7 @@ obs_properties_t *properties(void *data)
 	const QString layer = source && source->type ? QString::fromLatin1(source->type->layer) : QString{};
 	obs_properties_add_int(properties, "width", "Ширина элемента (пиксели)", 80, 3840, 1);
 	obs_properties_add_int(properties, "height", "Высота элемента (пиксели)", 50, 2160, 1);
+	obs_properties_add_int(properties, "renderQuality", "Чёткость при увеличении (1–4×)", 1, 4, 1);
 	obs_properties_add_bool(properties, "customize", "Своё оформление для этого источника (иначе настройки по умолчанию)");
 	// The same local preset library is available directly in OBS Sources -> +
 	// -> Properties. The selected user preset materializes as independent source

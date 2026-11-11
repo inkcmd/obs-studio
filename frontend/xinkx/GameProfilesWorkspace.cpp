@@ -205,14 +205,20 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 	editor->insertWidget(0, group);
 
 	const auto reload = [=] {
-		const int previous = profiles->currentData().toInt();
+		const int previous = profiles->count() ? profiles->currentData().toInt() : -1;
+		const QString preferred = root->value(QStringLiteral("lastSelectedProfile")).toString();
 		const QSignalBlocker blocked(profiles);
 		profiles->clear();
 		profiles->addItem(QStringLiteral("Новый профиль"), -1);
 		const auto list = root->value(QStringLiteral("profiles")).toArray();
 		for (int i = 0; i < list.size(); ++i)
 			profiles->addItem(list.at(i).toObject().value(QStringLiteral("name")).toString(), i);
-		const int index = profiles->findData(previous);
+		int index = profiles->findData(previous);
+		if (index < 0 || (previous < 0 && !preferred.isEmpty())) {
+			for (int i = 1; i < profiles->count(); ++i)
+				if (profiles->itemText(i) == preferred) { index = i; break; }
+		}
+		if (index == 0 && preferred.isEmpty() && profiles->count() > 1) index = 1;
 		profiles->setCurrentIndex(index >= 0 ? index : 0);
 	};
 	const auto load = [=] {
@@ -252,6 +258,14 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 			profile.value(QStringLiteral("youtubeBroadcastName")).toString());
 	};
 	QObject::connect(profiles, &QComboBox::currentIndexChanged, group, load);
+	QObject::connect(profiles, &QComboBox::currentIndexChanged, group, [=] {
+		const int index = profiles->currentData().toInt();
+		const QJsonArray available = root->value(QStringLiteral("profiles")).toArray();
+		if (index < 0 || index >= available.size()) return;
+		root->insert(QStringLiteral("lastSelectedProfile"), available.at(index).toObject()
+			.value(QStringLiteral("name")).toString());
+		storeProfiles(*root);
+	});
 	reload();
 	load();
 	// At startup obs_frontend_get_scenes() can return an empty list while
@@ -277,6 +291,7 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 		if (index < 0 || index >= list.size()) return;
 		list.removeAt(index);
 		root->insert(QStringLiteral("profiles"), list);
+		root->remove(QStringLiteral("lastSelectedProfile"));
 		if (!storeProfiles(*root)) { note->setText(QStringLiteral("Ошибка удаления профиля")); return; }
 		reload();
 		profiles->setCurrentIndex(0);
@@ -313,6 +328,7 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 		if (index >= 0 && index < list.size()) list.replace(index, profile);
 		else list.append(profile);
 		root->insert(QStringLiteral("profiles"), list);
+		root->insert(QStringLiteral("lastSelectedProfile"), name->text().trimmed());
 		if (!storeProfiles(*root)) {
 			save->setProperty("xinkxProfileReady", false);
 			note->setText(QStringLiteral("Ошибка сохранения game-profiles.json"));
