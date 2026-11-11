@@ -23,9 +23,23 @@ for (const term of [
   'QStringLiteral("order"), index',
   'gs_draw_quadf(nullptr',
   'gs_set_viewport(0, 0, cx, cy)',
-  'xinkxSourceCanvasTabs',
-  'sourceTabs->addTab(nativeFrame, QStringLiteral("16:9"))',
-  'sourceTabs->addTab(portraitSources, QStringLiteral("9:16"))',
+  'xinkxUnifiedSourcesWorkspace',
+  'xinkxCanvasSplitter',
+  'splitter->addWidget(landscapePane)',
+  'splitter->addWidget(side)',
+  'guardedSplitter->deleteLater()',
+  'xinkxUnifiedSourceList',
+  'xinkxLandscapeSourceMode',
+  'xinkxPortraitSourceMode',
+  'xinkxAdvancedSourceTree',
+  'sourceStack->addWidget(nativeFrame)',
+  'const auto selectedLayer = [=]',
+  'const auto setActiveCanvas = [=](int target, bool selectFromList)',
+  'new LandscapeCanvasFocus([=] { setActiveCanvas(0, false); }, side)',
+  'setActiveCanvas(1, false)',
+  'obs_sceneitem_select(item, source && !uuid->isEmpty()',
+  'obs_source_create("game_capture", name.toUtf8().constData()',
+  'OBS_SOURCE_DO_NOT_DUPLICATE',
   'std::vector<Captured> mainSources',
   'if (!store.contains(extraKey(name)))',
   'obs_source_duplicate(original',
@@ -33,6 +47,20 @@ for (const term of [
   'Создать независимую копию источника',
   'saveDelay->setSingleShot(true)',
 ]) assert.ok(canvas.includes(term), `missing portrait editor contract ${term}`);
+
+// A single source list now represents both render compositions. The stock
+// OBS source tree is preserved under Advanced rather than duplicated in tabs.
+assert.doesNotMatch(canvas, /xinkxSourceCanvasTabs/);
+assert.doesNotMatch(canvas, /LandscapeTabFocus/);
+assert.match(canvas, /guardedStack->removeWidget\(guardedFrame\)/);
+assert.match(canvas, /guardedFrame->setParent\(guardedContents\)/);
+assert.match(canvas, /horizontalVisibility\.contains\(uuid\)/);
+assert.match(canvas, /portraitVisibility\.contains\(uuid\)/);
+assert.match(canvas, /obs_enum_scenes\(/);
+assert.match(canvas, /Изменение настроек захвата затронет все/);
+assert.match(canvas, /QStringLiteral\("\[?16:9"\)/);
+assert.match(canvas, /QMetaObject::invokeMethod\(mainWindow, "on_actionRemoveSource_triggered"/);
+assert.match(canvas, /obs_frontend_open_source_properties\(source\)/);
 
 assert.match(studio, /canvasMode->addItems\(/);
 assert.match(studio, /PortraitCanvas::instance\(\)\.setViewMode\(mode\)/);

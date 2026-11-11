@@ -14,7 +14,9 @@
 #include <QAction>
 #include <QCheckBox>
 #include <QDockWidget>
+#include <QEvent>
 #include <QCryptographicHash>
+#include <QHash>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -29,10 +31,12 @@
 #include <QPushButton>
 #include <QPointer>
 #include <QSettings>
+#include <QSet>
 #include <QSignalBlocker>
 #include <QSizePolicy>
+#include <QSplitter>
+#include <QStackedWidget>
 #include <QTimer>
-#include <QTabWidget>
 #include <QUuid>
 #include <QVBoxLayout>
 
@@ -366,19 +370,19 @@ private:
 	}
 };
 
-class LandscapeTabFocus final : public QObject {
+class LandscapeCanvasFocus final : public QObject {
 public:
-	LandscapeTabFocus(QTabWidget *tabs, QObject *parent) : QObject(parent), tabs(tabs) {}
+	LandscapeCanvasFocus(std::function<void()> activate, QObject *parent) : QObject(parent), activate(std::move(activate)) {}
 
 protected:
 	bool eventFilter(QObject *watched, QEvent *event) override
 	{
-		if (tabs && event->type() == QEvent::MouseButtonPress) tabs->setCurrentIndex(0);
+		if (event->type() == QEvent::MouseButtonPress && activate) activate();
 		return QObject::eventFilter(watched, event);
 	}
 
 private:
-	QPointer<QTabWidget> tabs;
+	std::function<void()> activate;
 };
 
 } // namespace
@@ -666,39 +670,14 @@ void PortraitCanvas::edit(QWidget *parent)
 	side->setMinimumWidth(200);
 	side->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 	auto *column = new QVBoxLayout(side);
-	column->setContentsMargins(3, 3, 3, 3);
+	column->setContentsMargins(1, 1, 1, 1);
+	column->setSpacing(2);
 	auto *header = new QHBoxLayout();
-	header->addWidget(new QLabel(QStringLiteral("9:16 · 1080×1920 · текущая сцена OBS"), side));
+	header->addWidget(new QLabel(QStringLiteral("9:16 · 1080×1920"), side));
 	column->addLayout(header);
 	auto *preview = new PortraitDisplay(obs_scene_get_source(scene), side);
+	preview->setToolTip(QStringLiteral("Ctrl + колесо — масштаб · средняя кнопка — перемещение · ПКМ — команды и сброс масштаба"));
 	column->addWidget(preview, 1);
-	auto *zoomBar = new QHBoxLayout();
-	auto *zoomOut = new QPushButton(QStringLiteral("−"), side);
-	auto *zoomIn = new QPushButton(QStringLiteral("+"), side);
-	auto *zoomText = new QLabel(QStringLiteral("По размеру окна"), side);
-	auto *zoomFit = new QPushButton(QStringLiteral("По размеру"), side);
-	zoomOut->setMaximumWidth(30);
-	zoomIn->setMaximumWidth(30);
-	zoomBar->addWidget(zoomOut);
-	zoomBar->addWidget(zoomText);
-	zoomBar->addWidget(zoomIn);
-	zoomBar->addStretch();
-	zoomBar->addWidget(zoomFit);
-	column->addLayout(zoomBar);
-	const auto updateZoom = [=] {
-		zoomText->setText(preview->zoomFactor() <= 1.f ? QStringLiteral("По размеру окна") :
-			QStringLiteral("%1%").arg(int(std::round(preview->zoomFactor() * 100.f))));
-	};
-	preview->zoomChanged = updateZoom;
-	QObject::connect(zoomOut, &QPushButton::clicked, side, [=] {
-		preview->setZoomFactor(preview->zoomFactor() / 1.25f); updateZoom();
-	});
-	QObject::connect(zoomIn, &QPushButton::clicked, side, [=] {
-		preview->setZoomFactor(preview->zoomFactor() * 1.25f); updateZoom();
-	});
-	QObject::connect(zoomFit, &QPushButton::clicked, side, [=] {
-		preview->setZoomFactor(1.f); updateZoom();
-	});
 	auto *toolbarWidget = new QWidget(side);
 	auto *toolbar = new QHBoxLayout(toolbarWidget);
 	toolbar->setContentsMargins(0, 0, 0, 0);
@@ -713,53 +692,139 @@ void PortraitCanvas::edit(QWidget *parent)
 	toolbar->addWidget(snap);
 	column->addWidget(toolbarWidget);
 	auto *list = new QListWidget(side);
-	list->setObjectName(QStringLiteral("xinkxPortraitSourceList"));
+	list->setObjectName(QStringLiteral("xinkxUnifiedSourceList"));
 	list->setMinimumHeight(105);
 	list->setMaximumHeight(175);
 	column->addWidget(list);
-	// Reuse OBS's existing Sources dock: its source tree and controls become the
-	// 16:9 tab, while portrait has its own source tree/controls in the 9:16 tab.
-	// The central area therefore holds previews only, not a second settings pane.
-	QTabWidget *sourceTabs = nullptr;
+	// One source workbench covers both render canvases. The original OBS source
+	// tree remains available behind an Advanced button for upstream commands
+	// such as drag ordering, nested groups, and their native undo stack.
+	auto activeCanvas = std::make_shared<int>(1);
+	QPushButton *landscapeMode = nullptr;
+	QPushButton *portraitMode = nullptr;
+	QStackedWidget *sourceStack = nullptr;
 	if (auto *sourcesDock = mainWindow->findChild<QDockWidget *>(QStringLiteral("sourcesDock"))) {
 		if (auto *nativeFrame = sourcesDock->findChild<QWidget *>(QStringLiteral("sourcesFrame"))) {
 			QWidget *contents = nativeFrame->parentWidget();
 			auto *dockLayout = contents ? static_cast<QVBoxLayout *>(contents->layout()) : nullptr;
 			if (dockLayout) {
-				sourceTabs = new QTabWidget(contents);
-				sourceTabs->setObjectName(QStringLiteral("xinkxSourceCanvasTabs"));
-				auto *portraitSources = new QWidget(sourceTabs);
-				auto *sourceColumn = new QVBoxLayout(portraitSources);
+				auto *workspace = new QWidget(contents);
+				workspace->setObjectName(QStringLiteral("xinkxUnifiedSourcesWorkspace"));
+				auto *sourceColumn = new QVBoxLayout(workspace);
 				sourceColumn->setContentsMargins(0, 0, 0, 0);
+				sourceColumn->setSpacing(3);
+				auto *modeRow = new QHBoxLayout();
+				landscapeMode = new QPushButton(QStringLiteral("16:9"), workspace);
+				portraitMode = new QPushButton(QStringLiteral("9:16"), workspace);
+				landscapeMode->setObjectName(QStringLiteral("xinkxLandscapeSourceMode"));
+				portraitMode->setObjectName(QStringLiteral("xinkxPortraitSourceMode"));
+				landscapeMode->setCheckable(true);
+				portraitMode->setCheckable(true);
+				portraitMode->setChecked(true);
+				landscapeMode->setToolTip(QStringLiteral("Редактировать источники горизонтального холста"));
+				portraitMode->setToolTip(QStringLiteral("Редактировать источники вертикального холста"));
+				modeRow->addWidget(new QLabel(QStringLiteral("Источники сцены"), workspace));
+				modeRow->addStretch();
+				modeRow->addWidget(landscapeMode);
+				modeRow->addWidget(portraitMode);
+				auto *advanced = new QPushButton(QStringLiteral("OBS ⋯"), workspace);
+				advanced->setObjectName(QStringLiteral("xinkxAdvancedSourceTree"));
+				advanced->setCheckable(true);
+				advanced->setToolTip(QStringLiteral("Штатное дерево источников OBS: группы, порядок, дополнительные команды"));
+				modeRow->addWidget(advanced);
+				sourceColumn->addLayout(modeRow);
+				sourceStack = new QStackedWidget(workspace);
+				sourceStack->setObjectName(QStringLiteral("xinkxSourceStack"));
+				auto *unified = new QWidget(sourceStack);
+				auto *unifiedColumn = new QVBoxLayout(unified);
+				unifiedColumn->setContentsMargins(0, 0, 0, 0);
+				unifiedColumn->setSpacing(3);
 				column->removeWidget(list);
 				column->removeWidget(toolbarWidget);
 				list->setMaximumHeight(QWIDGETSIZE_MAX);
-				sourceColumn->addWidget(list, 1);
-				sourceColumn->addWidget(toolbarWidget);
+				unifiedColumn->addWidget(list, 1);
+				unifiedColumn->addWidget(toolbarWidget);
 				dockLayout->removeWidget(nativeFrame);
-				sourceTabs->addTab(nativeFrame, QStringLiteral("16:9"));
-				sourceTabs->addTab(portraitSources, QStringLiteral("9:16"));
-				dockLayout->insertWidget(0, sourceTabs);
-				sourceTabs->setCurrentIndex(1);
-				if (auto *nativePreview = mainWindow->findChild<QWidget *>(QStringLiteral("preview")))
-					nativePreview->installEventFilter(new LandscapeTabFocus(sourceTabs, side));
+				sourceStack->addWidget(unified);
+				sourceStack->addWidget(nativeFrame);
+				sourceColumn->addWidget(sourceStack, 1);
+				dockLayout->insertWidget(0, workspace);
+				QObject::connect(advanced, &QPushButton::toggled, workspace, [=](bool showNative) {
+					sourceStack->setCurrentIndex(showNative ? 1 : 0);
+				});
 				QPointer<QWidget> guardedContents(contents);
 				QPointer<QWidget> guardedFrame(nativeFrame);
-				QPointer<QTabWidget> guardedTabs(sourceTabs);
-				QObject::connect(side, &QObject::destroyed, sourceTabs, [=] {
-					if (!guardedContents || !guardedFrame || !guardedTabs) return;
+				QPointer<QWidget> guardedWorkspace(workspace);
+				QPointer<QStackedWidget> guardedStack(sourceStack);
+				QObject::connect(side, &QObject::destroyed, workspace, [=] {
+					if (!guardedContents || !guardedFrame || !guardedWorkspace || !guardedStack) return;
 					auto *layout = static_cast<QVBoxLayout *>(guardedContents->layout());
 					if (!layout) return;
-					layout->removeWidget(guardedTabs);
-					guardedTabs->removeTab(0);
+					layout->removeWidget(guardedWorkspace);
+					guardedStack->removeWidget(guardedFrame);
 					guardedFrame->setParent(guardedContents);
 					layout->insertWidget(0, guardedFrame);
-					guardedTabs->deleteLater();
+					guardedWorkspace->deleteLater();
 				});
 			}
 		}
 	}
-	previewLayout->addWidget(side);
+	// Keep both libobs GPU displays in one resizable canvas workspace. Move
+	// OBS's normal preview (and its disabled placeholder) as widgets; never
+	// recreate its graphics display or replace the OBSBasic preview controller.
+	if (auto *nativePreviewPane = mainWindow->findChild<QWidget *>(QStringLiteral("previewContainer"))) {
+		auto *disabledPreview = mainWindow->findChild<QWidget *>(QStringLiteral("previewDisabledWidget"));
+		auto *landscapePane = new QWidget(canvasEditor);
+		landscapePane->setObjectName(QStringLiteral("xinkxLandscapePane"));
+		auto *landscapeLayout = new QHBoxLayout(landscapePane);
+		landscapeLayout->setContentsMargins(0, 0, 0, 0);
+		landscapeLayout->setSpacing(0);
+		if (disabledPreview) {
+			previewLayout->removeWidget(disabledPreview);
+			landscapeLayout->addWidget(disabledPreview);
+		}
+		previewLayout->removeWidget(nativePreviewPane);
+		landscapeLayout->addWidget(nativePreviewPane, 1);
+		auto *splitter = new QSplitter(Qt::Horizontal, canvasEditor);
+		splitter->setObjectName(QStringLiteral("xinkxCanvasSplitter"));
+		splitter->setChildrenCollapsible(false);
+		splitter->setHandleWidth(5);
+		splitter->addWidget(landscapePane);
+		splitter->addWidget(side);
+		splitter->setStretchFactor(0, 3);
+		splitter->setStretchFactor(1, 2);
+		{
+			QSettings store(studioSettingsPath(), QSettings::IniFormat);
+			const QByteArray savedSizes = store.value(QStringLiteral("canvas/splitterSizes")).toByteArray();
+			if (!savedSizes.isEmpty()) splitter->restoreState(savedSizes);
+		}
+		QObject::connect(splitter, &QSplitter::splitterMoved, side, [=] {
+			QSettings store(studioSettingsPath(), QSettings::IniFormat);
+			store.setValue(QStringLiteral("canvas/splitterSizes"), splitter->saveState());
+		});
+		previewLayout->addWidget(splitter);
+		QPointer<QWidget> guardedLandscape(landscapePane);
+		QPointer<QWidget> guardedPreview(nativePreviewPane);
+		QPointer<QWidget> guardedDisabled(disabledPreview);
+		QPointer<QSplitter> guardedSplitter(splitter);
+		QPointer<QWidget> guardedEditor(canvasEditor);
+		QObject::connect(side, &QObject::destroyed, canvasEditor, [=] {
+			if (!guardedLandscape || !guardedPreview || !guardedSplitter || !guardedEditor) return;
+			auto *layout = qobject_cast<QHBoxLayout *>(guardedEditor->layout());
+			auto *original = qobject_cast<QHBoxLayout *>(guardedLandscape->layout());
+			if (!layout || !original) return;
+			layout->removeWidget(guardedSplitter);
+			if (guardedDisabled) {
+				original->removeWidget(guardedDisabled);
+				guardedDisabled->setParent(canvasEditor);
+				layout->insertWidget(0, guardedDisabled);
+			}
+			original->removeWidget(guardedPreview);
+			guardedPreview->setParent(canvasEditor);
+			layout->insertWidget(guardedDisabled ? 1 : 0, guardedPreview);
+			guardedSplitter->deleteLater();
+		});
+	} else previewLayout->addWidget(side);
 	// Dragging changes only this scene item's transform. Do not write an INI file
 	// on every mouse-move; persist once the user stops interacting.
 	auto *saveDelay = new QTimer(side);
@@ -768,27 +833,120 @@ void PortraitCanvas::edit(QWidget *parent)
 	QObject::connect(saveDelay, &QTimer::timeout, side, [this] { save(); });
 	auto initialTransform = std::make_shared<obs_transform_info>();
 	auto initialBounds = std::make_shared<std::array<float, 4>>();
-	// OBS's Sources dock is topmost-first; libobs stores scene items
-	// bottommost-first. Keep the same ordering in the portrait tab.
+	const auto sourceUuid = [](obs_sceneitem_t *item) {
+		obs_source_t *source = item ? obs_sceneitem_get_source(item) : nullptr;
+		return source ? QString::fromUtf8(obs_source_get_uuid(source)) : QString{};
+	};
+	const auto selectedUuid = [=] {
+		return list->currentItem() ? list->currentItem()->data(Qt::UserRole).toString() : QString{};
+	};
+	const auto landscapeItem = [=](const QString &uuid) -> obs_sceneitem_t * {
+		if (uuid.isEmpty()) return nullptr;
+		OBSSourceAutoRelease current = obs_frontend_get_current_scene();
+		obs_scene_t *actual = current ? obs_scene_from_source(current) : nullptr;
+		if (!actual) return nullptr;
+		struct Lookup { QString uuid; obs_sceneitem_t *item = nullptr; } lookup{uuid};
+		obs_scene_enum_items(actual, [](obs_scene_t *, obs_sceneitem_t *item, void *context) {
+			auto *lookup = static_cast<Lookup *>(context);
+			obs_source_t *source = obs_sceneitem_get_source(item);
+			if (source && QString::fromUtf8(obs_source_get_uuid(source)) == lookup->uuid) {
+				lookup->item = item;
+				return false;
+			}
+			return true;
+		}, &lookup);
+		return lookup.item;
+	};
+	// One row per source UUID; a scene item can appear in either composition
+	// or both, with its input shared but transform/visibility independent.
 	const auto selectedLayer = [=] {
-		return list->currentRow() < 0 ? -1 : layers.size() - 1 - list->currentRow();
+		if (*activeCanvas != 1) return -1;
+		const QString uuid = selectedUuid();
+		for (int index = 0; index < layers.size(); ++index)
+			if (sourceUuid(layers.at(index).item) == uuid) return index;
+		return -1;
 	};
 	const auto selectLayer = [=](int layer) {
-		list->setCurrentRow(layer < 0 ? -1 : layers.size() - 1 - layer);
+		const QString uuid = layer >= 0 && layer < layers.size() ? sourceUuid(layers.at(layer).item) : QString{};
+		for (int index = 0; index < list->count(); ++index) {
+			if (list->item(index)->data(Qt::UserRole).toString() == uuid && !uuid.isEmpty()) {
+				list->setCurrentRow(index);
+				return;
+			}
+		}
+		list->setCurrentRow(-1);
 	};
 
 	const auto refreshList = [=] {
-		const int selected = selectedLayer();
+		const QString selected = selectedUuid();
 		const QSignalBlocker blocked(list);
 		list->clear();
+		std::vector<Captured> horizontal;
+		OBSSourceAutoRelease current = obs_frontend_get_current_scene();
+		if (obs_scene_t *actual = current ? obs_scene_from_source(current) : nullptr)
+			obs_scene_enum_items(actual, captureItem, &horizontal);
+		QHash<QString, bool> horizontalVisibility;
+		for (const auto &source : horizontal) {
+			const QString uuid = QString::fromUtf8(obs_source_get_uuid(source.source));
+			if (!uuid.isEmpty()) horizontalVisibility.insert(uuid, source.visible);
+		}
+		QHash<QString, bool> portraitVisibility;
 		for (int i = layers.size() - 1; i >= 0; --i) {
 			const auto &layer = layers.at(i);
-			auto *entry = new QListWidgetItem(layer.name, list);
-			entry->setFlags(entry->flags() | Qt::ItemIsUserCheckable);
-			entry->setCheckState(obs_sceneitem_visible(layer.item) ? Qt::Checked : Qt::Unchecked);
+			const QString uuid = sourceUuid(layer.item);
+			if (!uuid.isEmpty()) portraitVisibility.insert(uuid, obs_sceneitem_visible(layer.item));
 		}
-		if (selected >= 0 && selected < layers.size()) selectLayer(selected);
-		else if (!layers.isEmpty()) selectLayer(layers.size() - 1);
+		QHash<QString, QSet<QString>> sceneUses;
+		obs_enum_scenes([](void *context, obs_source_t *source) {
+			auto *uses = static_cast<QHash<QString, QSet<QString>> *>(context);
+			obs_scene_t *obsScene = obs_scene_from_source(source);
+			if (!obsScene) return true;
+			struct Usage { QHash<QString, QSet<QString>> *uses; QString scene; } usage{
+				uses, QString::fromUtf8(obs_source_get_uuid(source))};
+			obs_scene_enum_items(obsScene, [](obs_scene_t *, obs_sceneitem_t *item, void *context) {
+				auto *usage = static_cast<Usage *>(context);
+				obs_source_t *source = obs_sceneitem_get_source(item);
+				if (source) (*usage->uses)[QString::fromUtf8(obs_source_get_uuid(source))].insert(usage->scene);
+				return true;
+			}, &usage);
+			return true;
+		}, &sceneUses);
+		QSet<QString> shown;
+		const auto append = [&](const QString &uuid, const QString &name) {
+			if (uuid.isEmpty() || shown.contains(uuid)) return;
+			shown.insert(uuid);
+			const bool inHorizontal = horizontalVisibility.contains(uuid);
+			const bool inPortrait = portraitVisibility.contains(uuid);
+			const QString markers = QStringLiteral("%1%2")
+				.arg(inHorizontal ? QStringLiteral("16:9") : QStringLiteral(""),
+					 inPortrait ? QStringLiteral("  9:16") : QStringLiteral(""));
+			auto *entry = new QListWidgetItem(QStringLiteral("%1    [%2]").arg(name, markers.trimmed()), list);
+			entry->setData(Qt::UserRole, uuid);
+			QString hint = inHorizontal && inPortrait
+				? QStringLiteral("Общий источник; размещение независимо для 16:9 и 9:16")
+				: QStringLiteral("Источник используется только на указанном холсте");
+			const int sceneCount = sceneUses.value(uuid).size();
+			if (sceneCount > 1) hint += QStringLiteral("\nЭтот источник также используется в %1 сценах OBS. Изменение настроек захвата затронет все.")
+				.arg(sceneCount);
+			entry->setToolTip(hint);
+			if (*activeCanvas == 0 ? inHorizontal : inPortrait) {
+				entry->setFlags(entry->flags() | Qt::ItemIsUserCheckable);
+				entry->setCheckState((*activeCanvas == 0 ? horizontalVisibility.value(uuid) : portraitVisibility.value(uuid))
+					? Qt::Checked : Qt::Unchecked);
+			}
+		};
+		// Match OBS's topmost-first ordering where possible; portrait-only
+		// layers are appended to the same source list.
+		for (auto it = horizontal.crbegin(); it != horizontal.crend(); ++it)
+			append(QString::fromUtf8(obs_source_get_uuid(it->source)), it->name);
+		for (int i = layers.size() - 1; i >= 0; --i)
+			append(sourceUuid(layers.at(i).item), layers.at(i).name);
+		for (int i = 0; i < list->count(); ++i) {
+			if (list->item(i)->data(Qt::UserRole).toString() != selected) continue;
+			list->setCurrentRow(i);
+			return;
+		}
+		if (list->count()) list->setCurrentRow(0);
 	};
 	const auto updateSelection = [=] {
 		const int row = selectedLayer();
@@ -810,6 +968,41 @@ void PortraitCanvas::edit(QWidget *parent)
 		}
 		preview->setSelection(corners);
 	};
+	const auto selectLandscape = [=] {
+		if (*activeCanvas != 0) return;
+		QString uuid = selectedUuid();
+		OBSSourceAutoRelease current = obs_frontend_get_current_scene();
+		obs_scene_t *actual = current ? obs_scene_from_source(current) : nullptr;
+		if (!actual) return;
+		obs_scene_enum_items(actual, [](obs_scene_t *, obs_sceneitem_t *item, void *context) {
+			const auto *uuid = static_cast<const QString *>(context);
+			obs_source_t *source = obs_sceneitem_get_source(item);
+			obs_sceneitem_select(item, source && !uuid->isEmpty() &&
+				QString::fromUtf8(obs_source_get_uuid(source)) == *uuid);
+			return true;
+		}, &uuid);
+	};
+	const auto setActiveCanvas = [=](int target, bool selectFromList) {
+		if (target != 0 && target != 1) return;
+		const bool changed = *activeCanvas != target;
+		*activeCanvas = target;
+		if (landscapeMode) landscapeMode->setChecked(target == 0);
+		if (portraitMode) portraitMode->setChecked(target == 1);
+		snap->setVisible(target == 1);
+		add->setToolTip(target == 0 ? QStringLiteral("Добавить источник в горизонтальную сцену OBS")
+			: QStringLiteral("Добавить или привязать источник к вертикальному холсту"));
+		remove->setToolTip(target == 0 ? QStringLiteral("Удалить из горизонтальной сцены OBS с возможностью отмены")
+			: QStringLiteral("Удалить только из вертикальной композиции"));
+		if (changed) refreshList();
+		if (target == 0 && selectFromList) selectLandscape();
+		updateSelection();
+	};
+	if (landscapeMode) QObject::connect(landscapeMode, &QPushButton::clicked, side,
+		[=] { setActiveCanvas(0, true); });
+	if (portraitMode) QObject::connect(portraitMode, &QPushButton::clicked, side,
+		[=] { setActiveCanvas(1, true); });
+	if (auto *nativePreview = mainWindow->findChild<QWidget *>(QStringLiteral("preview")))
+		nativePreview->installEventFilter(new LandscapeCanvasFocus([=] { setActiveCanvas(0, false); }, side));
 	const auto saveCurrent = [=](float px, float py, float width, float height) {
 		const int row = selectedLayer();
 		if (row < 0 || row >= layers.size()) return;
@@ -906,7 +1099,7 @@ void PortraitCanvas::edit(QWidget *parent)
 		return -1;
 	};
 	preview->pressed = [=](float px, float py) {
-		if (sourceTabs) sourceTabs->setCurrentIndex(1);
+		setActiveCanvas(1, false);
 		// In OBS, a selected handle wins even if a different, higher scene
 		// item overlaps it. Only then pick the topmost item's contents.
 		const int selectedRow = selectedLayer();
@@ -971,20 +1164,39 @@ void PortraitCanvas::edit(QWidget *parent)
 		saveCurrent(info.pos.x + c * anchorX - s * anchorY,
 			info.pos.y + s * anchorX + c * anchorY, width, height);
 	};
-	QObject::connect(list, &QListWidget::currentRowChanged, side, updateSelection);
+	QObject::connect(list, &QListWidget::currentRowChanged, side, [=] {
+		if (*activeCanvas == 0) selectLandscape();
+		updateSelection();
+	});
 	QObject::connect(list, &QListWidget::itemChanged, side, [=](QListWidgetItem *entry) {
-		const int row = layers.size() - 1 - list->row(entry);
-		if (row < 0 || row >= layers.size()) return;
-		obs_sceneitem_set_visible(layers.at(row).item, entry->checkState() == Qt::Checked);
-		save();
+		const QString uuid = entry->data(Qt::UserRole).toString();
+		if (*activeCanvas == 0) {
+			if (auto *item = landscapeItem(uuid))
+				obs_sceneitem_set_visible(item, entry->checkState() == Qt::Checked);
+		} else {
+			for (const auto &layer : layers) {
+				if (sourceUuid(layer.item) != uuid) continue;
+				obs_sceneitem_set_visible(layer.item, entry->checkState() == Qt::Checked);
+				save();
+				break;
+			}
+		}
 		updateSelection();
 	});
 	QObject::connect(properties, &QPushButton::clicked, side, [=] {
-		const int row = selectedLayer();
-		if (row >= 0 && row < layers.size())
-			obs_frontend_open_source_properties(obs_sceneitem_get_source(layers.at(row).item));
+		obs_sceneitem_t *item = *activeCanvas == 0 ? landscapeItem(selectedUuid()) :
+			(selectedLayer() >= 0 ? layers.at(selectedLayer()).item : nullptr);
+		OBSSourceAutoRelease fallback = item ? nullptr : obs_get_source_by_uuid(selectedUuid().toUtf8().constData());
+		obs_source_t *source = item ? obs_sceneitem_get_source(item) : fallback.Get();
+		if (source) obs_frontend_open_source_properties(source);
 	});
 	QObject::connect(remove, &QPushButton::clicked, side, [=] {
+		if (*activeCanvas == 0) {
+			selectLandscape();
+			QMetaObject::invokeMethod(mainWindow, "on_actionRemoveSource_triggered", Qt::DirectConnection);
+			refreshList();
+			return;
+		}
 		const int row = selectedLayer();
 		if (row < 0 || row >= layers.size()) return;
 		const auto layer = layers.at(row);
@@ -1047,7 +1259,33 @@ void PortraitCanvas::edit(QWidget *parent)
 		selectLayer(layers.size() - 1);
 	};
 	QObject::connect(add, &QPushButton::clicked, side, [=] {
+		if (*activeCanvas == 0) {
+			QMetaObject::invokeMethod(mainWindow, "on_actionAddSource_triggered", Qt::DirectConnection);
+			return;
+		}
 		QMenu menu(side);
+		if (!selectedUuid().isEmpty() && landscapeItem(selectedUuid()) && selectedLayer() < 0) {
+			auto *reuseSelected = menu.addAction(QStringLiteral("Добавить выделенный источник 16:9 на холст 9:16"));
+			QObject::connect(reuseSelected, &QAction::triggered, side, [=] {
+				OBSSourceAutoRelease original = obs_get_source_by_uuid(selectedUuid().toUtf8().constData());
+				if (original) addSource(original, false);
+			});
+			menu.addSeparator();
+		}
+		// Game Capture explicitly forbids generic source duplication. A new
+		// instance must be created, with independent process/window properties.
+		auto *newGameCapture = menu.addAction(QStringLiteral("Создать новый захват игры · 9:16"));
+		QObject::connect(newGameCapture, &QAction::triggered, side, [=] {
+			const QString name = QStringLiteral("9:16 · Захват игры · %1")
+				.arg(QUuid::createUuid().toString(QUuid::WithoutBraces).left(6));
+			OBSDataAutoRelease settings = obs_data_create();
+			obs_source_t *created = obs_source_create("game_capture", name.toUtf8().constData(), settings, nullptr);
+			if (!created) return;
+			addSource(created, true);
+			obs_frontend_open_source_properties(created);
+			obs_source_release(created);
+		});
+		menu.addSeparator();
 		const std::array<std::pair<const char *, const char *>, 6> nativeTypes = {{
 			{"xinkx_chat", "Чат"}, {"xinkx_reactions", "Реакции"},
 			{"xinkx_alerts", "Оповещения"}, {"xinkx_timer", "Таймер"},
@@ -1077,6 +1315,7 @@ void PortraitCanvas::edit(QWidget *parent)
 			return true;
 		}, &choices);
 		for (const auto &candidate : choices) {
+			OBSSourceAutoRelease existingSource = obs_get_source_by_uuid(candidate.uuid.toUtf8().constData());
 			const bool exists = std::any_of(layers.cbegin(), layers.cend(), [&](const Layer &layer) {
 				return QString::fromUtf8(obs_source_get_uuid(obs_sceneitem_get_source(layer.item))) == candidate.uuid;
 			});
@@ -1087,15 +1326,17 @@ void PortraitCanvas::edit(QWidget *parent)
 					if (source) addSource(source, false);
 				});
 			}
-			auto *clone = duplicateMenu->addAction(candidate.name);
-			QObject::connect(clone, &QAction::triggered, side, [=] {
-				OBSSourceAutoRelease original = obs_get_source_by_uuid(candidate.uuid.toUtf8().constData());
-				if (!original) return;
-				const QString newName = QStringLiteral("9:16 · %1 · %2").arg(candidate.name,
-					QUuid::createUuid().toString(QUuid::WithoutBraces).left(6));
-				obs_source_t *copy = obs_source_duplicate(original, newName.toUtf8().constData(), false);
-				if (copy) { addSource(copy, true); obs_source_release(copy); }
-			});
+			if (existingSource && !(obs_source_get_output_flags(existingSource) & OBS_SOURCE_DO_NOT_DUPLICATE)) {
+				auto *clone = duplicateMenu->addAction(candidate.name);
+				QObject::connect(clone, &QAction::triggered, side, [=] {
+					OBSSourceAutoRelease original = obs_get_source_by_uuid(candidate.uuid.toUtf8().constData());
+					if (!original) return;
+					const QString newName = QStringLiteral("9:16 · %1 · %2").arg(candidate.name,
+						QUuid::createUuid().toString(QUuid::WithoutBraces).left(6));
+					obs_source_t *copy = obs_source_duplicate(original, newName.toUtf8().constData(), false);
+					if (copy) { addSource(copy, true); obs_source_release(copy); }
+				});
+			}
 		}
 		if (reuseMenu->isEmpty()) reuseMenu->setEnabled(false);
 		if (duplicateMenu->isEmpty()) duplicateMenu->setEnabled(false);
@@ -1105,6 +1346,9 @@ void PortraitCanvas::edit(QWidget *parent)
 	// source context menu here would silently operate on the horizontal scene.
 	const auto showContext = [=](int row, const QPoint &globalPoint) {
 		QMenu menu(side);
+		auto *fitPreview = menu.addAction(QStringLiteral("Масштаб предпросмотра · по размеру"));
+		QObject::connect(fitPreview, &QAction::triggered, side, [=] { preview->setZoomFactor(1.f); });
+		menu.addSeparator();
 		if (row < 0 || row >= layers.size()) {
 			auto *addAction = menu.addAction(QStringLiteral("Добавить источник…"));
 			QObject::connect(addAction, &QAction::triggered, side, [=] { add->click(); });
@@ -1200,7 +1444,7 @@ void PortraitCanvas::edit(QWidget *parent)
 		menu.exec(globalPoint);
 	};
 	preview->contextRequested = [=](float px, float py, const QPoint &globalPoint) {
-		if (sourceTabs) sourceTabs->setCurrentIndex(1);
+		setActiveCanvas(1, false);
 		int row = selectedLayer();
 		if (!insideItem(row, px, py)) {
 			row = -1;
@@ -1219,11 +1463,39 @@ void PortraitCanvas::edit(QWidget *parent)
 	};
 	list->setContextMenuPolicy(Qt::CustomContextMenu);
 	QObject::connect(list, &QListWidget::customContextMenuRequested, side, [=](const QPoint &position) {
-		const auto *entry = list->itemAt(position);
-		const int row = entry ? layers.size() - 1 - list->row(entry) : -1;
-		showContext(row, list->viewport()->mapToGlobal(position));
+		if (auto *clicked = list->itemAt(position)) list->setCurrentItem(clicked);
+		if (*activeCanvas == 0) {
+			QMenu menu(side);
+			auto *propertiesAction = menu.addAction(QStringLiteral("Свойства"));
+			propertiesAction->setEnabled(landscapeItem(selectedUuid()) != nullptr);
+			QObject::connect(propertiesAction, &QAction::triggered, side, [=] { properties->click(); });
+			auto *removeAction = menu.addAction(QStringLiteral("Удалить из 16:9"));
+			removeAction->setEnabled(landscapeItem(selectedUuid()) != nullptr);
+			QObject::connect(removeAction, &QAction::triggered, side, [=] { remove->click(); });
+			menu.exec(list->viewport()->mapToGlobal(position));
+		} else showContext(selectedLayer(), list->viewport()->mapToGlobal(position));
 	});
 	QObject::connect(side, &QObject::destroyed, mainWindow, [this] { editing = false; });
+	const auto sourceListSignature = [=] {
+		QString state = sceneName;
+		OBSSourceAutoRelease current = obs_frontend_get_current_scene();
+		obs_scene_t *actual = current ? obs_scene_from_source(current) : nullptr;
+		if (actual) obs_scene_enum_items(actual, [](obs_scene_t *, obs_sceneitem_t *item, void *context) {
+			auto *value = static_cast<QString *>(context);
+			obs_source_t *source = obs_sceneitem_get_source(item);
+			if (source) *value += QStringLiteral("|H:%1:%2:%3")
+				.arg(QString::fromUtf8(obs_source_get_uuid(source)),
+					QString::fromUtf8(obs_source_get_name(source)),
+					obs_sceneitem_visible(item) ? QStringLiteral("1") : QStringLiteral("0"));
+			return true;
+		}, &state);
+		for (const auto &layer : layers)
+			state += QStringLiteral("|V:%1:%2:%3")
+				.arg(sourceUuid(layer.item), layer.name,
+					obs_sceneitem_visible(layer.item) ? QStringLiteral("1") : QStringLiteral("0"));
+		return state;
+	};
+	auto lastSourceListSignature = std::make_shared<QString>();
 	auto *watchScene = new QTimer(side);
 	watchScene->setInterval(600);
 	QObject::connect(watchScene, &QTimer::timeout, side, [=] {
@@ -1232,7 +1504,36 @@ void PortraitCanvas::edit(QWidget *parent)
 		editing = false;
 		sync();
 		editing = true;
-		if (before != signature) { refreshList(); updateSelection(); }
+		const QString modelState = sourceListSignature();
+		if (before != signature || *lastSourceListSignature != modelState) {
+			*lastSourceListSignature = modelState;
+			refreshList();
+			updateSelection();
+		}
+		// A click on the ordinary OBS preview is handled by OBS's native
+		// source tree. Mirror its chosen source into the unified list.
+		if (*activeCanvas == 0) {
+			OBSSourceAutoRelease current = obs_frontend_get_current_scene();
+			obs_scene_t *actual = current ? obs_scene_from_source(current) : nullptr;
+			if (actual) {
+				QString selected;
+				obs_scene_enum_items(actual, [](obs_scene_t *, obs_sceneitem_t *item, void *context) {
+					if (!obs_sceneitem_selected(item)) return true;
+					obs_source_t *source = obs_sceneitem_get_source(item);
+					if (source) *static_cast<QString *>(context) = QString::fromUtf8(obs_source_get_uuid(source));
+					return false;
+				}, &selected);
+				if (!selected.isEmpty() && selected != selectedUuid()) {
+					const QSignalBlocker blocked(list);
+					for (int row = 0; row < list->count(); ++row) {
+						if (list->item(row)->data(Qt::UserRole).toString() == selected) {
+							list->setCurrentRow(row);
+							break;
+						}
+					}
+				}
+			}
+		}
 	});
 	watchScene->start();
 	// Persist changes made through the native OBS source Properties dialog,
@@ -1242,6 +1543,7 @@ void PortraitCanvas::edit(QWidget *parent)
 	QObject::connect(saveSources, &QTimer::timeout, side, [this] { save(); });
 	saveSources->start();
 	refreshList();
+	*lastSourceListSignature = sourceListSignature();
 	updateSelection();
 	side->show();
 }
@@ -1249,7 +1551,9 @@ void PortraitCanvas::shutdown()
 {
 	// Stop display callbacks and scene-switch timers before releasing the libobs canvas.
 	if (auto *window = static_cast<QMainWindow *>(obs_frontend_get_main_window())) {
-		if (auto *landscape = window->findChild<QWidget *>(QStringLiteral("previewContainer")))
+		if (auto *landscape = window->findChild<QWidget *>(QStringLiteral("xinkxLandscapePane")))
+			landscape->show();
+		else if (auto *landscape = window->findChild<QWidget *>(QStringLiteral("previewContainer")))
 			landscape->show();
 		if (auto *editor = window->findChild<QWidget *>(QStringLiteral("xinkxPortraitEditor")))
 			delete editor;
@@ -1274,19 +1578,25 @@ void PortraitCanvas::setViewMode(int mode)
 	if (!window) return;
 	if (mode != 0 && !window->findChild<QWidget *>(QStringLiteral("xinkxPortraitEditor")))
 		edit(window);
-	if (auto *landscape = window->findChild<QWidget *>(QStringLiteral("previewContainer")))
+	if (auto *landscape = window->findChild<QWidget *>(QStringLiteral("xinkxLandscapePane")))
+		landscape->setVisible(mode != 1);
+	else if (auto *landscape = window->findChild<QWidget *>(QStringLiteral("previewContainer")))
 		landscape->setVisible(mode != 1);
 	if (auto *portrait = window->findChild<QWidget *>(QStringLiteral("xinkxPortraitEditor")))
 		portrait->setVisible(mode != 0);
-	if (auto *tabs = window->findChild<QTabWidget *>(QStringLiteral("xinkxSourceCanvasTabs"))) {
-		if (mode != 2) tabs->setCurrentIndex(mode == 0 ? 0 : 1);
+	if (mode != 2) {
+		const QString buttonName = mode == 0 ? QStringLiteral("xinkxLandscapeSourceMode") :
+			QStringLiteral("xinkxPortraitSourceMode");
+		if (auto *button = window->findChild<QPushButton *>(buttonName)) button->click();
 	}
 }
 
 void PortraitCanvas::closeEditor()
 {
 	if (auto *window = static_cast<QMainWindow *>(obs_frontend_get_main_window())) {
-		if (auto *landscape = window->findChild<QWidget *>(QStringLiteral("previewContainer")))
+		if (auto *landscape = window->findChild<QWidget *>(QStringLiteral("xinkxLandscapePane")))
+			landscape->show();
+		else if (auto *landscape = window->findChild<QWidget *>(QStringLiteral("previewContainer")))
 			landscape->show();
 		if (auto *editor = window->findChild<QWidget *>(QStringLiteral("xinkxPortraitEditor"))) {
 			save();
