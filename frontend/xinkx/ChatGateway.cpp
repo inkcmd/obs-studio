@@ -1261,10 +1261,16 @@ void ChatGateway::startTwitch(const QString &id)
 				}
 				if (!scopes.contains(QStringLiteral("user:write:chat")))
 					emit providerWarning(id, QStringLiteral("Twitch: для отправки сообщений потребуется повторный OAuth с user:write:chat"));
-				if (!scopes.contains(QStringLiteral("channel:read:subscriptions")))
+				if (!scopes.contains(QStringLiteral("channel:read:subscriptions"))) {
+					emit alertTransportStatus(id, QStringLiteral("channel.subscribe"), false,
+						QStringLiteral("нет права channel:read:subscriptions · повтори OAuth"));
 					emit providerWarning(id, QStringLiteral("Twitch: уведомления о подписках отключены: в OAuth нет channel:read:subscriptions"));
-				if (!scopes.contains(QStringLiteral("moderator:read:followers")))
+				}
+				if (!scopes.contains(QStringLiteral("moderator:read:followers"))) {
+					emit alertTransportStatus(id, QStringLiteral("channel.follow"), false,
+						QStringLiteral("нет права moderator:read:followers · повтори OAuth"));
 					emit providerWarning(id, QStringLiteral("Twitch: уведомления о фолловерах отключены: в OAuth нет moderator:read:followers"));
+				}
 				openTwitchSocket(id);
 			}, false, {QStringLiteral("Authorization: OAuth %1").arg(token)});
 	});
@@ -1285,6 +1291,9 @@ void ChatGateway::openTwitchSocket(const QString &id)
 		[this, id, identity, generation](const QString &reason) {
 			if (twitchGeneration.value(id) != generation || twitch.value(id) != *identity) return;
 			status(id, QStringLiteral("Twitch: ") + reason);
+			for (const auto &type : {QStringLiteral("channel.follow"), QStringLiteral("channel.subscribe"),
+						 QStringLiteral("channel.cheer")})
+				emit alertTransportStatus(id, type, false, QStringLiteral("EventSub отключён · переподключаемся"));
 			nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() + 15000;
 			delete twitch.take(id);
 		});
@@ -1331,6 +1340,9 @@ void ChatGateway::reconnectTwitchSocket(const QString &id, const QUrl &url)
 			}
 			if (twitchGeneration.value(id) != generation || twitch.value(id) != *identity) return;
 			delete twitch.take(id);
+			for (const auto &type : {QStringLiteral("channel.follow"), QStringLiteral("channel.subscribe"),
+						 QStringLiteral("channel.cheer")})
+				emit alertTransportStatus(id, type, false, QStringLiteral("EventSub отключён · переподключаемся"));
 			nextTwitchAt[id] = QDateTime::currentMSecsSinceEpoch() + 15000;
 			status(id, QStringLiteral("Twitch: %1 · новое подключение").arg(reason));
 		});
@@ -1597,6 +1609,10 @@ void ChatGateway::subscribeTwitch(const QString &id, const QString &sessionId)
 		authorized(id, QStringLiteral("https://api.twitch.tv/helix/eventsub/subscriptions"),
 			QJsonDocument(body).toJson(QJsonDocument::Compact),
 			[this, id, type](const HttpResult &result) {
+				if (type == QStringLiteral("channel.subscribe") || type == QStringLiteral("channel.follow") ||
+				    type == QStringLiteral("channel.cheer"))
+					emit alertTransportStatus(id, type, result.ok,
+						result.ok ? QStringLiteral("EventSub подключён") : result.error);
 				if (!result.ok) {
 					const QString message = QStringLiteral("Twitch %1: %2").arg(type, result.error);
 					if (type == QStringLiteral("channel.chat.message")) {
@@ -1656,6 +1672,7 @@ void ChatGateway::handleTwitchFrame(const QString &id, const QByteArray &frame)
 		const QString type = payload.value(QStringLiteral("subscription")).toObject()
 			.value(QStringLiteral("type")).toString();
 		if (type != QStringLiteral("channel.chat.message")) {
+			emit alertTransportStatus(id, type, false, QStringLiteral("EventSub отозван · проверь права OAuth"));
 			emit providerWarning(id, QStringLiteral("Twitch: подписка %1 отозвана").arg(type));
 			return;
 		}
@@ -1714,7 +1731,25 @@ void ChatGateway::dispatch(ChatLine line)
 	emit incoming(line);
 	if (auto *overlay = mainWindow->findChild<OverlayRuntime *>(QStringLiteral("xinkxOverlayRuntime"))) {
 		if (line.type == QStringLiteral("chat")) overlay->publishChat(line.platform, line.name, line.text);
-		else overlay->publishAlert(line.type, line.platform, line.name, line.amount, line.text);
+		else {
+			writeDiagnostic(QStringLiteral("alert:received"), QStringLiteral("%1 · %2")
+				.arg(line.platform, line.type));
+			const QString health = overlay->alertSourceHealth(mainWindow);
+			if (!health.startsWith(QStringLiteral("Готово:"))) {
+				const QString key = line.accountId + QLatin1Char(':') + health;
+				if (!alertDeliveryWarnings.contains(key)) {
+					alertDeliveryWarnings.insert(key);
+					emit providerWarning(line.accountId,
+						QStringLiteral("Оповещение получено, но на сцене не отображается: %1").arg(health));
+				}
+			} else {
+				for (auto it = alertDeliveryWarnings.begin(); it != alertDeliveryWarnings.end();) {
+					if (it->startsWith(line.accountId + QLatin1Char(':'))) it = alertDeliveryWarnings.erase(it);
+					else ++it;
+				}
+			}
+			overlay->publishAlert(line.type, line.platform, line.name, line.amount, line.text);
+		}
 	}
 	if (line.type != QStringLiteral("chat")) return;
 	const auto account = known.value(line.accountId);

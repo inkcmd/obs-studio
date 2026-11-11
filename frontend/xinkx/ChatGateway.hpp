@@ -63,6 +63,7 @@ signals:
 	void incoming(const xinkx::ChatLine &line);
 	void providerStatus(const QString &accountId, const QString &message);
 	void providerWarning(const QString &accountId, const QString &message);
+	void alertTransportStatus(const QString &accountId, const QString &eventType, bool active, const QString &details);
 	void sendStatus(const QString &accountId, const QString &message, bool success);
 	void broadcastInfo(const QString &accountId, const QJsonObject &details);
 	void categoryResults(const QString &accountId, const QJsonArray &categories);
@@ -116,6 +117,7 @@ private:
 	QHash<QString, QSet<QString>> twitchScopes;
 	QSet<QString> twitchPermissionChecks;
 	QSet<QString> twitchOptionalWarnings;
+	QSet<QString> alertDeliveryWarnings;
 	QHash<QString, KickState> kick;
 	QHash<QString, NativeWebSocket *> kickSockets;
 	QSet<QString> refreshing;

@@ -37,6 +37,7 @@ public:
 	void resetTimer();
 	void setPosition(const QString &position);
 	void setPaused(bool paused);
+	QString alertSourceHealth(OBSBasic *mainWindow) const;
 	bool addToScene(OBSBasic *mainWindow, QString *message, const QString &layer = QStringLiteral("all"),
 			const QString &sourceName = {}, const QJsonObject &presetSettings = {},
 			const QString &placement = {});

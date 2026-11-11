@@ -3,6 +3,7 @@
 #include "PresentationSettings.hpp"
 #include "StudioWorkspace.hpp"
 #include "StudioAutomation.hpp"
+#include "ChatGateway.hpp"
 
 #include <OBSApp.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -40,8 +41,10 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSettings>
+#include <QStringList>
 #include <QSpinBox>
 #include <QTabWidget>
+#include <QTimer>
 #include <QSize>
 #include <QUrl>
 #include <QUrlQuery>
@@ -78,6 +81,41 @@ bool validLayer(const QString &layer)
 	       layer == QStringLiteral("effects") || layer == QStringLiteral("alerts") ||
 	       layer == QStringLiteral("timer") || layer == QStringLiteral("viewers") ||
 	       layer == QStringLiteral("frame");
+}
+
+struct AlertSourcePresence {
+	bool visible = false;
+	bool hidden = false;
+};
+
+bool inspectAlertSource(obs_scene_t *, obs_sceneitem_t *item, void *context)
+{
+	auto *presence = static_cast<AlertSourcePresence *>(context);
+	obs_source_t *source = obs_sceneitem_get_source(item);
+	if (!source) return true;
+	if (obs_sceneitem_is_group(item)) {
+		if (auto *group = obs_group_from_source(source)) {
+			AlertSourcePresence nested;
+			obs_scene_enum_items(group, inspectAlertSource, &nested);
+			if (obs_sceneitem_visible(item)) {
+				presence->visible |= nested.visible;
+				presence->hidden |= nested.hidden;
+			} else presence->hidden |= nested.visible || nested.hidden;
+		}
+	}
+	const char *id = obs_source_get_id(source);
+	bool isAlert = id && std::strcmp(id, "xinkx_alerts") == 0;
+	if (!isAlert && id && std::strcmp(id, "browser_source") == 0) {
+		OBSDataAutoRelease settings = obs_source_get_settings(source);
+		const QString url = QString::fromUtf8(obs_data_get_string(settings, "url"));
+		isAlert = url == QStringLiteral("http://127.0.0.1:8766/overlay?layer=alerts") ||
+			url == QStringLiteral("http://127.0.0.1:8766/overlay?layer=all");
+	}
+	if (isAlert) {
+		if (obs_sceneitem_visible(item)) presence->visible = true;
+		else presence->hidden = true;
+	}
+	return true;
 }
 
 QByteArray frame(const QByteArray &name, const QJsonObject &payload)
@@ -586,6 +624,20 @@ void OverlayRuntime::setPaused(bool paused)
 	stateChanged();
 }
 
+QString OverlayRuntime::alertSourceHealth(OBSBasic *mainWindow) const
+{
+	if (!available()) return error();
+	if (effectsPaused) return QStringLiteral("Оповещения отключены аварийной паузой эффектов");
+	if (!mainWindow) return QStringLiteral("Нет окна OBS для проверки оповещений");
+	OBSScene scene = mainWindow->GetCurrentScene();
+	if (!scene) return QStringLiteral("Выбери сцену OBS для проверки оповещений");
+	AlertSourcePresence presence;
+	obs_scene_enum_items(scene, inspectAlertSource, &presence);
+	if (presence.visible) return QStringLiteral("Готово: источник оповещений включён в текущей сцене");
+	if (presence.hidden) return QStringLiteral("Источник оповещений скрыт в текущей сцене OBS");
+	return QStringLiteral("Источник оповещений отсутствует в текущей сцене OBS");
+}
+
 bool OverlayRuntime::addToScene(OBSBasic *mainWindow, QString *message, const QString &layer,
 				const QString &requestedName, const QJsonObject &presetSettings, const QString &placement)
 {
@@ -1075,6 +1127,74 @@ void installOverlayWorkspace(OBSBasic *mainWindow, QDockWidget *sourceInspector)
 		});
 	}
 	testLayout->addLayout(alerts);
+	auto *alertReadiness = new QLabel(testGroup);
+	alertReadiness->setObjectName(QStringLiteral("xinkxAlertReadiness"));
+	alertReadiness->setWordWrap(true);
+	testLayout->addWidget(alertReadiness);
+	auto *attachAlerts = new QPushButton(QStringLiteral("Добавить оповещения в текущую сцену"), testGroup);
+	attachAlerts->setObjectName(QStringLiteral("xinkxAttachAlerts"));
+	testLayout->addWidget(attachAlerts);
+	auto *lastRealAlert = new QLabel(QStringLiteral("Реальных событий пока не поступало"), testGroup);
+	lastRealAlert->setObjectName(QStringLiteral("xinkxLastRealAlert"));
+	lastRealAlert->setWordWrap(true);
+	testLayout->addWidget(lastRealAlert);
+	auto *alertTransport = new QLabel(QStringLiteral("Twitch: ожидаем проверку EventSub подписок и фолловеров\n"
+		"YouTube: уведомления о платном членстве приходят из активного чата\n"
+		"Kick: фолловеры/подписки требуют официального webhook; без публичного адреса не подключены"), testGroup);
+	alertTransport->setObjectName(QStringLiteral("xinkxAlertTransportHealth"));
+	alertTransport->setWordWrap(true);
+	alertTransport->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	testLayout->addWidget(alertTransport);
+	auto twitchEventStatus = std::make_shared<QHash<QString, QString>>();
+	const auto refreshAlertReadiness = [=] {
+		const QString health = runtime->alertSourceHealth(mainWindow);
+		const bool ready = health.startsWith(QStringLiteral("Готово:"));
+		alertReadiness->setText(health);
+		alertReadiness->setStyleSheet(ready ? QStringLiteral("color:#82d8d3")
+			: QStringLiteral("color:#efbd6d"));
+		attachAlerts->setEnabled(health.contains(QStringLiteral("отсутствует")));
+	};
+	QObject::connect(attachAlerts, &QPushButton::clicked, content, [=] {
+		QString message;
+		runtime->addToScene(mainWindow, &message, QStringLiteral("alerts"));
+		status->setText(message);
+		refreshAlertReadiness();
+	});
+	auto *alertStateTimer = new QTimer(testGroup);
+	alertStateTimer->setInterval(2000);
+	QObject::connect(alertStateTimer, &QTimer::timeout, testGroup, refreshAlertReadiness);
+	alertStateTimer->start();
+	refreshAlertReadiness();
+	// The ChatGateway is installed after the Effects tab. Listen only to
+	// genuine provider notifications, not the local test buttons above.
+	QTimer::singleShot(0, testGroup, [=] {
+		if (auto *gateway = mainWindow->findChild<ChatGateway *>(QStringLiteral("xinkxChatGateway"))) {
+			QObject::connect(gateway, &ChatGateway::alertTransportStatus, testGroup,
+				[=](const QString &, const QString &eventType, bool active, const QString &details) {
+					QString eventName;
+					if (eventType == QStringLiteral("channel.subscribe")) eventName = QStringLiteral("подписки");
+					else if (eventType == QStringLiteral("channel.follow")) eventName = QStringLiteral("фолловеры");
+					else if (eventType == QStringLiteral("channel.cheer")) eventName = QStringLiteral("Bits");
+					else return;
+					(*twitchEventStatus)[eventName] = QStringLiteral("Twitch %1: %2 · %3")
+						.arg(eventName, active ? QStringLiteral("готово") : QStringLiteral("ошибка"), details.left(120));
+					QStringList messages;
+					for (const auto &kind : {QStringLiteral("подписки"), QStringLiteral("фолловеры"), QStringLiteral("Bits")}) {
+						if (twitchEventStatus->contains(kind)) messages << twitchEventStatus->value(kind);
+					}
+					messages << QStringLiteral("YouTube: платное членство — события активного чата")
+						<< QStringLiteral("Kick: подписки/фолловеры без публичного webhook не подключены");
+					alertTransport->setText(messages.join(QLatin1Char('\n')));
+				});
+			QObject::connect(gateway, &ChatGateway::incoming, testGroup, [=](const ChatLine &event) {
+				if (event.type == QStringLiteral("chat")) return;
+				lastRealAlert->setText(QStringLiteral("%1 · %2 · %3 · %4")
+					.arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")),
+						platformTitle(event.platform), event.type, event.name));
+				refreshAlertReadiness();
+			});
+		}
+	});
 	layout->addWidget(testGroup);
 	auto *timerGroup = new QGroupBox(QStringLiteral("Таймер"), content);
 	auto *timerLayout = new QVBoxLayout(timerGroup);
