@@ -12,7 +12,7 @@ or `verified against live platforms`.
 | --- | --- | --- |
 | **1. Event Core** | Unified incoming real events from chat, follows, memberships, raids, donations; stable IDs, dedup, bounded ordered fan-out, local journal, health counters | **Source implementation complete; Windows compile and live verification pending** |
 | **2. Chat / Alerts / Automation** | Separate provider capability adapters, full free/paid event taxonomy, all permitted Twitch/YouTube/Kick subscriptions, moderation, rule-based event/action workflow and alerts editor | **Partial native implementation:** AlertEngine, paid/subtype metadata and local rules UI added; provider expansion and moderation pending; Windows build pending |
-| **3. Scene Elements** | One OBS source/item model for 16:9 and 9:16; native shapes/text/gradients/masks/path drawing, keyframe animation, alignment, grouping, presets, property inspector, undo/redo | Planned; existing libobs sources, HTML-backed widgets and dual canvas editor remain functional |
+| **3. Scene Elements** | One OBS source/item model for 16:9 and 9:16; native shapes/text/gradients/masks/path drawing, keyframe animation, alignment, grouping, presets, property inspector, undo/redo | **Partial native implementation:** GPU-backed custom figures and gradients, normal OBS scene item editing, properties and undo; path tool and animation timeline pending; Windows build pending |
 | **4. LLM / Speech** | Optional local model adapters (Ollama), explicit safe tool permissions, contextual memory, TTS/STT, voice routing and in-studio commands | Planned; existing `StudioAutomation` allowlisted command executor is the starting point, not an LLM runtime |
 | **5. Unified Studio / SDK** | Consolidate account/session models and workspace UI, extensible engines, diagnostics and plugin interfaces, installer and update/OBS upstream merge routine | Planned; existing OBS fork is operational source baseline |
 
@@ -95,3 +95,24 @@ or `verified against live platforms`.
 - **Not claimed:** full Kick follow/sub webhooks, platform moderation,
   configurable native alert visuals, paid/free emote tiers or editable rule
   condition graphs. Those are still work within the broad Stage 2 scope.
+
+## Phase 3 — implemented slice and verification
+
+- `xinkx_shape` is a real OBS video input source rendered through a libobs GPU
+  texture, without CEF or any browser source. Its bitmap is drawn with Qt
+  primitives and uploaded only after a property change, not every frame.
+- **Эффекты → Нарисовать элемент** opens a local Qt figure creator with size,
+  shape, name and color. New sources are added to the real current OBS scene
+  and to OBS's native undo history. Right-click source → **Свойства** edits a
+  rectangle, ellipse, line, triangle or progress indicator, two colors,
+  optional linear gradient, transparent fill, outline and rounded corners.
+- Every shape is an ordinary OBS source: use the native OBS source list for
+  grouping, filters, ordering, capture, transforms and copy/paste. Portrait
+  editor can reuse that same source or create another independent instance.
+- **Windows checks:** create each shape, resize/rotate/crop through OBS and
+  9:16 composition, edit properties while streaming, restart and reopen
+  scenes. Verify background transparency, antialiasing, GPU usage and source
+  destruction on a portable build. Qt/QPainter drawing itself is synchronous;
+  the actual OBS video source compiles and renders only when validated on GPU.
+- **Not claimed:** freehand pen/Bezier path editor, compositing masks, live
+  keyframe timeline, audio-reactive expressions or complete vector animation.

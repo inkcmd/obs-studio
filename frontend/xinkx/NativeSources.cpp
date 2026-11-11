@@ -1,4 +1,5 @@
 #include "NativeSources.hpp"
+#include "ShapeEngine.hpp"
 
 #include <OBSApp.hpp>
 #include <obs.hpp>
@@ -370,6 +371,7 @@ void registerNativeSources()
 		if (!obs_get_latest_input_type_id(type.id))
 			blog(LOG_ERROR, "XINKX: source type %s was not registered", type.id);
 	}
+	registerShapeSource();
 }
 
 } // namespace xinkx

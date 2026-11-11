@@ -14,6 +14,8 @@ target_sources(
     xinkx/AlertEngine.hpp
     xinkx/EventAutomation.cpp
     xinkx/EventAutomation.hpp
+    xinkx/ShapeEngine.cpp
+    xinkx/ShapeEngine.hpp
     xinkx/MultiStreamManager.cpp
     xinkx/MultiStreamManager.hpp
     xinkx/PortraitCanvas.cpp

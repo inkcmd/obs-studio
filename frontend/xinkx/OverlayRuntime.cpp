@@ -6,6 +6,7 @@
 #include "ChatGateway.hpp"
 #include "EventCore.hpp"
 #include "AlertEngine.hpp"
+#include "ShapeEngine.hpp"
 
 #include <OBSApp.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -1080,6 +1081,11 @@ void installOverlayWorkspace(OBSBasic *mainWindow, QDockWidget *sourceInspector)
 	layout->addWidget(catalogButton);
 	QObject::connect(catalogButton, &QPushButton::clicked, dock, [=] {
 		runtime->showCatalog(mainWindow, dock);
+	});
+	auto *shapeButton = new QPushButton(QStringLiteral("Нарисовать элемент · фигура, контур, градиент"), content);
+	layout->addWidget(shapeButton);
+	QObject::connect(shapeButton, &QPushButton::clicked, dock, [=] {
+		showShapeCreator(mainWindow, dock);
 	});
 	auto *sourceHint = new QLabel(QStringLiteral("Выбери оформление в каталоге, посмотри пример и добавь на сцену. "
 		"Перемещай и меняй размер за маркеры в предпросмотре OBS. "
