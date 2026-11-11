@@ -30,6 +30,23 @@ if(OS_MACOS)
 endif()
 add_subdirectory(plugins)
 
+# On Windows the following x64/ARM64 plugin targets each start a nested x86
+# MSBuild from POST_BUILD. They must not run concurrently: otherwise the nested
+# builds race while writing build_x86's ZERO_CHECK.recipe.
+if(OS_WINDOWS AND CMAKE_VS_PLATFORM_NAME MATCHES "^(x64|ARM64)$")
+  set(_previous_x86_build_target "")
+  foreach(_x86_build_target IN ITEMS graphics-hook get-graphics-offsets inject-helper obs-virtualcam-module)
+    if(TARGET ${_x86_build_target})
+      if(_previous_x86_build_target)
+        add_dependencies(${_x86_build_target} ${_previous_x86_build_target})
+      endif()
+      set(_previous_x86_build_target ${_x86_build_target})
+    endif()
+  endforeach()
+  unset(_previous_x86_build_target)
+  unset(_x86_build_target)
+endif()
+
 add_subdirectory(test/test-input)
 
 add_subdirectory(frontend)

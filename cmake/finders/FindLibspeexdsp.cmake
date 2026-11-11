@@ -83,7 +83,7 @@ find_path(
 if(PC_Libspeexdsp_VERSION VERSION_GREATER 0)
   set(Libspeexdsp_VERSION ${PC_Libspeexdsp_VERSION})
 else()
-  if(NOT Libspeexdsp_FIND_QUIETLY)
+  if(PC_Libspeexdsp_FOUND AND NOT Libspeexdsp_FIND_QUIETLY)
     message(AUTHOR_WARNING "Failed to find Libspeexdsp version.")
   endif()
   set(Libspeexdsp_VERSION 0.0.0)
