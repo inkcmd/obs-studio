@@ -16,6 +16,8 @@ target_sources(
     xinkx/EventAutomation.hpp
     xinkx/ShapeEngine.cpp
     xinkx/ShapeEngine.hpp
+    xinkx/LocalAssistants.cpp
+    xinkx/LocalAssistants.hpp
     xinkx/MultiStreamManager.cpp
     xinkx/MultiStreamManager.hpp
     xinkx/PortraitCanvas.cpp
@@ -57,5 +59,5 @@ target_sources(
 target_compile_definitions(obs-studio PRIVATE XINKX_STUDIO=1)
 
 if(WIN32)
-  target_link_libraries(obs-studio PRIVATE crypt32 winhttp)
+  target_link_libraries(obs-studio PRIVATE crypt32 winhttp ole32 sapi)
 endif()

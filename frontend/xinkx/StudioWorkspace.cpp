@@ -11,6 +11,7 @@
 #include "EventCore.hpp"
 #include "AlertEngine.hpp"
 #include "EventAutomation.hpp"
+#include "LocalAssistants.hpp"
 #include "WheelFocusGuard.hpp"
 #include "PortraitCanvas.hpp"
 #include "StreamAccounts.hpp"
@@ -552,6 +553,7 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	installOverlayWorkspace(mainWindow, inspector);
 	installChatWorkspace(mainWindow);
 	installEventAutomationWorkspace(mainWindow);
+	installAssistantWorkspace(mainWindow);
 	installPresentationWorkspace(mainWindow);
 	installBroadcastWorkspace(mainWindow);
 	installGameProfilesWorkspace(mainWindow);

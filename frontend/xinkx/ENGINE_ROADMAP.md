@@ -13,7 +13,7 @@ or `verified against live platforms`.
 | **1. Event Core** | Unified incoming real events from chat, follows, memberships, raids, donations; stable IDs, dedup, bounded ordered fan-out, local journal, health counters | **Source implementation complete; Windows compile and live verification pending** |
 | **2. Chat / Alerts / Automation** | Separate provider capability adapters, full free/paid event taxonomy, all permitted Twitch/YouTube/Kick subscriptions, moderation, rule-based event/action workflow and alerts editor | **Partial native implementation:** AlertEngine, paid/subtype metadata and local rules UI added; provider expansion and moderation pending; Windows build pending |
 | **3. Scene Elements** | One OBS source/item model for 16:9 and 9:16; native shapes/text/gradients/masks/path drawing, keyframe animation, alignment, grouping, presets, property inspector, undo/redo | **Partial native implementation:** GPU-backed custom figures and gradients, normal OBS scene item editing, properties and undo; path tool and animation timeline pending; Windows build pending |
-| **4. LLM / Speech** | Optional local model adapters (Ollama), explicit safe tool permissions, contextual memory, TTS/STT, voice routing and in-studio commands | Planned; existing `StudioAutomation` allowlisted command executor is the starting point, not an LLM runtime |
+| **4. LLM / Speech** | Optional local model adapters (Ollama), explicit safe tool permissions, contextual memory, TTS/STT, voice routing and in-studio commands | **Partial native implementation:** Ollama client, session memory, explicit manual OBS action, Windows SAPI TTS; STT and rich tools pending; Windows build pending |
 | **5. Unified Studio / SDK** | Consolidate account/session models and workspace UI, extensible engines, diagnostics and plugin interfaces, installer and update/OBS upstream merge routine | Planned; existing OBS fork is operational source baseline |
 
 ## Phase 1 — delivery contract
@@ -116,3 +116,26 @@ or `verified against live platforms`.
   the actual OBS video source compiles and renders only when validated on GPU.
 - **Not claimed:** freehand pen/Bezier path editor, compositing masks, live
   keyframe timeline, audio-reactive expressions or complete vector animation.
+
+## Phase 4 — implemented slice and verification
+
+- Native **AI и голос** tab sends an explicit question to local Ollama at the
+  fixed loopback endpoint `127.0.0.1:11434/api/chat`; no cloud provider,
+  browser request, API key or outside listener is involved. Conversation
+  history contains up to six user/assistant turns **in memory only**.
+- The default model is the user's installed `qwen3-vl:8b-instruct` but is
+  editable. Requests are disabled while OBS/multistream outputs are live,
+  unless the user explicitly opts in for that request. This avoids silently
+  loading a large model onto the same RTX GPU during a broadcast.
+- The LLM is read-only. Suggested commands are shown in a separate editable
+  JSON box and execute only after the user clicks **Выполнить проверенную
+  команду OBS**; the existing `StudioAutomation` validates allowed operations.
+- Optional paid-event speech uses Windows SAPI in a serialized background
+  worker pool. It is disabled by default, capped to five queued utterances
+  and persists its opt-in preference. **Проверить голос** speaks one sample.
+- **Windows checks:** Ollama offline/online, invalid model, timeout, reply
+  and reset, running stream block, explicit command approval, standalone
+  OBS scene execution, voice playback and app shutdown during speech.
+- **Not claimed:** voice input/STT, model fine-tuning, vision analysis of live
+  video, voice chat bots, third-party cloud models, automatic LLM-initiated
+  actions or mixing TTS into a dedicated OBS output track.
