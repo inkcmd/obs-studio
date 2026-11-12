@@ -50,7 +50,7 @@ QString configFile()
 
 QString defaultFolder()
 {
-	const auto *config = obs_frontend_get_profile_config();
+	auto *config = obs_frontend_get_profile_config();
 	QString path;
 	if (config) {
 		const char *mode = config_get_string(config, "Output", "Mode");

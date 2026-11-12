@@ -205,7 +205,7 @@ public:
 			const int index = list->currentRow();
 			if (index < 0) return;
 			jobs.removeAt(index);
-			rebuild(std::min(index, jobs.size() - 1));
+			rebuild(std::min(index, static_cast<int>(jobs.size()) - 1));
 		});
 		connect(list, &QListWidget::currentRowChanged, this, [this](int index) {
 			if (changing) return;
