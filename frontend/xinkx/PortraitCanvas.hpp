@@ -26,7 +26,11 @@ public:
 			return px >= x && px < x + width && py >= y && py < y + height;
 		}
 	};
-	static int landscapePreviewWidth(int displayWidth);
+	// Layout is expressed in real source pixels, not percentages of the preview.
+	// Both canvases share OBS's zoom, pan, and physical scale.
+	static constexpr int workspaceGap = 128;
+	static int workspaceWidth(int landscapeWidth);
+	static int workspaceHeight(int landscapeHeight);
 	static PreviewRegion portraitPreviewRegion(int displayWidth, int displayHeight);
 	bool previewVisible() const;
 	void renderPreview(uint32_t displayWidth, uint32_t displayHeight) const;

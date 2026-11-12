@@ -216,33 +216,33 @@ void OBSBasic::ResizePreview(uint32_t cx, uint32_t cy)
 
 	/* resize preview panel to fix to the top section of the window */
 	targetSize = GetPixelSize(ui->preview);
-	const int usableWidth = xinkx::PortraitCanvas::instance().previewVisible()
-		? xinkx::PortraitCanvas::landscapePreviewWidth(targetSize.width())
-		: targetSize.width();
-
 	isFixedScaling = ui->preview->IsFixedScaling();
 	obs_get_video_info(&ovi);
+	const bool unified = xinkx::PortraitCanvas::instance().previewVisible();
+	const int worldWidth = unified ? xinkx::PortraitCanvas::workspaceWidth(int(cx)) : int(cx);
+	const int worldHeight = unified ? xinkx::PortraitCanvas::workspaceHeight(int(cy)) : int(cy);
+	const int landscapeTop = unified ? (worldHeight - int(cy)) / 2 : 0;
 
 	if (isFixedScaling) {
 		previewScale = ui->preview->GetScalingAmount();
 
 		ui->preview->ClampScrollingOffsets();
 
-		GetCenterPosFromFixedScale(int(cx), int(cy), usableWidth - PREVIEW_EDGE_SIZE * 2,
+		GetCenterPosFromFixedScale(worldWidth, worldHeight, targetSize.width() - PREVIEW_EDGE_SIZE * 2,
 					   targetSize.height() - PREVIEW_EDGE_SIZE * 2, previewX, previewY,
 					   previewScale);
 		previewX += ui->preview->GetScrollX();
 		previewY += ui->preview->GetScrollY();
 
 	} else {
-		GetScaleAndCenterPos(int(cx), int(cy), usableWidth - PREVIEW_EDGE_SIZE * 2,
+		GetScaleAndCenterPos(worldWidth, worldHeight, targetSize.width() - PREVIEW_EDGE_SIZE * 2,
 				     targetSize.height() - PREVIEW_EDGE_SIZE * 2, previewX, previewY, previewScale);
 	}
 
 	ui->preview->SetScalingAmount(previewScale);
 
 	previewX += float(PREVIEW_EDGE_SIZE);
-	previewY += float(PREVIEW_EDGE_SIZE);
+	previewY += float(PREVIEW_EDGE_SIZE) + float(landscapeTop) * previewScale;
 }
 
 void OBSBasic::RefreshXinkxPreviewLayout()

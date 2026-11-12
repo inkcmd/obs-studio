@@ -69,6 +69,7 @@ private:
 	bool cropping = false;
 	bool locked = false;
 	bool scrollMode = false;
+	bool middlePanning = false;
 	bool fixedScaling = false;
 	bool selectionBox = false;
 	bool overflowHidden = false;

@@ -1,4 +1,5 @@
 #include "OBSBasicPreview.hpp"
+#include <xinkx/PortraitCanvas.hpp>
 
 #include <utility/display-helpers.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -512,6 +513,11 @@ void OBSBasicPreview::GetStretchHandleData(const vec2 &pos, bool ignoreGroup)
 
 void OBSBasicPreview::keyPressEvent(QKeyEvent *event)
 {
+	if (!IsFixedScaling() && event->key() == Qt::Key_Space &&
+	    xinkx::PortraitCanvas::instance().previewVisible()) {
+		// Space+drag pans the entire dual-canvas workspace, even when fitted.
+		SetFixedScaling(true);
+	}
 	if (!IsFixedScaling() || event->isAutoRepeat()) {
 		OBSQTDisplay::keyPressEvent(event);
 		return;
@@ -563,6 +569,17 @@ void OBSBasicPreview::wheelEvent(QWheelEvent *event)
 void OBSBasicPreview::mousePressEvent(QMouseEvent *event)
 {
 	QPointF pos = event->position();
+
+	if (xinkx::PortraitCanvas::instance().previewVisible() && event->button() == Qt::MiddleButton) {
+		// Freeze the fit-to-window zoom at its current scale before panning.
+		if (!IsFixedScaling()) SetFixedScaling(true);
+		middlePanning = true;
+		setCursor(Qt::ClosedHandCursor);
+		scrollingFrom.x = pos.x();
+		scrollingFrom.y = pos.y();
+		event->accept();
+		return;
+	}
 
 	if (scrollMode && IsFixedScaling() && event->button() == Qt::LeftButton) {
 		setCursor(Qt::ClosedHandCursor);
@@ -745,6 +762,12 @@ void OBSBasicPreview::ProcessClick(const vec2 &pos)
 
 void OBSBasicPreview::mouseReleaseEvent(QMouseEvent *event)
 {
+	if (middlePanning && event->button() == Qt::MiddleButton) {
+		middlePanning = false;
+		setCursor(scrollMode ? Qt::OpenHandCursor : Qt::ArrowCursor);
+		event->accept();
+		return;
+	}
 	if (scrollMode) {
 		setCursor(Qt::OpenHandCursor);
 	}
@@ -1606,7 +1629,7 @@ void OBSBasicPreview::mouseMoveEvent(QMouseEvent *event)
 
 	float pixelRatio = main->GetDevicePixelRatio();
 
-	if (scrollMode && event->buttons() == Qt::LeftButton) {
+	if (middlePanning || (scrollMode && event->buttons() == Qt::LeftButton)) {
 		scrollingOffset.x += pixelRatio * (qtPos.x() - scrollingFrom.x);
 		scrollingOffset.y += pixelRatio * (qtPos.y() - scrollingFrom.y);
 		scrollingFrom.x = qtPos.x();
@@ -2663,7 +2686,12 @@ void OBSBasicPreview::ClampScrollingOffsets()
 	vec3 target, offset;
 	vec3_set(&target, (float)targetSize.width(), (float)targetSize.height(), 1.0f);
 
-	vec3_set(&offset, (float)ovi.base_width, (float)ovi.base_height, 1.0f);
+	const bool unified = xinkx::PortraitCanvas::instance().previewVisible();
+	const float contentWidth = unified ? float(xinkx::PortraitCanvas::workspaceWidth(int(ovi.base_width)))
+		: float(ovi.base_width);
+	const float contentHeight = unified ? float(xinkx::PortraitCanvas::workspaceHeight(int(ovi.base_height)))
+		: float(ovi.base_height);
+	vec3_set(&offset, contentWidth, contentHeight, 1.0f);
 	vec3_mulf(&offset, &offset, scalingAmount);
 
 	vec3_sub(&offset, &offset, &target);

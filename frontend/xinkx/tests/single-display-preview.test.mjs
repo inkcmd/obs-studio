@@ -8,7 +8,8 @@ const header = read('../PortraitCanvas.hpp');
 
 assert.match(main, /PortraitCanvas::instance\(\)\.renderPreview\(width, height\)/);
 assert.match(main, /PortraitCanvas::instance\(\)\.previewVisible\(\)/);
-assert.match(main, /landscapePreviewWidth\(targetSize.width\(\)\)/);
+assert.match(main, /workspaceWidth\(int\(cx\)\)/);
+assert.match(main, /workspaceHeight\(int\(cy\)\)/);
 assert.match(portrait, /PortraitCanvas::renderPreview\(/);
 assert.match(portrait, /obs_source_video_render\(source\)/);
 assert.match(portrait, /nativePreview->installEventFilter\(this\)/);
