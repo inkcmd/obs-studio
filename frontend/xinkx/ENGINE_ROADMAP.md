@@ -8,13 +8,13 @@ Each phase must ship as one reviewable Git patch, with its own tests and a
 Windows build/runtime checklist. `Implemented` is not the same as `compiled`
 or `verified against live platforms`.
 
-| Phase | Scope | Status (2026-11-11) |
+| Phase | Scope | Status (2026-11-12) |
 | --- | --- | --- |
 | **1. Event Core** | Unified incoming real events from chat, follows, memberships, raids, donations; stable IDs, dedup, bounded ordered fan-out, local journal, health counters | **Source implementation complete; Windows compile and live verification pending** |
-| **2. Chat / Alerts / Automation** | Separate provider capability adapters, full free/paid event taxonomy, all permitted Twitch/YouTube/Kick subscriptions, moderation, rule-based event/action workflow and alerts editor | **Partial native implementation:** AlertEngine, paid/subtype metadata and local rules UI added; provider expansion and moderation pending; Windows build pending |
-| **3. Scene Elements** | One OBS source/item model for 16:9 and 9:16; native shapes/text/gradients/masks/path drawing, keyframe animation, alignment, grouping, presets, property inspector, undo/redo | **Partial native implementation:** GPU-backed custom figures and gradients, normal OBS scene item editing, properties and undo; path tool and animation timeline pending; Windows build pending |
-| **4. LLM / Speech** | Optional local model adapters (Ollama), explicit safe tool permissions, contextual memory, TTS/STT, voice routing and in-studio commands | **Partial native implementation:** Ollama client, session memory, explicit manual OBS action, Windows SAPI TTS; STT and rich tools pending; Windows build pending |
-| **5. Unified Studio / SDK** | Consolidate account/session models and workspace UI, extensible engines, diagnostics and plugin interfaces, installer and update/OBS upstream merge routine | **Partial native implementation:** live engine overview, in-process capability registry, safe upstream integration script; plugin ABI/installer still pending; Windows build pending |
+| **2. Chat / Alerts / Automation** | Separate provider capability adapters, full free/paid event taxonomy, all permitted Twitch/YouTube/Kick subscriptions, moderation, rule-based event/action workflow and alerts editor | **Partial native implementation:** AlertEngine, paid/subtype metadata and local rules UI added; provider expansion and remote moderation pending; local opt-in chat filter added |
+| **3. Scene Elements** | One OBS source/item model for 16:9 and 9:16; native shapes/text/gradients/masks/path drawing, keyframe animation, alignment, grouping, presets, property inspector, undo/redo | **Partial native implementation:** GPU-backed custom figures and gradients, normal OBS scene item editing, properties and undo; path tool and animation timeline pending; full Windows feature verification pending |
+| **4. LLM / Speech** | Optional local model adapters (Ollama), explicit safe tool permissions, contextual memory, TTS/STT, voice routing and in-studio commands | **Partial native implementation:** Ollama client, session memory, explicit manual OBS action, Windows SAPI TTS; STT and rich tools pending; full Windows feature verification pending |
+| **5. Unified Studio / SDK** | Consolidate account/session models and workspace UI, extensible engines, diagnostics and plugin interfaces, installer and update/OBS upstream merge routine | **Partial native implementation:** live engine overview, in-process capability registry, safe upstream integration script; plugin ABI/installer still pending; full Windows feature verification pending |
 
 ## Phase 1 — delivery contract
 
@@ -95,6 +95,26 @@ or `verified against live platforms`.
 - **Not claimed:** full Kick follow/sub webhooks, platform moderation,
   configurable native alert visuals, paid/free emote tiers or editable rule
   condition graphs. Those are still work within the broad Stage 2 scope.
+
+## Phase 2 — local moderation follow-up (next patch)
+
+- `ModerationEngine` is a **local, opt-in filter** for incoming `ChatGateway` chat
+  before `EventCore::publish`. Hidden chat therefore cannot trigger the bot,
+  local overlays, automatic rules, the event feed or the local journal.
+- Independent checks: up to 100 custom stop-phrases, links, repeats within
+  15 seconds, per-viewer message rate (2–30 messages over 3–120 seconds).
+  Only bounded per-viewer timestamps and last-message text are held in memory;
+  no rejected message content is stored in diagnostics.
+- Settings live in atomic portable `moderation.json`. The **Чат → Модерация**
+  button edits the configuration and shows a session-level suppressed counter.
+  Defaults to **off** to preserve existing broadcast behavior.
+- This is **not remote moderation**: no YouTube/Twitch/Kick deletions, timeouts
+  or bans are issued. OAuth scopes, permissions and per-platform enforcement
+  remain an explicit follow-up. Paid notifications and follows are unaffected.
+- **Windows checks:** build the patch, enable stop-phrase/link/repeat/flood
+  filtering in a private test stream, ensure blocked chat is absent from the
+  OBS overlay, chat window and bot triggers; ensure a paid alert still appears.
+  Restart and check persisted toggles; test default-disabled configuration.
 
 ## Phase 3 — implemented slice and verification
 

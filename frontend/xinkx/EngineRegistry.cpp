@@ -5,6 +5,7 @@
 #include "DonationGateway.hpp"
 #include "EventAutomation.hpp"
 #include "EventCore.hpp"
+#include "ModerationEngine.hpp"
 #include "LocalAssistants.hpp"
 #include "MultiStreamManager.hpp"
 #include "OverlayRuntime.hpp"
@@ -70,6 +71,9 @@ void installEngineHub(OBSBasic *window)
 	registry->registerModule(QStringLiteral("donations"), QStringLiteral("Donation Gateway"),
 		{QStringLiteral("donationalerts"), QStringLiteral("json-feeds")},
 		window->findChild<DonationGateway *>(QStringLiteral("xinkxDonationGateway")));
+	registry->registerModule(QStringLiteral("moderation"), QStringLiteral("Local Chat Moderation"),
+		{QStringLiteral("phrases"), QStringLiteral("links"), QStringLiteral("repeats"), QStringLiteral("flood")},
+		window->findChild<ModerationEngine *>(QStringLiteral("xinkxModerationEngine")));
 	registry->registerModule(QStringLiteral("automation"), QStringLiteral("Automation"),
 		{QStringLiteral("rules"), QStringLiteral("safe-commands")},
 		window->findChild<EventAutomation *>(QStringLiteral("xinkxEventAutomation")));
@@ -133,9 +137,15 @@ void installEngineHub(OBSBasic *window)
 				.arg(outputs->activeCount()).arg(outputs->configuredCount()));
 		}
 		if (auto *chat = window->findChild<ChatGateway *>(QStringLiteral("xinkxChatGateway"))) {
-			badges.at(3)->setText(QStringLiteral("%1 подключённых аккаунтов в конфигурации\n"
+			QString status = QStringLiteral("%1 подключённых аккаунтов в конфигурации\n"
 				"Проверяй состояние соединений на вкладке Чат")
-				.arg(chat->chatAccounts().size()));
+				.arg(chat->chatAccounts().size());
+			if (auto *moderation = window->findChild<ModerationEngine *>(QStringLiteral("xinkxModerationEngine"))) {
+				status += moderation->configuration().enabled
+					? QStringLiteral("\nЛокальный фильтр: %1 скрыто").arg(moderation->counters().suppressed())
+					: QStringLiteral("\nЛокальный фильтр: выключен");
+			}
+			badges.at(3)->setText(status);
 		}
 		badges.at(4)->setText(obs_get_latest_input_type_id("xinkx_shape")
 			? QStringLiteral("Нативные фигуры и градиенты зарегистрированы в OBS")

@@ -12,6 +12,8 @@ target_sources(
     xinkx/EventCore.hpp
     xinkx/AlertEngine.cpp
     xinkx/AlertEngine.hpp
+    xinkx/ModerationEngine.cpp
+    xinkx/ModerationEngine.hpp
     xinkx/EventAutomation.cpp
     xinkx/EventAutomation.hpp
     xinkx/ShapeEngine.cpp

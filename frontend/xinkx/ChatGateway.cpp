@@ -2,6 +2,7 @@
 
 #include "NativeWebSocket.hpp"
 #include "EventCore.hpp"
+#include "ModerationEngine.hpp"
 #include "OverlayRuntime.hpp"
 #include "PlatformApi.hpp"
 #include "PresentationSettings.hpp"
@@ -1778,6 +1779,13 @@ void ChatGateway::dispatch(ChatLine line)
 		if (seenOrder.size() > 1000) seenEvents.remove(seenOrder.takeFirst());
 	}
 	line.receivedAt = QDateTime::currentMSecsSinceEpoch();
+	// Suppress unwanted local chat BEFORE EventCore, bot replies, OBS overlays,
+	// automations and the journal. Paid events and non-chat alerts bypass this.
+	if (line.type == QStringLiteral("chat")) {
+		if (auto *moderation = mainWindow->findChild<ModerationEngine *>(QStringLiteral("xinkxModerationEngine"))) {
+			if (!moderation->allowChat(line.platform, line.accountId, line.name, line.text, line.receivedAt)) return;
+		}
+	}
 	// Chat, Twitch EventSub and YouTube purchases enter the same bounded
 	// pipeline as external donations. Reject duplicates before any UI,
 	// streamer-window or automated bot consumer observes them.

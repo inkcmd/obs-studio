@@ -9,6 +9,7 @@
 #include "DonationGateway.hpp"
 #include "StudioAutomation.hpp"
 #include "EventCore.hpp"
+#include "ModerationEngine.hpp"
 #include "AlertEngine.hpp"
 #include "EventAutomation.hpp"
 #include "LocalAssistants.hpp"
@@ -553,6 +554,7 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	const QString eventsFile = settingsFile.isEmpty() ? QString{} :
 		QFileInfo(settingsFile).absoluteDir().filePath(QStringLiteral("events.jsonl"));
 	new EventCore(eventsFile, mainWindow);
+	new ModerationEngine(mainWindow); // Must exist before ChatGateway can publish live chat.
 	new AlertEngine(mainWindow);
 	installOverlayWorkspace(mainWindow, inspector);
 	installChatWorkspace(mainWindow);

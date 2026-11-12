@@ -1,4 +1,5 @@
 #include "ChatGateway.hpp"
+#include "ModerationEngine.hpp"
 #include "StudioDiagnostics.hpp"
 #include "StudioWorkspace.hpp"
 
@@ -12,12 +13,18 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QDockWidget>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QListWidget>
 #include <QPushButton>
+#include <QPlainTextEdit>
+#include <QSpinBox>
 #include <QSet>
 #include <QSettings>
 #include <QShortcut>
@@ -59,6 +66,83 @@ void installChatWorkspace(OBSBasic *mainWindow)
 	auto *refresh = new QPushButton(QStringLiteral("Обновить"), panel);
 	refresh->setToolTip(QStringLiteral("Перечитать аккаунты и повторно подключить недоступные чаты"));
 	toolbar->addWidget(refresh);
+	// A small editor in the existing Chat page; no extra dock or duplicated feed.
+	if (auto *moderation = mainWindow->findChild<ModerationEngine *>(QStringLiteral("xinkxModerationEngine"))) {
+		auto *editModeration = new QPushButton(panel);
+		editModeration->setToolTip(QStringLiteral("Фильтр действует локально: не удаляет сообщения на площадках"));
+		toolbar->addWidget(editModeration);
+		const auto updateLabel = [moderation, editModeration] {
+			const auto settings = moderation->configuration();
+			const auto counters = moderation->counters();
+			editModeration->setText(settings.enabled
+				? QStringLiteral("Модерация: %1 скрыто").arg(counters.suppressed())
+				: QStringLiteral("Модерация: выкл."));
+		};
+		updateLabel();
+		QObject::connect(moderation, &ModerationEngine::configurationChanged, editModeration, updateLabel);
+		QObject::connect(moderation, &ModerationEngine::countersChanged, editModeration, updateLabel);
+		QObject::connect(editModeration, &QPushButton::clicked, panel, [panel, moderation] {
+			QDialog dialog(panel);
+			dialog.setWindowTitle(QStringLiteral("Локальная модерация чата"));
+			dialog.resize(540, 440);
+			auto *layout = new QVBoxLayout(&dialog);
+			auto *notice = new QLabel(QStringLiteral(
+				"Только входящий чат в XINKX Studio: окно чата, OBS-оверлей, "
+				"бот и автоматические правила. На Twitch, YouTube и Kick "
+				"сообщения не удаляются. Донаты и подписки не фильтруются."), &dialog);
+			notice->setWordWrap(true);
+			layout->addWidget(notice);
+			const auto current = moderation->configuration();
+			auto *enabled = new QCheckBox(QStringLiteral("Включить локальный фильтр"), &dialog);
+			enabled->setChecked(current.enabled);
+			layout->addWidget(enabled);
+			auto *links = new QCheckBox(QStringLiteral("Скрывать сообщения со ссылками"), &dialog);
+			links->setChecked(current.blockLinks);
+			layout->addWidget(links);
+			auto *repeats = new QCheckBox(QStringLiteral("Скрывать повтор одного сообщения за 15 секунд"), &dialog);
+			repeats->setChecked(current.blockRepeats);
+			layout->addWidget(repeats);
+			auto *flood = new QCheckBox(QStringLiteral("Ограничивать частоту сообщений одного зрителя"), &dialog);
+			flood->setChecked(current.blockFlood);
+			layout->addWidget(flood);
+			auto *form = new QFormLayout();
+			auto *maxMessages = new QSpinBox(&dialog);
+			maxMessages->setRange(2, 30);
+			maxMessages->setValue(current.maxMessages);
+			form->addRow(QStringLiteral("Сообщений за интервал"), maxMessages);
+			auto *window = new QSpinBox(&dialog);
+			window->setRange(3, 120);
+			window->setSuffix(QStringLiteral(" сек"));
+			window->setValue(current.windowSeconds);
+			form->addRow(QStringLiteral("Интервал"), window);
+			layout->addLayout(form);
+			QObject::connect(flood, &QCheckBox::toggled, maxMessages, &QSpinBox::setEnabled);
+			QObject::connect(flood, &QCheckBox::toggled, window, &QSpinBox::setEnabled);
+			maxMessages->setEnabled(current.blockFlood);
+			window->setEnabled(current.blockFlood);
+			layout->addWidget(new QLabel(QStringLiteral("Стоп-фразы: одна на строку, не более 100"), &dialog));
+			auto *phrases = new QPlainTextEdit(current.blockedPhrases.join(QLatin1Char('\n')), &dialog);
+			phrases->setPlaceholderText(QStringLiteral("Слова или фразы для локального скрытия сообщений"));
+			layout->addWidget(phrases, 1);
+			auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+			layout->addWidget(buttons);
+			QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+			QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+				ModerationEngine::Configuration changed;
+				changed.enabled = enabled->isChecked();
+				changed.blockLinks = links->isChecked();
+				changed.blockRepeats = repeats->isChecked();
+				changed.blockFlood = flood->isChecked();
+				changed.maxMessages = maxMessages->value();
+				changed.windowSeconds = window->value();
+				changed.blockedPhrases = phrases->toPlainText().split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+				QString error;
+				if (moderation->updateConfiguration(changed, &error)) dialog.accept();
+				else QMessageBox::warning(&dialog, QStringLiteral("Модерация"), error);
+			});
+			dialog.exec();
+		});
+	}
 	root->addLayout(toolbar);
 	auto *selector = new QWidget(panel);
 	auto *accountRow = new QHBoxLayout(selector);
