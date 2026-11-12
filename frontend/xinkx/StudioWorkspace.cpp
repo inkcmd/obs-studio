@@ -168,7 +168,10 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 		}
 		destinations->setVisible(!visible.isEmpty());
 	};
-	QObject::connect(manager, &MultiStreamManager::statusChanged, mainWindow, updateExtraStatus);
+	// The status-bar widgets can be deleted before the manager during QObject
+	// child teardown. Use their lifetime as the connection context to avoid
+	// updating destroyed QWidget instances from a late statusChanged signal.
+	QObject::connect(manager, &MultiStreamManager::statusChanged, destinations, updateExtraStatus);
 	updateExtraStatus();
 
 	// Inspector edits real OBS scene items; standard source dialogs stay available.

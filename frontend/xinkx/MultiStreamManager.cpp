@@ -286,6 +286,10 @@ void MultiStreamManager::stopAll(bool force)
 
 void MultiStreamManager::shutdown()
 {
+	// OBS calls shutdown before clearing scenes. QObject also destroys this
+	// child later, so the destructor must not repeat the teardown.
+	if (shuttingDown) return;
+	shuttingDown = true;
 	stopAll(true);
 	for (auto &entry : sessions) entry->stopped.Disconnect();
 	sessions.clear();
@@ -502,6 +506,8 @@ void MultiStreamManager::OutputStats::sample(obs_output_t *output, qint64 now)
 
 void MultiStreamManager::updateStatus()
 {
+	// Do not notify UI observers while OBS/QWidget ownership is being torn down.
+	if (shuttingDown) return;
 	const auto now = clock.elapsed();
 	if (std::any_of(sessions.cbegin(), sessions.cend(), [](const auto &item) {
 		return item->account.destination.portrait && item->running;

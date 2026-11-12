@@ -93,6 +93,7 @@ private:
 	std::vector<std::unique_ptr<Session>> sessions;
 	bool lastActive = false;
 	bool liveMode = false;
+	bool shuttingDown = false;
 	quint64 nextSerial = 0;
 	bool enabled(const StreamAccount &account) const;
 	void start(const StreamAccount &account);
