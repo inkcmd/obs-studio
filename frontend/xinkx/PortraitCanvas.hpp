@@ -29,6 +29,10 @@ public:
 	// Layout is expressed in real source pixels, not percentages of the preview.
 	// Both canvases share OBS's zoom, pan, and physical scale.
 	static constexpr int workspaceGap = 128;
+	// Equal visual heights: 1440px landscape becomes 1440px portrait display,
+	// while the portrait scene/output itself remains 1080 x 1920.
+	static float portraitDisplayFactor(int landscapeHeight);
+	OBSScene editingScene() const;
 	static int workspaceWidth(int landscapeWidth);
 	static int workspaceHeight(int landscapeHeight);
 	static PreviewRegion portraitPreviewRegion(int displayWidth, int displayHeight);

@@ -2,6 +2,8 @@
 #include "SourceTreeDelegate.hpp"
 
 #include <widgets/OBSBasic.hpp>
+#include <widgets/OBSBasicPreview.hpp>
+#include <xinkx/PortraitCanvas.hpp>
 
 #include <QPainter>
 
@@ -108,6 +110,18 @@ void SourceTree::SelectItem(obs_sceneitem_t *sceneitem, bool select)
 	if (index.isValid() && select != selectionModel()->isSelected(index)) {
 		selectionModel()->select(index, select ? QItemSelectionModel::Select : QItemSelectionModel::Deselect);
 	}
+}
+
+void SourceTree::mousePressEvent(QMouseEvent *event)
+{
+	// Clicks on either native SourceTree change the ONE native preview editor.
+	// Do this even for an already-selected row (selectionChanged won't fire).
+	if (event->button() == Qt::LeftButton && indexAt(event->position().toPoint()).isValid() &&
+	    xinkx::PortraitCanvas::instance().previewVisible()) {
+		OBSScene portrait = xinkx::PortraitCanvas::instance().editingScene();
+		if (portrait) OBSBasicPreview::Get()->SetPortraitEditing(Scene() == portrait);
+	}
+	QListView::mousePressEvent(event);
 }
 
 void SourceTree::mouseDoubleClickEvent(QMouseEvent *event)

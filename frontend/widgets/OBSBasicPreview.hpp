@@ -5,6 +5,7 @@
 #include <graphics/matrix4.h>
 
 #include <mutex>
+#include <atomic>
 
 #define ITEM_LEFT (1 << 0)
 #define ITEM_RIGHT (1 << 1)
@@ -70,6 +71,7 @@ private:
 	bool locked = false;
 	bool scrollMode = false;
 	bool middlePanning = false;
+	std::atomic<bool> portraitEditing{false};
 	bool fixedScaling = false;
 	bool selectionBox = false;
 	bool overflowHidden = false;
@@ -142,6 +144,13 @@ public:
 	void DrawOverflow();
 	void DrawSceneEditing();
 
+	// One native editor; selects which independent OBS scene supplies items.
+	void SetPortraitEditing(bool portrait);
+	bool IsPortraitEditing() const { return portraitEditing.load(std::memory_order_acquire); }
+	OBSScene EditingScene() const;
+	float EditingScale() const;
+	void EditingOrigin(float &x, float &y) const;
+
 	inline void SetLocked(bool newLockedVal) { locked = newLockedVal; }
 	inline void ToggleLocked() { locked = !locked; }
 	inline bool Locked() const { return locked; }
@@ -197,6 +206,7 @@ public:
 	void UpdateYScrollBar(float cy);
 
 signals:
+	void EditingSelectionChanged();
 	void scalingChanged(float scalingAmount);
 	void fixedScalingChanged(bool isFixed);
 };

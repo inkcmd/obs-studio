@@ -1,6 +1,7 @@
 #include "OBSBasicPreview.hpp"
 #include <xinkx/PortraitCanvas.hpp>
 
+#include <components/SourceTree.hpp>
 #include <utility/display-helpers.hpp>
 #include <widgets/OBSBasic.hpp>
 
@@ -38,6 +39,65 @@ OBSBasicPreview::~OBSBasicPreview()
 	obs_leave_graphics();
 }
 
+void OBSBasicPreview::SetPortraitEditing(bool portrait)
+{
+	portrait = portrait && xinkx::PortraitCanvas::instance().previewVisible();
+	if (portraitEditing.exchange(portrait) == portrait) return;
+
+	// A selected source can belong to either canvas, never both at once.
+	OBSScene other = portrait ? OBSBasic::Get()->GetCurrentScene()
+	                          : xinkx::PortraitCanvas::instance().editingScene();
+	if (other) {
+		obs_scene_enum_items(other, [](obs_scene_t *, obs_sceneitem_t *item, void *) {
+			if (obs_sceneitem_selected(item)) obs_sceneitem_select(item, false);
+			return true;
+		}, nullptr);
+		// Keep the other dock's visual selection in sync with the native
+		// scene-item state (including after canvas clicks).
+		for (SourceTree *tree : OBSBasic::Get()->findChildren<SourceTree *>()) {
+			if (tree->Scene() == other && tree->selectionModel())
+				tree->selectionModel()->clearSelection();
+		}
+	}
+	stretchItem = nullptr;
+	stretchGroup = nullptr;
+	stretchHandle = ItemHandle::None;
+	mouseOverItems = false;
+	{
+		std::lock_guard<std::mutex> lock(selectMutex);
+		hoveredPreviewItems.clear();
+		selectedItems.clear();
+	}
+}
+
+OBSScene OBSBasicPreview::EditingScene() const
+{
+	if (IsPortraitEditing()) return xinkx::PortraitCanvas::instance().editingScene();
+	return OBSBasic::Get()->GetCurrentScene();
+}
+
+float OBSBasicPreview::EditingScale() const
+{
+	OBSBasic *main = OBSBasic::Get();
+	if (!IsPortraitEditing()) return main->previewScale;
+	obs_video_info video{};
+	return main->previewScale * (obs_get_video_info(&video)
+		? xinkx::PortraitCanvas::portraitDisplayFactor(int(video.base_height)) : .75f);
+}
+
+void OBSBasicPreview::EditingOrigin(float &x, float &y) const
+{
+	OBSBasic *main = OBSBasic::Get();
+	if (IsPortraitEditing()) {
+		const auto region = xinkx::PortraitCanvas::portraitPreviewRegion(width(), height());
+		x = float(region.x);
+		y = float(region.y);
+	} else {
+		x = main->previewX;
+		y = main->previewY;
+	}
+}
+
 void OBSBasicPreview::Init()
 {
 	std::string effect_path;
@@ -53,11 +113,14 @@ vec2 OBSBasicPreview::GetMouseEventPos(QMouseEvent *event)
 {
 	OBSBasic *main = OBSBasic::Get();
 	float pixelRatio = main->GetDevicePixelRatio();
-	float scale = pixelRatio / main->previewScale;
+	OBSBasicPreview *preview = Get();
+	float scale = pixelRatio / preview->EditingScale();
+	float ox, oy;
+	preview->EditingOrigin(ox, oy);
 	QPoint qtPos = event->pos();
 	vec2 pos;
-	vec2_set(&pos, (qtPos.x() - main->previewX / pixelRatio) * scale,
-		 (qtPos.y() - main->previewY / pixelRatio) * scale);
+	vec2_set(&pos, (qtPos.x() - ox / pixelRatio) * scale,
+		 (qtPos.y() - oy / pixelRatio) * scale);
 
 	return pos;
 }
@@ -171,8 +234,13 @@ static inline vec2 GetOBSScreenSize()
 	vec2_zero(&size);
 
 	if (obs_get_video_info(&ovi)) {
-		size.x = float(ovi.base_width);
-		size.y = float(ovi.base_height);
+		if (OBSBasicPreview::Get()->IsPortraitEditing()) {
+			size.x = 1080.f;
+			size.y = 1920.f;
+		} else {
+			size.x = float(ovi.base_width);
+			size.y = float(ovi.base_height);
+		}
 	}
 
 	return size;
@@ -195,7 +263,7 @@ vec3 OBSBasicPreview::GetSnapOffset(const vec3 &tl, const vec3 &br)
 	const bool centerSnap = config_get_bool(App()->GetUserConfig(), "BasicWindow", "CenterSnapping");
 
 	const float clampDist =
-		config_get_double(App()->GetUserConfig(), "BasicWindow", "SnapDistance") / main->previewScale;
+		config_get_double(App()->GetUserConfig(), "BasicWindow", "SnapDistance") / OBSBasicPreview::Get()->EditingScale();
 	const float centerX = br.x - (br.x - tl.x) / 2.0f;
 	const float centerY = br.y - (br.y - tl.y) / 2.0f;
 
@@ -234,7 +302,7 @@ OBSSceneItem OBSBasicPreview::GetItemAtPos(const vec2 &pos, bool selectBelow)
 {
 	OBSBasic *main = OBSBasic::Get();
 
-	OBSScene scene = main->GetCurrentScene();
+	OBSScene scene = Get()->EditingScene();
 	if (!scene) {
 		return OBSSceneItem();
 	}
@@ -292,7 +360,7 @@ bool OBSBasicPreview::SelectedAtPos(const vec2 &pos)
 {
 	OBSBasic *main = OBSBasic::Get();
 
-	OBSScene scene = main->GetCurrentScene();
+	OBSScene scene = Get()->EditingScene();
 	if (!scene) {
 		return false;
 	}
@@ -455,12 +523,12 @@ void OBSBasicPreview::GetStretchHandleData(const vec2 &pos, bool ignoreGroup)
 {
 	OBSBasic *main = OBSBasic::Get();
 
-	OBSScene scene = main->GetCurrentScene();
+	OBSScene scene = Get()->EditingScene();
 	if (!scene) {
 		return;
 	}
 
-	float scale = main->previewScale / main->GetDevicePixelRatio();
+	float scale = Get()->EditingScale() / main->GetDevicePixelRatio();
 	vec2 scaled_pos = pos;
 	vec2_divf(&scaled_pos, &scaled_pos, scale);
 	HandleFindData data(scaled_pos, scale);
@@ -569,6 +637,12 @@ void OBSBasicPreview::wheelEvent(QWheelEvent *event)
 void OBSBasicPreview::mousePressEvent(QMouseEvent *event)
 {
 	QPointF pos = event->position();
+	if (xinkx::PortraitCanvas::instance().previewVisible() &&
+	    (event->button() == Qt::LeftButton || event->button() == Qt::RightButton)) {
+		const auto region = xinkx::PortraitCanvas::portraitPreviewRegion(width(), height());
+		const float ratio = float(devicePixelRatioF());
+		SetPortraitEditing(region.contains(float(pos.x()) * ratio, float(pos.y()) * ratio));
+	}
 
 	if (xinkx::PortraitCanvas::instance().previewVisible() && event->button() == Qt::MiddleButton) {
 		// Freeze the fit-to-window zoom at its current scale before panning.
@@ -600,8 +674,10 @@ void OBSBasicPreview::mousePressEvent(QMouseEvent *event)
 
 	OBSBasic *main = OBSBasic::Get();
 	float pixelRatio = main->GetDevicePixelRatio();
-	float x = pos.x() - main->previewX / pixelRatio;
-	float y = pos.y() - main->previewY / pixelRatio;
+	float originX, originY;
+	EditingOrigin(originX, originY);
+	float x = pos.x() - originX / pixelRatio;
+	float y = pos.y() - originY / pixelRatio;
 	Qt::KeyboardModifiers modifiers = QGuiApplication::keyboardModifiers();
 	bool altDown = (modifiers & Qt::AltModifier);
 	bool shiftDown = (modifiers & Qt::ShiftModifier);
@@ -630,7 +706,7 @@ void OBSBasicPreview::mousePressEvent(QMouseEvent *event)
 		vec2 s;
 		SceneFindBoxData data(s, s);
 
-		obs_scene_enum_items(main->GetCurrentScene(), FindSelected, &data);
+		obs_scene_enum_items(Get()->EditingScene(), FindSelected, &data);
 
 		std::lock_guard<std::mutex> lock(selectMutex);
 		selectedItems = data.sceneItems;
@@ -639,7 +715,7 @@ void OBSBasicPreview::mousePressEvent(QMouseEvent *event)
 	vec2_set(&startPos, x, y);
 	GetStretchHandleData(startPos, false);
 
-	vec2_divf(&startPos, &startPos, main->previewScale / pixelRatio);
+	vec2_divf(&startPos, &startPos, EditingScale() / pixelRatio);
 	startPos.x = std::round(startPos.x);
 	startPos.y = std::round(startPos.y);
 
@@ -647,7 +723,7 @@ void OBSBasicPreview::mousePressEvent(QMouseEvent *event)
 	vec2_zero(&lastMoveOffset);
 
 	mousePos = startPos;
-	wrapper = obs_scene_save_transform_states(main->GetCurrentScene(), true);
+	wrapper = obs_scene_save_transform_states(Get()->EditingScene(), true);
 	changed = false;
 }
 
@@ -732,7 +808,7 @@ void OBSBasicPreview::DoSelect(const vec2 &pos)
 {
 	OBSBasic *main = OBSBasic::Get();
 
-	OBSScene scene = main->GetCurrentScene();
+	OBSScene scene = Get()->EditingScene();
 	OBSSceneItem item = GetItemAtPos(pos, true);
 
 	obs_scene_enum_items(scene, select_one, (obs_sceneitem_t *)item);
@@ -753,11 +829,12 @@ void OBSBasicPreview::ProcessClick(const vec2 &pos)
 {
 	Qt::KeyboardModifiers modifiers = QGuiApplication::keyboardModifiers();
 
-	if (modifiers & Qt::ControlModifier) {
+	if (!xinkx::PortraitCanvas::instance().previewVisible() && (modifiers & Qt::ControlModifier))
 		DoCtrlSelect(pos);
-	} else {
+	else
 		DoSelect(pos);
-	}
+	if (xinkx::PortraitCanvas::instance().previewVisible())
+		emit Get()->EditingSelectionChanged();
 }
 
 void OBSBasicPreview::mouseReleaseEvent(QMouseEvent *event)
@@ -832,12 +909,14 @@ void OBSBasicPreview::mouseReleaseEvent(QMouseEvent *event)
 		selectedItems.clear();
 	}
 	OBSBasic *main = OBSBasic::Get();
-	OBSDataAutoRelease rwrapper = obs_scene_save_transform_states(main->GetCurrentScene(), true);
+	OBSDataAutoRelease rwrapper = obs_scene_save_transform_states(Get()->EditingScene(), true);
 
 	auto undo_redo = [](const std::string &data) {
 		OBSDataAutoRelease dat = obs_data_create_from_json(data.c_str());
 		OBSSourceAutoRelease source = obs_get_source_by_uuid(obs_data_get_string(dat, "scene_uuid"));
-		OBSBasic::Get()->SetCurrentScene(source.Get(), true);
+		if (source &&
+		    obs_scene_from_source(source.Get()) != xinkx::PortraitCanvas::instance().editingScene().Get())
+			OBSBasic::Get()->SetCurrentScene(source.Get(), true);
 
 		obs_scene_load_transform_states(data.c_str());
 	};
@@ -847,7 +926,8 @@ void OBSBasicPreview::mouseReleaseEvent(QMouseEvent *event)
 		std::string redo_data(obs_data_get_json(rwrapper));
 		if (changed && undo_data.compare(redo_data) != 0) {
 			main->undo_s.add_action(
-				QTStr("Undo.Transform").arg(obs_source_get_name(main->GetCurrentSceneSource())),
+				QTStr("Undo.Transform").arg(obs_source_get_name(
+					obs_scene_get_source(Get()->EditingScene()))),
 				undo_redo, undo_redo, undo_data, redo_data);
 		}
 	}
@@ -968,7 +1048,7 @@ static bool GetSourceSnapOffset(obs_scene_t * /* scene */, obs_sceneitem_t *item
 void OBSBasicPreview::SnapItemMovement(vec2 &offset)
 {
 	OBSBasic *main = OBSBasic::Get();
-	OBSScene scene = main->GetCurrentScene();
+	OBSScene scene = Get()->EditingScene();
 
 	SelectedItemBounds data;
 	obs_scene_enum_items(scene, AddItemBounds, &data);
@@ -992,7 +1072,7 @@ void OBSBasicPreview::SnapItemMovement(vec2 &offset)
 	}
 
 	const float clampDist =
-		config_get_double(App()->GetUserConfig(), "BasicWindow", "SnapDistance") / main->previewScale;
+		config_get_double(App()->GetUserConfig(), "BasicWindow", "SnapDistance") / OBSBasicPreview::Get()->EditingScale();
 
 	OffsetData offsetData;
 	offsetData.clampDist = clampDist;
@@ -1046,7 +1126,7 @@ void OBSBasicPreview::MoveItems(const vec2 &pos)
 {
 	Qt::KeyboardModifiers modifiers = QGuiApplication::keyboardModifiers();
 	OBSBasic *main = OBSBasic::Get();
-	OBSScene scene = main->GetCurrentScene();
+	OBSScene scene = Get()->EditingScene();
 
 	vec2 offset, moveOffset;
 	vec2_sub(&offset, &pos, &startPos);
@@ -1224,7 +1304,7 @@ void OBSBasicPreview::BoxItems(const vec2 &startPos, const vec2 &pos)
 {
 	OBSBasic *main = OBSBasic::Get();
 
-	OBSScene scene = main->GetCurrentScene();
+	OBSScene scene = Get()->EditingScene();
 	if (!scene) {
 		return;
 	}
@@ -1575,7 +1655,7 @@ void OBSBasicPreview::StretchItem(const vec2 &pos)
 void OBSBasicPreview::RotateItem(const vec2 &pos)
 {
 	OBSBasic *main = OBSBasic::Get();
-	OBSScene scene = main->GetCurrentScene();
+	OBSScene scene = Get()->EditingScene();
 	Qt::KeyboardModifiers modifiers = QGuiApplication::keyboardModifiers();
 	bool shiftDown = (modifiers & Qt::ShiftModifier);
 	bool ctrlDown = (modifiers & Qt::ControlModifier);
@@ -1662,7 +1742,7 @@ void OBSBasicPreview::mouseMoveEvent(QMouseEvent *event)
 
 			selectionBox = false;
 
-			OBSScene scene = main->GetCurrentScene();
+			OBSScene scene = Get()->EditingScene();
 			obs_sceneitem_t *group = obs_sceneitem_get_group(scene, stretchItem);
 			if (group) {
 				vec3 group_pos;
@@ -1688,11 +1768,9 @@ void OBSBasicPreview::mouseMoveEvent(QMouseEvent *event)
 			selectionBox = false;
 			MoveItems(pos);
 		} else {
-			selectionBox = true;
-			if (!mouseMoved) {
-				DoSelect(startPos);
-			}
-			BoxItems(startPos, pos);
+			selectionBox = !xinkx::PortraitCanvas::instance().previewVisible();
+			if (!mouseMoved) DoSelect(startPos);
+			if (selectionBox) BoxItems(startPos, pos);
 		}
 
 		mouseMoved = true;
@@ -1709,8 +1787,10 @@ void OBSBasicPreview::mouseMoveEvent(QMouseEvent *event)
 			mousePos = pos;
 			OBSBasic *main = OBSBasic::Get();
 			float scale = main->GetDevicePixelRatio();
-			float x = qtPos.x() - main->previewX / scale;
-			float y = qtPos.y() - main->previewY / scale;
+			float originX, originY;
+			EditingOrigin(originX, originY);
+			float x = qtPos.x() - originX / scale;
+			float y = qtPos.y() - originY / scale;
 			vec2_set(&startPos, x, y);
 			updateCursor = true;
 		}
@@ -2223,11 +2303,11 @@ void OBSBasicPreview::DrawOverflow()
 
 	OBSBasic *main = OBSBasic::Get();
 
-	OBSScene scene = main->GetCurrentScene();
+	OBSScene scene = Get()->EditingScene();
 
 	if (scene) {
 		gs_matrix_push();
-		gs_matrix_scale3f(main->previewScale, main->previewScale, 1.0f);
+		gs_matrix_scale3f(EditingScale(), EditingScale(), 1.0f);
 		obs_scene_enum_items(scene, DrawSelectedOverflow, this);
 		gs_matrix_pop();
 	}
@@ -2247,11 +2327,11 @@ void OBSBasicPreview::DrawSceneEditing()
 
 	OBSBasic *main = OBSBasic::Get();
 
-	OBSScene scene = main->GetCurrentScene();
+	OBSScene scene = Get()->EditingScene();
 
 	if (scene) {
 		gs_matrix_push();
-		gs_matrix_scale3f(main->previewScale, main->previewScale, 1.0f);
+		gs_matrix_scale3f(EditingScale(), EditingScale(), 1.0f);
 		obs_scene_enum_items(scene, DrawSelectedItem, this);
 		gs_matrix_pop();
 	}
@@ -2269,8 +2349,8 @@ void OBSBasicPreview::DrawSceneEditing()
 		}
 
 		while (gs_effect_loop(solidEffect, "Solid")) {
-			DrawSelectionBox(startPos.x * main->previewScale, startPos.y * main->previewScale,
-					 mousePos.x * main->previewScale, mousePos.y * main->previewScale, rectFill);
+			DrawSelectionBox(startPos.x * EditingScale(), startPos.y * EditingScale(),
+					 mousePos.x * EditingScale(), mousePos.y * EditingScale(), rectFill);
 		}
 	}
 
@@ -2502,6 +2582,7 @@ static void RenderSpacingHelper(int sourceIndex, vec3 &start, vec3 &end, vec3 &v
 
 void OBSBasicPreview::DrawSpacingHelpers()
 {
+	if (IsPortraitEditing()) return; // Native item handles still draw; spacing labels use landscape-only viewport.
 	if (locked) {
 		return;
 	}
@@ -2511,7 +2592,7 @@ void OBSBasicPreview::DrawSpacingHelpers()
 	vec2 s;
 	SceneFindBoxData data(s, s);
 
-	OBSScene scene = main->GetCurrentScene();
+	OBSScene scene = Get()->EditingScene();
 	obs_scene_enum_items(scene, FindSelected, &data);
 
 	if (data.sceneItems.size() != 1) {
@@ -2547,7 +2628,8 @@ void OBSBasicPreview::DrawSpacingHelpers()
 	obs_get_video_info(&ovi);
 
 	vec3 size;
-	vec3_set(&size, ovi.base_width, ovi.base_height, 1.0f);
+	if (IsPortraitEditing()) vec3_set(&size, 1080.f, 1920.f, 1.0f);
+	else vec3_set(&size, ovi.base_width, ovi.base_height, 1.0f);
 
 	// Init box transform side locations
 	vec3 left, right, top, bottom;

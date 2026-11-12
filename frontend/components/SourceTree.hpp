@@ -71,6 +71,7 @@ public slots:
 	void NewGroupEdit(int idx);
 
 protected:
+	virtual void mousePressEvent(QMouseEvent *event) override;
 	virtual void mouseDoubleClickEvent(QMouseEvent *event) override;
 	virtual void dropEvent(QDropEvent *event) override;
 	virtual void paintEvent(QPaintEvent *event) override;

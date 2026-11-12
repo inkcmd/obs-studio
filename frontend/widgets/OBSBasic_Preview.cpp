@@ -154,7 +154,8 @@ void OBSBasic::RenderMain(void *data, uint32_t, uint32_t)
 
 	gs_ortho(-window->previewX, right, -window->previewY, bottom, -100.0f, 100.0f);
 
-	window->ui->preview->DrawOverflow();
+	if (!window->ui->preview->IsPortraitEditing())
+		window->ui->preview->DrawOverflow();
 
 	/* --------------------------------------- */
 
@@ -191,9 +192,10 @@ void OBSBasic::RenderMain(void *data, uint32_t, uint32_t)
 		RenderSafeAreas(window->rightLine, targetCX, targetCY);
 	}
 
-	window->ui->preview->DrawSceneEditing();
+	if (!window->ui->preview->IsPortraitEditing())
+		window->ui->preview->DrawSceneEditing();
 
-	if (window->drawSpacingHelpers) {
+	if (window->drawSpacingHelpers && !window->ui->preview->IsPortraitEditing()) {
 		window->ui->preview->DrawSpacingHelpers();
 	}
 
@@ -221,7 +223,7 @@ void OBSBasic::ResizePreview(uint32_t cx, uint32_t cy)
 	const bool unified = xinkx::PortraitCanvas::instance().previewVisible();
 	const int worldWidth = unified ? xinkx::PortraitCanvas::workspaceWidth(int(cx)) : int(cx);
 	const int worldHeight = unified ? xinkx::PortraitCanvas::workspaceHeight(int(cy)) : int(cy);
-	const int landscapeTop = unified ? (worldHeight - int(cy)) / 2 : 0;
+	const int landscapeTop = 0;
 
 	if (isFixedScaling) {
 		previewScale = ui->preview->GetScalingAmount();

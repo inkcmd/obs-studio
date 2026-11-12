@@ -12,7 +12,7 @@ assert.match(main, /workspaceWidth\(int\(cx\)\)/);
 assert.match(main, /workspaceHeight\(int\(cy\)\)/);
 assert.match(portrait, /PortraitCanvas::renderPreview\(/);
 assert.match(portrait, /obs_source_video_render\(source\)/);
-assert.match(portrait, /nativePreview->installEventFilter\(this\)/);
+assert.match(portrait, /target->installEventFilter\(this\)/);
 assert.match(portrait, /obs_canvas_create_private\("XINKX Portrait"/);
 assert.match(header, /static PreviewRegion portraitPreviewRegion/);
 assert.doesNotMatch(portrait, /obs_display_add_draw_callback/);
