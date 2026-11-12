@@ -465,7 +465,7 @@ int PortraitCanvas::workspaceWidth(int landscapeWidth)
 
 int PortraitCanvas::workspaceHeight(int landscapeHeight)
 {
-	return std::max(landscapeHeight, portraitHeight);
+	return std::max(landscapeHeight, static_cast<int>(portraitHeight));
 }
 
 PortraitCanvas::PreviewRegion PortraitCanvas::portraitPreviewRegion(int, int)
