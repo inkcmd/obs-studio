@@ -358,6 +358,26 @@ OverlayRuntime::OverlayRuntime(QObject *parent) : QObject(parent)
 	heartbeat->start();
 }
 
+OverlayRuntime::~OverlayRuntime()
+{
+	// QTcpServer owns the accepted sockets. They must be deleted while
+	// clients (and all other OverlayRuntime members) still exist.
+	tick.stop();
+	for (auto *timer : findChildren<QTimer *>())
+		timer->stop();
+	QObject::disconnect(&listener, nullptr, this, nullptr);
+	const auto sockets = listener.findChildren<QTcpSocket *>();
+	for (auto *socket : sockets) {
+		// disconnected/readyRead callbacks capture this and access clients.
+		// Never allow them to run during member destruction.
+		QObject::disconnect(socket, nullptr, nullptr, nullptr);
+		socket->abort();
+		delete socket;
+	}
+	clients.clear();
+	listener.close();
+}
+
 QString OverlayRuntime::error() const
 {
 	return available() ? QString{} : QStringLiteral("Порт 8766 занят: ") + listener.errorString();
@@ -371,10 +391,9 @@ QString OverlayRuntime::sourceUrl(const QString &layer) const
 void OverlayRuntime::acceptConnections()
 {
 	while (auto *socket = listener.nextPendingConnection()) {
-		auto *buffer = new QByteArray();
-		connect(socket, &QTcpSocket::disconnected, socket, [this, socket, buffer] {
+		auto buffer = std::make_shared<QByteArray>();
+		connect(socket, &QTcpSocket::disconnected, socket, [this, socket] {
 			clients.remove(socket);
-			delete buffer;
 			socket->deleteLater();
 		});
 		connect(socket, &QTcpSocket::readyRead, socket, [this, socket, buffer] {

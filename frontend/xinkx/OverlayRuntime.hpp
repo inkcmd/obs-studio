@@ -35,6 +35,7 @@ class OverlayRuntime final : public QObject {
 
 public:
 	explicit OverlayRuntime(QObject *parent = nullptr);
+	~OverlayRuntime() override;
 	bool available() const { return listener.isListening(); }
 	QString error() const;
 	QString sourceUrl(const QString &layer = QStringLiteral("all")) const;
