@@ -17,6 +17,8 @@
 
 #include "OBSBasicProperties.hpp"
 
+#include <initializer_list>
+
 #include <utility/display-helpers.hpp>
 #include <widgets/OBSBasic.hpp>
 
@@ -322,7 +324,7 @@ void OBSBasicProperties::on_buttonBox_clicked(QAbstractButton *button)
 		std::string undo_data(obs_data_get_json(oldSettings));
 		std::string redo_data(obs_data_get_json(new_settings));
 
-		if (undo_data.compare(redo_data) != 0) {
+		if (CheckSettings() != 0 && undo_data.compare(redo_data) != 0) {
 			main->undo_s.add_action(QTStr("Undo.Properties").arg(obs_source_get_name(source)), undo_redo,
 						undo_redo, undo_data, redo_data);
 		}
@@ -471,10 +473,27 @@ void OBSBasicProperties::Init()
 int OBSBasicProperties::CheckSettings()
 {
 	OBSDataAutoRelease currentSettings = obs_source_get_settings(source);
-	const char *oldSettingsJson = obs_data_get_json(oldSettings);
-	const char *currentSettingsJson = obs_data_get_json(currentSettings);
-
-	return strcmp(currentSettingsJson, oldSettingsJson);
+	const char *type = obs_source_get_unversioned_id(source);
+	if (type && strncmp(type, "xinkx_", 6) == 0) {
+		// XINKX's preset modified callback is invoked during the initial
+		// property-widget population. It can add bookkeeping keys even when
+		// the user has not touched any control. Ignore only those inert keys;
+		// the actual preset and every user-facing setting are still compared.
+		OBSDataAutoRelease previous = obs_data_create();
+		OBSDataAutoRelease current = obs_data_create();
+		obs_data_apply(previous, oldSettings);
+		obs_data_apply(current, currentSettings);
+		for (obs_data_t *settings : std::initializer_list<obs_data_t *>{previous.Get(), current.Get()}) {
+			obs_data_erase(settings, "xinkxAppliedPreset");
+			const char *preset = obs_data_get_string(settings, "preset");
+			// xinkxAppearance matters only for user-saved presets. For built-in
+			// presets it duplicates the selected preset and has no effect.
+			if (!preset || strncmp(preset, "xinkx-user-", 11) != 0)
+				obs_data_erase(settings, "xinkxAppearance");
+		}
+		return strcmp(obs_data_get_json(current), obs_data_get_json(previous));
+	}
+	return strcmp(obs_data_get_json(currentSettings), obs_data_get_json(oldSettings));
 }
 
 bool OBSBasicProperties::ConfirmQuit()

@@ -189,13 +189,28 @@ private:
 	QPointer<OBSBasicPreview> nativePreview;
 
 public:
-	static void render(obs_source_t *source, uint32_t cx, uint32_t cy)
+	static void render(obs_source_t *source, uint32_t cx, uint32_t cy, bool drawSpacingHelpers)
 	{
 		if (!source || !cx || !cy) return;
 		const auto region = PortraitCanvas::portraitPreviewRegion(int(cx), int(cy));
 		if (region.width <= 0 || region.height <= 0) return;
+		OBSBasicPreview *native = OBSBasicPreview::Get();
+		const bool editingPortrait = native && native->IsPortraitEditing();
+
 		gs_projection_push();
 		gs_viewport_push();
+		// The scene image is clipped to its own 9:16 viewport, but editing
+		// graphics are drawn over the FULL display, just like the native
+		// landscape preview. Otherwise off-canvas handles are cut off.
+		gs_set_viewport(0, 0, cx, cy);
+		gs_ortho(0.f, float(cx), 0.f, float(cy), -100.f, 100.f);
+		if (editingPortrait) {
+			gs_matrix_push();
+			gs_matrix_translate3f(float(region.x), float(region.y), 0.f);
+			native->DrawOverflow();
+			gs_matrix_pop();
+		}
+
 		gs_set_viewport(region.x, region.y, region.width, region.height);
 		gs_ortho(0.f, float(portraitWidth), 0.f, float(portraitHeight), -100.f, 100.f);
 		gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_SOLID);
@@ -204,10 +219,18 @@ public:
 		gs_effect_set_vec4(gs_effect_get_param_by_name(effect, "color"), &background);
 		while (gs_effect_loop(effect, "Solid")) gs_draw_quadf(nullptr, 0, float(portraitWidth), float(portraitHeight));
 		obs_source_video_render(source);
-		if (auto *native = OBSBasicPreview::Get(); native && native->IsPortraitEditing()) {
-			// Draw OBS's own source handles in the portrait viewport.
-			gs_ortho(0.f, float(region.width), 0.f, float(region.height), -100.f, 100.f);
-			native->DrawSceneEditing();
+
+		// Native OBS selection/hover and spacing lines use the common GPU
+		// surface, not a clipped portrait-only viewport. No custom handles.
+		gs_set_viewport(0, 0, cx, cy);
+		gs_ortho(0.f, float(cx), 0.f, float(cy), -100.f, 100.f);
+		if (native) {
+			gs_matrix_push();
+			gs_matrix_translate3f(float(region.x), float(region.y), 0.f);
+			const float scale = float(region.width) / float(portraitWidth);
+			native->DrawSceneEditingForScene(PortraitCanvas::instance().editingScene(), scale, editingPortrait);
+			if (editingPortrait && drawSpacingHelpers) native->DrawSpacingHelpers();
+			gs_matrix_pop();
 		}
 		gs_viewport_pop();
 		gs_projection_pop();
@@ -262,7 +285,7 @@ bool PortraitCanvas::previewVisible() const
 	return previewState.visible.load(std::memory_order_acquire);
 }
 
-void PortraitCanvas::renderPreview(uint32_t displayWidth, uint32_t displayHeight) const
+void PortraitCanvas::renderPreview(uint32_t displayWidth, uint32_t displayHeight, bool drawSpacingHelpers) const
 {
 	if (!previewVisible()) return;
 	obs_source_t *source = nullptr;
@@ -272,7 +295,7 @@ void PortraitCanvas::renderPreview(uint32_t displayWidth, uint32_t displayHeight
 			source = obs_source_get_ref(obs_scene_get_source(scene));
 	}
 	if (!source) return;
-	PortraitDisplay::render(source, displayWidth, displayHeight);
+	PortraitDisplay::render(source, displayWidth, displayHeight, drawSpacingHelpers);
 	obs_source_release(source);
 }
 

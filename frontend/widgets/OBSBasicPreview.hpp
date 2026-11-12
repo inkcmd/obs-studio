@@ -143,6 +143,9 @@ public:
 
 	void DrawOverflow();
 	void DrawSceneEditing();
+	// Draw either scene's handles/hover without changing the active edit target.
+	// Both scenes share the single GPU display and native OBS selection visuals.
+	void DrawSceneEditingForScene(OBSScene scene, float scale, bool activeSelectionBox);
 
 	// One native editor; selects which independent OBS scene supplies items.
 	void SetPortraitEditing(bool portrait);

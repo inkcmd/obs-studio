@@ -2,6 +2,8 @@
 
 #include <components/OBSSourceLabel.hpp>
 #include <widgets/OBSBasic.hpp>
+#include <widgets/OBSBasicPreview.hpp>
+#include <xinkx/PortraitCanvas.hpp>
 
 #include <qt-wrappers.hpp>
 
@@ -312,7 +314,11 @@ void SourceTreeItem::mouseDoubleClickEvent(QMouseEvent *event)
 void SourceTreeItem::enterEvent(QEnterEvent *event)
 {
 	QWidget::enterEvent(event);
-	if (tree->HasOwnScene()) return;
+	// The portrait SourceTree is still a native OBS editor. Hovering its
+	// items must highlight their scene items just like the main tree.
+	if (tree->HasOwnScene() &&
+	    (!xinkx::PortraitCanvas::instance().previewVisible() ||
+	     tree->Scene() != xinkx::PortraitCanvas::instance().editingScene())) return;
 
 	OBSBasicPreview *preview = OBSBasicPreview::Get();
 
@@ -324,7 +330,11 @@ void SourceTreeItem::enterEvent(QEnterEvent *event)
 void SourceTreeItem::leaveEvent(QEvent *event)
 {
 	QWidget::leaveEvent(event);
-	if (tree->HasOwnScene()) return;
+	// The portrait SourceTree is still a native OBS editor. Hovering its
+	// items must highlight their scene items just like the main tree.
+	if (tree->HasOwnScene() &&
+	    (!xinkx::PortraitCanvas::instance().previewVisible() ||
+	     tree->Scene() != xinkx::PortraitCanvas::instance().editingScene())) return;
 
 	OBSBasicPreview *preview = OBSBasicPreview::Get();
 

@@ -37,7 +37,7 @@ public:
 	static int workspaceHeight(int landscapeHeight);
 	static PreviewRegion portraitPreviewRegion(int displayWidth, int displayHeight);
 	bool previewVisible() const;
-	void renderPreview(uint32_t displayWidth, uint32_t displayHeight) const;
+	void renderPreview(uint32_t displayWidth, uint32_t displayHeight, bool drawSpacingHelpers) const;
 	// OBS duplicates the horizontal scene separately; clone the portrait
 	// layout at the same time, retaining independent transform storage.
 	void duplicateLayout(const QString &fromScene, const QString &toScene);

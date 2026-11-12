@@ -192,15 +192,17 @@ void OBSBasic::RenderMain(void *data, uint32_t, uint32_t)
 		RenderSafeAreas(window->rightLine, targetCX, targetCY);
 	}
 
-	if (!window->ui->preview->IsPortraitEditing())
-		window->ui->preview->DrawSceneEditing();
+	// Always draw the landscape source hover, even while the portrait
+	// editor owns the selection. This matches SourceTree hover on both sides.
+	window->ui->preview->DrawSceneEditingForScene(window->GetCurrentScene(), window->previewScale,
+	                                               !window->ui->preview->IsPortraitEditing());
 
 	if (window->drawSpacingHelpers && !window->ui->preview->IsPortraitEditing()) {
 		window->ui->preview->DrawSpacingHelpers();
 	}
 
 	// One obs_display_t, two scene viewports. No extra OBSQTDisplay/window.
-	xinkx::PortraitCanvas::instance().renderPreview(width, height);
+	xinkx::PortraitCanvas::instance().renderPreview(width, height, window->drawSpacingHelpers);
 
 	/* --------------------------------------- */
 

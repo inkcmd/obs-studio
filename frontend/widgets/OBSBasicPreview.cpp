@@ -2319,6 +2319,11 @@ void OBSBasicPreview::DrawOverflow()
 
 void OBSBasicPreview::DrawSceneEditing()
 {
+	DrawSceneEditingForScene(EditingScene(), EditingScale(), true);
+}
+
+void OBSBasicPreview::DrawSceneEditingForScene(OBSScene scene, float scale, bool activeSelectionBox)
+{
 	if (locked) {
 		return;
 	}
@@ -2327,16 +2332,14 @@ void OBSBasicPreview::DrawSceneEditing()
 
 	OBSBasic *main = OBSBasic::Get();
 
-	OBSScene scene = Get()->EditingScene();
-
 	if (scene) {
 		gs_matrix_push();
-		gs_matrix_scale3f(EditingScale(), EditingScale(), 1.0f);
+		gs_matrix_scale3f(scale, scale, 1.0f);
 		obs_scene_enum_items(scene, DrawSelectedItem, this);
 		gs_matrix_pop();
 	}
 
-	if (selectionBox) {
+	if (activeSelectionBox && selectionBox) {
 		if (!rectFill) {
 			gs_render_start(true);
 
@@ -2349,8 +2352,8 @@ void OBSBasicPreview::DrawSceneEditing()
 		}
 
 		while (gs_effect_loop(solidEffect, "Solid")) {
-			DrawSelectionBox(startPos.x * EditingScale(), startPos.y * EditingScale(),
-					 mousePos.x * EditingScale(), mousePos.y * EditingScale(), rectFill);
+			DrawSelectionBox(startPos.x * scale, startPos.y * scale,
+					 mousePos.x * scale, mousePos.y * scale, rectFill);
 		}
 	}
 
@@ -2475,7 +2478,7 @@ static void SetLabelText(int sourceIndex, int px)
 	prev->spacerPx[sourceIndex] = px;
 }
 
-static void DrawLabel(OBSSource source, vec3 &pos, vec3 &viewport)
+static void DrawLabel(OBSSource source, vec3 &pos, vec3 &viewport, float originX, float originY)
 {
 	if (!source) {
 		return;
@@ -2484,8 +2487,10 @@ static void DrawLabel(OBSSource source, vec3 &pos, vec3 &viewport)
 	vec3_mul(&pos, &pos, &viewport);
 
 	gs_matrix_push();
+	// Labels reset the matrix to draw in display pixels; include the second
+	// canvas origin explicitly (the surrounding matrix translation is lost).
 	gs_matrix_identity();
-	gs_matrix_translate(&pos);
+	gs_matrix_translate3f(pos.x + originX, pos.y + originY, 0.0f);
 	obs_source_video_render(source);
 	gs_matrix_pop();
 }
@@ -2527,7 +2532,8 @@ static void DrawSpacingLine(vec3 &start, vec3 &end, vec3 &viewport, float pixelR
 	gs_technique_end(tech);
 }
 
-static void RenderSpacingHelper(int sourceIndex, vec3 &start, vec3 &end, vec3 &viewport, float pixelRatio)
+static void RenderSpacingHelper(int sourceIndex, vec3 &start, vec3 &end, vec3 &viewport, float pixelRatio,
+				float baseWidth, float baseHeight, float originX, float originY)
 {
 	bool horizontal = (sourceIndex == 2 || sourceIndex == 3);
 
@@ -2538,16 +2544,9 @@ static void RenderSpacingHelper(int sourceIndex, vec3 &start, vec3 &end, vec3 &v
 
 	float length = vec3_dist(&start, &end);
 
-	obs_video_info ovi;
-	obs_get_video_info(&ovi);
-
-	float px;
-
-	if (horizontal) {
-		px = length * ovi.base_width;
-	} else {
-		px = length * ovi.base_height;
-	}
+	// The distance units belong to the canvas being edited, not necessarily
+	// OBS's global landscape video info.
+	float px = length * (horizontal ? baseWidth : baseHeight);
 
 	if (px <= 0.0f) {
 		return;
@@ -2577,12 +2576,11 @@ static void RenderSpacingHelper(int sourceIndex, vec3 &start, vec3 &end, vec3 &v
 
 	DrawSpacingLine(start, end, viewport, pixelRatio);
 	SetLabelText(sourceIndex, (int)px);
-	DrawLabel(source, labelPos, viewport);
+	DrawLabel(source, labelPos, viewport, originX, originY);
 }
 
 void OBSBasicPreview::DrawSpacingHelpers()
 {
-	if (IsPortraitEditing()) return; // Native item handles still draw; spacing labels use landscape-only viewport.
 	if (locked) {
 		return;
 	}
@@ -2718,18 +2716,23 @@ void OBSBasicPreview::DrawSpacingHelpers()
 	right.x = size.x - right.x;
 
 	// Init viewport
+	const bool portrait = IsPortraitEditing();
+	const auto region = portrait ? xinkx::PortraitCanvas::portraitPreviewRegion(width(), height())
+	                             : xinkx::PortraitCanvas::PreviewRegion{0, 0, 0, 0};
+	const float scale = EditingScale();
 	vec3 viewport;
-	vec3_set(&viewport, main->previewCX, main->previewCY, 1.0f);
+	vec3_set(&viewport, portrait ? float(region.width) : float(main->previewCX),
+	         portrait ? float(region.height) : float(main->previewCY), 1.0f);
 
 	vec3_div(&left, &left, &viewport);
 	vec3_div(&right, &right, &viewport);
 	vec3_div(&top, &top, &viewport);
 	vec3_div(&bottom, &bottom, &viewport);
 
-	vec3_mulf(&left, &left, main->previewScale);
-	vec3_mulf(&right, &right, main->previewScale);
-	vec3_mulf(&top, &top, main->previewScale);
-	vec3_mulf(&bottom, &bottom, main->previewScale);
+	vec3_mulf(&left, &left, scale);
+	vec3_mulf(&right, &right, scale);
+	vec3_mulf(&top, &top, scale);
+	vec3_mulf(&bottom, &bottom, scale);
 
 	// Draw spacer lines and labels
 	vec3 start, end;
@@ -2743,19 +2746,23 @@ void OBSBasicPreview::DrawSpacingHelpers()
 
 	vec3_set(&start, top.x, 0.0f, 1.0f);
 	vec3_set(&end, top.x, top.y, 1.0f);
-	RenderSpacingHelper(0, start, end, viewport, pixelRatio);
+	RenderSpacingHelper(0, start, end, viewport, pixelRatio, size.x, size.y,
+			    portrait ? float(region.x) : 0.f, portrait ? float(region.y) : 0.f);
 
 	vec3_set(&start, bottom.x, 1.0f - bottom.y, 1.0f);
 	vec3_set(&end, bottom.x, 1.0f, 1.0f);
-	RenderSpacingHelper(1, start, end, viewport, pixelRatio);
+	RenderSpacingHelper(1, start, end, viewport, pixelRatio, size.x, size.y,
+			    portrait ? float(region.x) : 0.f, portrait ? float(region.y) : 0.f);
 
 	vec3_set(&start, 0.0f, left.y, 1.0f);
 	vec3_set(&end, left.x, left.y, 1.0f);
-	RenderSpacingHelper(2, start, end, viewport, pixelRatio);
+	RenderSpacingHelper(2, start, end, viewport, pixelRatio, size.x, size.y,
+			    portrait ? float(region.x) : 0.f, portrait ? float(region.y) : 0.f);
 
 	vec3_set(&start, 1.0f - right.x, right.y, 1.0f);
 	vec3_set(&end, 1.0f, right.y, 1.0f);
-	RenderSpacingHelper(3, start, end, viewport, pixelRatio);
+	RenderSpacingHelper(3, start, end, viewport, pixelRatio, size.x, size.y,
+			    portrait ? float(region.x) : 0.f, portrait ? float(region.y) : 0.f);
 }
 
 void OBSBasicPreview::ClampScrollingOffsets()
