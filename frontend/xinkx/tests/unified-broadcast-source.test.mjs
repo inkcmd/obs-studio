@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-const source = name => readFileSync(new URL(`../${name}`, import.meta.url), 'utf8');
+const source = name => readFileSync(new URL(`../${name}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const broadcast = source('BroadcastWorkspace.cpp');
 const profiles = source('GameProfilesWorkspace.cpp');
 const api = source('ChatGateway.cpp');

@@ -19,6 +19,8 @@
 
 #include "OBSBasic.hpp"
 
+#include <xinkx/PortraitCanvas.hpp>
+
 #include <utility/display-helpers.hpp>
 #include <widgets/OBSProjector.hpp>
 
@@ -195,6 +197,9 @@ void OBSBasic::RenderMain(void *data, uint32_t, uint32_t)
 		window->ui->preview->DrawSpacingHelpers();
 	}
 
+	// One obs_display_t, two scene viewports. No extra OBSQTDisplay/window.
+	xinkx::PortraitCanvas::instance().renderPreview(width, height);
+
 	/* --------------------------------------- */
 
 	gs_projection_pop();
@@ -211,6 +216,9 @@ void OBSBasic::ResizePreview(uint32_t cx, uint32_t cy)
 
 	/* resize preview panel to fix to the top section of the window */
 	targetSize = GetPixelSize(ui->preview);
+	const int usableWidth = xinkx::PortraitCanvas::instance().previewVisible()
+		? xinkx::PortraitCanvas::landscapePreviewWidth(targetSize.width())
+		: targetSize.width();
 
 	isFixedScaling = ui->preview->IsFixedScaling();
 	obs_get_video_info(&ovi);
@@ -220,14 +228,14 @@ void OBSBasic::ResizePreview(uint32_t cx, uint32_t cy)
 
 		ui->preview->ClampScrollingOffsets();
 
-		GetCenterPosFromFixedScale(int(cx), int(cy), targetSize.width() - PREVIEW_EDGE_SIZE * 2,
+		GetCenterPosFromFixedScale(int(cx), int(cy), usableWidth - PREVIEW_EDGE_SIZE * 2,
 					   targetSize.height() - PREVIEW_EDGE_SIZE * 2, previewX, previewY,
 					   previewScale);
 		previewX += ui->preview->GetScrollX();
 		previewY += ui->preview->GetScrollY();
 
 	} else {
-		GetScaleAndCenterPos(int(cx), int(cy), targetSize.width() - PREVIEW_EDGE_SIZE * 2,
+		GetScaleAndCenterPos(int(cx), int(cy), usableWidth - PREVIEW_EDGE_SIZE * 2,
 				     targetSize.height() - PREVIEW_EDGE_SIZE * 2, previewX, previewY, previewScale);
 	}
 
@@ -235,6 +243,12 @@ void OBSBasic::ResizePreview(uint32_t cx, uint32_t cy)
 
 	previewX += float(PREVIEW_EDGE_SIZE);
 	previewY += float(PREVIEW_EDGE_SIZE);
+}
+
+void OBSBasic::RefreshXinkxPreviewLayout()
+{
+	obs_video_info ovi{};
+	if (obs_get_video_info(&ovi)) ResizePreview(ovi.base_width, ovi.base_height);
 }
 
 void OBSBasic::on_preview_customContextMenuRequested()

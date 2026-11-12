@@ -7,7 +7,6 @@
 #include <dialogs/OBSBasicSourceSelect.hpp>
 #include <utility/display-helpers.hpp>
 #include <widgets/OBSBasic.hpp>
-#include <widgets/OBSQTDisplay.hpp>
 
 #include <obs-frontend-api.h>
 #include <obs.h>
@@ -21,7 +20,6 @@
 #include <QCryptographicHash>
 #include <QHash>
 #include <QHBoxLayout>
-#include <QGridLayout>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -52,6 +50,7 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace xinkx {
@@ -104,22 +103,32 @@ bool collectItemRefs(obs_scene_t *, obs_sceneitem_t *item, void *context)
 	return true;
 }
 
-// This is a real libobs render of the portrait scene, not a scaled screenshot
-// of the horizontal canvas. The output encoder uses the same canvas's video mix.
-class PortraitDisplay : public OBSQTDisplay {
+// GPU render data stays valid while OBS's render callback is active. Only
+// atomics cross the Qt GUI / libobs graphics-thread boundary.
+struct PortraitPreviewState {
+	std::atomic<float> zoom{1.f}, panX{0.f}, panY{0.f}, pixelRatio{1.f};
+	std::array<std::atomic<float>, 8> selectionPoints{};
+	std::atomic<bool> hasSelection{false};
+	std::atomic<bool> visible{false};
+};
+PortraitPreviewState previewState;
+std::mutex previewSourceMutex;
+
+// Event routing for the portrait half of the existing OBSBasicPreview widget.
+// This QWidget is never shown and never owns a GPU display or native window.
+class PortraitDisplay : public QWidget {
 public:
-	explicit PortraitDisplay(obs_source_t *source, QWidget *parent) : OBSQTDisplay(parent), sceneSource(source)
+	explicit PortraitDisplay(QWidget *target, QWidget *parent) : QWidget(parent), nativePreview(target)
 	{
-		setMinimumSize(170, 260);
-		setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-		setFocusPolicy(Qt::StrongFocus);
-		connect(this, &OBSQTDisplay::DisplayCreated, this, [this] {
-			obs_display_add_draw_callback(GetDisplay(), render, this);
-		});
+		previewState.pixelRatio.store(float(nativePreview->devicePixelRatioF()));
+		nativePreview->installEventFilter(this);
 	}
 	~PortraitDisplay() override
 	{
-		if (GetDisplay()) obs_display_remove_draw_callback(GetDisplay(), render, this);
+		if (nativePreview) {
+			nativePreview->removeEventFilter(this);
+			nativePreview->unsetCursor();
+		}
 	}
 	std::function<void(float, float)> moved;
 	std::function<void(int, float, float)> resized;
@@ -134,39 +143,117 @@ public:
 	void setSelection(const std::array<QPointF, 4> &corners)
 	{
 		for (int i = 0; i < 4; ++i) {
-			selectionPoints[i * 2].store(float(corners[i].x()));
-			selectionPoints[i * 2 + 1].store(float(corners[i].y()));
+			previewState.selectionPoints[i * 2].store(float(corners[i].x()));
+			previewState.selectionPoints[i * 2 + 1].store(float(corners[i].y()));
 		}
-		hasSelection.store(true);
+		previewState.hasSelection.store(true);
 	}
-	void clearSelection() { hasSelection.store(false); }
-	float zoomFactor() const { return zoom.load(); }
+	void clearSelection() { previewState.hasSelection.store(false); }
+	float zoomFactor() const { return previewState.zoom.load(); }
 	void setZoomFactor(float factor)
 	{
-		zoom.store(std::clamp(factor, 1.f, 8.f));
-		if (factor <= 1.f) { panX.store(0.f); panY.store(0.f); }
+		previewState.zoom.store(std::clamp(factor, 1.f, 8.f));
+		if (factor <= 1.f) { previewState.panX.store(0.f); previewState.panY.store(0.f); }
 	}
 	float displayScale() const
 	{
-		return std::min(width() / float(portraitWidth), height() / float(portraitHeight)) * zoomFactor();
+		const auto region = PortraitCanvas::portraitPreviewRegion(nativePreview->width(), nativePreview->height());
+		return std::min(region.width / float(portraitWidth), region.height / float(portraitHeight)) * zoomFactor();
 	}
 
 protected:
+	bool eventFilter(QObject *watched, QEvent *event) override
+	{
+		if (!nativePreview || watched != nativePreview.data() || !previewState.visible.load())
+			return false;
+		previewState.pixelRatio.store(float(nativePreview->devicePixelRatioF()));
+		switch (event->type()) {
+		case QEvent::MouseButtonPress:
+		case QEvent::MouseButtonDblClick:
+		case QEvent::MouseButtonRelease:
+		case QEvent::MouseMove: {
+			auto *mouse = static_cast<QMouseEvent *>(event);
+			const auto region = PortraitCanvas::portraitPreviewRegion(nativePreview->width(), nativePreview->height());
+			const bool inside = region.contains(float(mouse->position().x()), float(mouse->position().y()));
+			if (event->type() == QEvent::MouseButtonPress) {
+				if (!inside) {
+					nativePointerDown = true;
+					portraitFocused = false;
+					nativePreview->unsetCursor();
+					return false;
+				}
+				portraitPointerDown = true;
+				portraitFocused = true;
+				mousePressEvent(mouse);
+			} else if (event->type() == QEvent::MouseButtonDblClick) {
+				if (!inside) return false;
+				mouseDoubleClickEvent(mouse);
+			} else if (event->type() == QEvent::MouseMove) {
+				if (nativePointerDown) return false;
+				if (!inside && !portraitPointerDown && handle < 0 && !panning) {
+					nativePreview->unsetCursor();
+					return false;
+				}
+				mouseMoveEvent(mouse);
+			} else {
+				if (nativePointerDown) { nativePointerDown = false; return false; }
+				if (!inside && !portraitPointerDown && handle < 0 && !panning) return false;
+				mouseReleaseEvent(mouse);
+				portraitPointerDown = false;
+			}
+			event->accept();
+			return true;
+		}
+		case QEvent::Wheel: {
+			auto *wheel = static_cast<QWheelEvent *>(event);
+			const auto region = PortraitCanvas::portraitPreviewRegion(nativePreview->width(), nativePreview->height());
+			if (!region.contains(float(wheel->position().x()), float(wheel->position().y()))) return false;
+			wheelEvent(wheel);
+			return true;
+		}
+		case QEvent::KeyPress:
+		case QEvent::KeyRelease: {
+			if (!portraitFocused) return false;
+			auto *key = static_cast<QKeyEvent *>(event);
+			switch (key->key()) {
+			case Qt::Key_Delete: case Qt::Key_Backspace: case Qt::Key_Escape:
+			case Qt::Key_Left: case Qt::Key_Right: case Qt::Key_Up: case Qt::Key_Down:
+			case Qt::Key_Space: break;
+			default: return false;
+			}
+			if (event->type() == QEvent::KeyPress) keyPressEvent(key);
+			else keyReleaseEvent(key);
+			event->accept();
+			return true;
+		}
+		case QEvent::FocusOut:
+			portraitFocused = false;
+			portraitPointerDown = nativePointerDown = false;
+			handle = -1;
+			panning = false;
+			spaceDown = false;
+			break;
+		default: break;
+		}
+		return false;
+	}
+
 	QPointF scenePoint(const QPointF &point) const
 	{
 		const float scale = displayScale();
 		if (scale <= 0.f) return QPointF(-1, -1);
-		return {(point.x() - (width() - float(portraitWidth) * scale) / 2.f - panX.load()) / scale,
-			(point.y() - (height() - float(portraitHeight) * scale) / 2.f - panY.load()) / scale};
+		const auto region = PortraitCanvas::portraitPreviewRegion(nativePreview->width(), nativePreview->height());
+		return {(point.x() - region.x - (region.width - float(portraitWidth) * scale) / 2.f - previewState.panX.load()) / scale,
+			(point.y() - region.y - (region.height - float(portraitHeight) * scale) / 2.f - previewState.panY.load()) / scale};
 	}
 	void mousePressEvent(QMouseEvent *event) override
 	{
-		setFocus();
+		nativePreview->setFocus();
 		if (event->button() == Qt::MiddleButton || (event->button() == Qt::LeftButton && spaceDown)) {
 			panning = true;
 			start = event->position();
-			panStart = {panX.load(), panY.load()};
-			setCursor(Qt::ClosedHandCursor);
+			panStart = {previewState.panX.load(), previewState.panY.load()};
+			nativePreview->setCursor(Qt::ClosedHandCursor);
 			event->accept();
 			return;
 		}
@@ -179,7 +266,7 @@ protected:
 			const QPointF point = scenePoint(event->position());
 			contextRequested(float(point.x()), float(point.y()), event->globalPosition().toPoint());
 		}
-		OBSQTDisplay::mousePressEvent(event);
+		QWidget::mousePressEvent(event);
 	}
 	void mouseDoubleClickEvent(QMouseEvent *event) override
 	{
@@ -187,28 +274,28 @@ protected:
 			const QPointF point = scenePoint(event->position());
 			doubleClicked(float(point.x()), float(point.y()));
 		}
-		OBSQTDisplay::mouseDoubleClickEvent(event);
+		QWidget::mouseDoubleClickEvent(event);
 	}
 	void mouseMoveEvent(QMouseEvent *event) override
 	{
 		if (panning) {
 			const QPointF change = event->position() - start;
-			panX.store(float(panStart.x() + change.x()));
-			panY.store(float(panStart.y() + change.y()));
+			previewState.panX.store(float(panStart.x() + change.x()));
+			previewState.panY.store(float(panStart.y() + change.y()));
 			event->accept();
 			return;
 		}
 		if (handle < 0 && hovering) {
 			const QPointF point = scenePoint(event->position());
 			const int hovered = hovering(float(point.x()), float(point.y()));
-			if (hovered == 1 || hovered == 5) setCursor(Qt::SizeFDiagCursor);
-			else if (hovered == 3 || hovered == 7) setCursor(Qt::SizeBDiagCursor);
-			else if (hovered == 2 || hovered == 6) setCursor(Qt::SizeVerCursor);
-			else if (hovered == 4 || hovered == 8) setCursor(Qt::SizeHorCursor);
-			else if (hovered == 0) setCursor(Qt::SizeAllCursor);
-			else unsetCursor();
+			if (hovered == 1 || hovered == 5) nativePreview->setCursor(Qt::SizeFDiagCursor);
+			else if (hovered == 3 || hovered == 7) nativePreview->setCursor(Qt::SizeBDiagCursor);
+			else if (hovered == 2 || hovered == 6) nativePreview->setCursor(Qt::SizeVerCursor);
+			else if (hovered == 4 || hovered == 8) nativePreview->setCursor(Qt::SizeHorCursor);
+			else if (hovered == 0) nativePreview->setCursor(Qt::SizeAllCursor);
+			else nativePreview->unsetCursor();
 		}
-		if (handle >= 0 && width() && height()) {
+		if (handle >= 0 && nativePreview->width() && nativePreview->height()) {
 			const QPointF delta = event->position() - start;
 			// Deltas are measured from mouse-down, like the native OBS editor.
 			// A per-frame delta plus 10px snapping would otherwise discard small drags.
@@ -219,18 +306,18 @@ protected:
 				else if (moved) moved(dx, dy);
 			}
 		}
-		OBSQTDisplay::mouseMoveEvent(event);
+		QWidget::mouseMoveEvent(event);
 	}
 	void mouseReleaseEvent(QMouseEvent *event) override
 	{
 		if (panning && (event->button() == Qt::MiddleButton || event->button() == Qt::LeftButton)) {
 			panning = false;
-			setCursor(spaceDown ? Qt::OpenHandCursor : Qt::ArrowCursor);
+			nativePreview->setCursor(spaceDown ? Qt::OpenHandCursor : Qt::ArrowCursor);
 			event->accept();
 			return;
 		}
 		if (event->button() == Qt::LeftButton) handle = -1;
-		OBSQTDisplay::mouseReleaseEvent(event);
+		QWidget::mouseReleaseEvent(event);
 	}
 	void keyPressEvent(QKeyEvent *event) override
 	{
@@ -257,21 +344,21 @@ protected:
 		}
 		if (event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
 			spaceDown = true;
-			setCursor(Qt::OpenHandCursor);
+			nativePreview->setCursor(Qt::OpenHandCursor);
 			event->accept();
 			return;
 		}
-		OBSQTDisplay::keyPressEvent(event);
+		QWidget::keyPressEvent(event);
 	}
 	void keyReleaseEvent(QKeyEvent *event) override
 	{
 		if (event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
 			spaceDown = false;
-			unsetCursor();
+			nativePreview->unsetCursor();
 			event->accept();
 			return;
 		}
-		OBSQTDisplay::keyReleaseEvent(event);
+		QWidget::keyReleaseEvent(event);
 	}
 	void wheelEvent(QWheelEvent *event) override
 	{
@@ -281,22 +368,22 @@ protected:
 			event->accept();
 			return;
 		}
-		OBSQTDisplay::wheelEvent(event);
+		QWidget::wheelEvent(event);
 	}
 
 public:
 	std::function<void()> zoomChanged;
 
 private:
-	obs_source_t *sceneSource = nullptr;
+	QPointer<QWidget> nativePreview;
+	bool portraitFocused = false;
+	bool portraitPointerDown = false;
+	bool nativePointerDown = false;
 	QPointF start;
 	QPointF panStart;
 	int handle = -1;
 	bool spaceDown = false;
 	bool panning = false;
-	std::atomic<float> zoom{1.f}, panX{0.f}, panY{0.f};
-	std::array<std::atomic<float>, 8> selectionPoints{};
-	std::atomic<bool> hasSelection{false};
 	static void solidRect(float x, float y, float w, float h)
 	{
 		gs_matrix_push();
@@ -312,16 +399,19 @@ private:
 		gs_draw_quadf(nullptr, 0, std::hypot(x2 - x1, y2 - y1), thickness);
 		gs_matrix_pop();
 	}
-	static void render(void *context, uint32_t cx, uint32_t cy)
+public:
+	static void render(obs_source_t *source, uint32_t cx, uint32_t cy)
 	{
-		auto *self = static_cast<PortraitDisplay *>(context);
-		if (!self->sceneSource || !cx || !cy) return;
+		if (!source || !cx || !cy) return;
+		const auto region = PortraitCanvas::portraitPreviewRegion(int(cx), int(cy));
+		if (region.width <= 0 || region.height <= 0) return;
 		int x, y;
 		float scale;
-		GetScaleAndCenterPos(portraitWidth, portraitHeight, cx, cy, x, y, scale);
-		scale *= self->zoomFactor();
-		x = int((float(cx) - float(portraitWidth) * scale) / 2.f + self->panX.load());
-		y = int((float(cy) - float(portraitHeight) * scale) / 2.f + self->panY.load());
+		GetScaleAndCenterPos(portraitWidth, portraitHeight, region.width, region.height, x, y, scale);
+		scale *= previewState.zoom.load();
+		const float ratio = previewState.pixelRatio.load();
+		x = region.x + int((float(region.width) - float(portraitWidth) * scale) / 2.f + previewState.panX.load() * ratio);
+		y = region.y + int((float(region.height) - float(portraitHeight) * scale) / 2.f + previewState.panY.load() * ratio);
 		const int w = int(scale * portraitWidth);
 		const int h = int(scale * portraitHeight);
 		gs_projection_push();
@@ -334,14 +424,25 @@ private:
 		vec4 outline{};
 		vec4_set(&outline, 0.f, 0.f, 0.f, 1.f);
 		gs_effect_set_vec4(gs_effect_get_param_by_name(effect, "color"), &outline);
-		while (gs_effect_loop(effect, "Solid")) solidRect(float(x), float(y), float(w), float(h));
-		gs_set_viewport(x, y, w, h);
-		gs_ortho(0.f, float(portraitWidth), 0.f, float(portraitHeight), -100.f, 100.f);
-		obs_source_video_render(self->sceneSource);
-		if (self->hasSelection.load()) {
+		while (gs_effect_loop(effect, "Solid")) solidRect(float(region.x), float(region.y), float(region.width), float(region.height));
+		// Clip zoomed/panned portrait imagery to its slot, never over 16:9.
+		const int clipLeft = std::max(x, region.x);
+		const int clipTop = std::max(y, region.y);
+		const int clipRight = std::min(x + w, region.x + region.width);
+		const int clipBottom = std::min(y + h, region.y + region.height);
+		if (clipLeft >= clipRight || clipTop >= clipBottom) {
+			gs_viewport_pop();
+			gs_projection_pop();
+			return;
+		}
+		gs_set_viewport(clipLeft, clipTop, clipRight - clipLeft, clipBottom - clipTop);
+		gs_ortho((clipLeft - x) / scale, (clipRight - x) / scale,
+			 (clipTop - y) / scale, (clipBottom - y) / scale, -100.f, 100.f);
+		obs_source_video_render(source);
+		if (previewState.hasSelection.load()) {
 			std::array<QPointF, 4> corners;
 			for (int i = 0; i < 4; ++i)
-				corners[i] = {self->selectionPoints[i * 2].load(), self->selectionPoints[i * 2 + 1].load()};
+				corners[i] = {previewState.selectionPoints[i * 2].load(), previewState.selectionPoints[i * 2 + 1].load()};
 			vec4 color{};
 			vec4_set(&color, 0.17f, 0.72f, 1.0f, 1.f);
 			gs_effect_set_vec4(gs_effect_get_param_by_name(effect, "color"), &color);
@@ -364,6 +465,36 @@ private:
 };
 
 } // namespace
+
+int PortraitCanvas::landscapePreviewWidth(int displayWidth)
+{
+	return std::max(1, displayWidth * 70 / 100);
+}
+
+PortraitCanvas::PreviewRegion PortraitCanvas::portraitPreviewRegion(int displayWidth, int displayHeight)
+{
+	const int left = landscapePreviewWidth(displayWidth);
+	return {left, 0, std::max(0, displayWidth - left), std::max(0, displayHeight)};
+}
+
+bool PortraitCanvas::previewVisible() const
+{
+	return previewState.visible.load(std::memory_order_acquire);
+}
+
+void PortraitCanvas::renderPreview(uint32_t displayWidth, uint32_t displayHeight) const
+{
+	if (!previewVisible()) return;
+	obs_source_t *source = nullptr;
+	{
+		std::lock_guard<std::mutex> guard(previewSourceMutex);
+		if (previewVisible() && scene)
+			source = obs_source_get_ref(obs_scene_get_source(scene));
+	}
+	if (!source) return;
+	PortraitDisplay::render(source, displayWidth, displayHeight);
+	obs_source_release(source);
+}
 
 PortraitCanvas &PortraitCanvas::instance()
 {
@@ -656,30 +787,26 @@ void PortraitCanvas::edit(QWidget *parent)
 	auto *mainWindow = static_cast<QMainWindow *>(obs_frontend_get_main_window());
 	if (!mainWindow) return;
 	if (auto *existing = mainWindow->findChild<QWidget *>(QStringLiteral("xinkxPortraitEditor"))) {
-		existing->show();
-		existing->raise();
 		return;
 	}
 	if (!ensure()) return;
 	sync();
-	auto *previewContainer = mainWindow->findChild<QWidget *>(QStringLiteral("previewContainer"));
 	auto *nativePreview = mainWindow->findChild<QWidget *>(QStringLiteral("preview"));
-	auto *previewGrid = previewContainer ? previewContainer->findChild<QGridLayout *>(QStringLiteral("gridLayout")) : nullptr;
-	if (!previewGrid || !nativePreview) {
-		writeDiagnostic(QStringLiteral("portrait"), QStringLiteral("Main OBS preview grid unavailable"));
+	if (!nativePreview) {
+		writeDiagnostic(QStringLiteral("portrait"), QStringLiteral("Main OBS preview unavailable"));
 		return;
 	}
 	editing = true;
-	auto *side = new QWidget(previewContainer);
+	// Lifecycle owner only: the visible scene is drawn by OBS's own preview.
+	auto *side = new QWidget(mainWindow);
 	side->setObjectName(QStringLiteral("xinkxPortraitEditor"));
-	side->setMinimumWidth(120);
-	side->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+	side->setAttribute(Qt::WA_DontShowOnScreen, true);
+	side->hide();
 	auto *column = new QVBoxLayout(side);
 	column->setContentsMargins(0, 0, 0, 0);
 	column->setSpacing(0);
-	auto *preview = new PortraitDisplay(obs_scene_get_source(scene), side);
-	preview->setToolTip(QStringLiteral("Ctrl + колесо — масштаб · средняя кнопка — перемещение · ПКМ — команды и сброс масштаба"));
-	column->addWidget(preview, 1);
+	auto *preview = new PortraitDisplay(nativePreview, side);
+	preview->hide();
 	auto *toolbarWidget = new QWidget(side);
 	auto *toolbar = new QHBoxLayout(toolbarWidget);
 	toolbar->setContentsMargins(0, 0, 0, 0);
@@ -712,7 +839,7 @@ void PortraitCanvas::edit(QWidget *parent)
 				sourceColumn->setContentsMargins(1, 2, 1, 1);
 				sourceColumn->setSpacing(3);
 				auto *sourceHeading = new QLabel(QStringLiteral("9:16 · Вертикальные источники"), portraitSources);
-				sourceHeading->setStyleSheet(QStringLiteral("font-weight:600;color:#82d8ec"));
+				sourceHeading->setStyleSheet(QStringLiteral("font-weight:600"));
 				sourceColumn->addWidget(sourceHeading);
 				nativePortraitTree = new SourceTree(portraitSources, [this] { return OBSScene(scene); });
 				nativePortraitTree->setObjectName(QStringLiteral("xinkxPortraitNativeSourceTree"));
@@ -758,42 +885,8 @@ void PortraitCanvas::edit(QWidget *parent)
 	}
 	if (!nativePortraitTree)
 		writeDiagnostic(QStringLiteral("portrait"), QStringLiteral("Native Sources dock unavailable"));
-	// Both editable GPU surfaces live inside OBS's ONE previewContainer and
-	// share its zoom/status toolbar. This is a single composition workspace,
-	// not an adjacent second canvasEditor window or sidecar.
-	{
-		previewGrid->removeWidget(nativePreview);
-		auto *splitter = new QSplitter(Qt::Horizontal, previewContainer);
-		splitter->setObjectName(QStringLiteral("xinkxCanvasSplitter"));
-		splitter->setChildrenCollapsible(false);
-		splitter->setHandleWidth(4);
-		splitter->addWidget(nativePreview);
-		splitter->addWidget(side);
-		splitter->setStretchFactor(0, 2);
-		splitter->setStretchFactor(1, 1);
-		{
-			QSettings store(studioSettingsPath(), QSettings::IniFormat);
-			const QByteArray savedSizes = store.value(QStringLiteral("canvas/splitterSizes")).toByteArray();
-			if (!savedSizes.isEmpty()) splitter->restoreState(savedSizes);
-		}
-		QObject::connect(splitter, &QSplitter::splitterMoved, side, [=] {
-			QSettings store(studioSettingsPath(), QSettings::IniFormat);
-			store.setValue(QStringLiteral("canvas/splitterSizes"), splitter->saveState());
-		});
-		previewGrid->addWidget(splitter, 1, 0, 1, 2);
-		QPointer<QWidget> guardedPreview(nativePreview);
-		QPointer<QSplitter> guardedSplitter(splitter);
-		QPointer<QWidget> guardedContainer(previewContainer);
-		QObject::connect(side, &QObject::destroyed, previewContainer, [=] {
-			if (!guardedContainer || !guardedPreview || !guardedSplitter) return;
-			if (auto *grid = guardedContainer->findChild<QGridLayout *>(QStringLiteral("gridLayout"))) {
-				grid->removeWidget(guardedSplitter);
-				guardedPreview->setParent(guardedContainer);
-				grid->addWidget(guardedPreview, 1, 0, 1, 2);
-			}
-			guardedSplitter->deleteLater();
-		});
-	}
+	// No preview splitter, second OBSQTDisplay or adjacent GPU child window.
+	// RenderMain composes 16:9 and 9:16 on the existing native display.
 	// Dragging changes only this scene item's transform. Do not write an INI file
 	// on every mouse-move; persist once the user stops interacting.
 	auto *saveDelay = new QTimer(side);
@@ -1395,7 +1488,7 @@ void PortraitCanvas::edit(QWidget *parent)
 			showContext(selectedLayer(), nativePortraitTree->viewport()->mapToGlobal(position));
 		});
 	}
-	QObject::connect(side, &QObject::destroyed, mainWindow, [this] { editing = false; });
+	QObject::connect(side, &QObject::destroyed, mainWindow, [this] { editing = false; previewState.visible.store(false); });
 	const auto sourceListSignature = [=] {
 		QString state = sceneName;
 		for (const auto &layer : layers)
@@ -1437,10 +1530,13 @@ void PortraitCanvas::edit(QWidget *parent)
 	refreshList();
 	*lastSourceListSignature = sourceListSignature();
 	updateSelection();
-	side->show();
+	previewState.visible.store(true, std::memory_order_release);
+	if (auto *main = OBSBasic::Get()) main->RefreshXinkxPreviewLayout();
 }
 void PortraitCanvas::shutdown()
 {
+	previewState.visible.store(false, std::memory_order_release);
+	previewState.hasSelection.store(false);
 	if (scene) save();
 	// Stop display callbacks and scene-switch timers before releasing the libobs canvas.
 	if (auto *window = static_cast<QMainWindow *>(obs_frontend_get_main_window())) {
@@ -1451,13 +1547,19 @@ void PortraitCanvas::shutdown()
 		if (auto *editor = window->findChild<QWidget *>(QStringLiteral("xinkxPortraitEditor")))
 			delete editor;
 	}
-	if (canvas) {
-		obs_canvas_set_channel(canvas, 0, nullptr);
-		obs_canvas_remove(canvas);
-		obs_canvas_release(canvas);
+	obs_canvas_t *oldCanvas = nullptr;
+	{
+		// Do not wait for OBS graphics operations while holding this lock.
+		std::lock_guard<std::mutex> guard(previewSourceMutex);
+		oldCanvas = canvas;
+		canvas = nullptr;
+		scene = nullptr;
 	}
-	canvas = nullptr;
-	scene = nullptr;
+	if (oldCanvas) {
+		obs_canvas_set_channel(oldCanvas, 0, nullptr);
+		obs_canvas_remove(oldCanvas);
+		obs_canvas_release(oldCanvas);
+	}
 	layers.clear();
 	signature.clear();
 	sceneName.clear();
@@ -1475,12 +1577,14 @@ void PortraitCanvas::setViewMode(int mode)
 		landscape->show();
 	else if (auto *landscape = window->findChild<QWidget *>(QStringLiteral("previewContainer")))
 		landscape->show();
-	if (auto *portrait = window->findChild<QWidget *>(QStringLiteral("xinkxPortraitEditor")))
-		portrait->show();
+	// The hidden editor object owns input routing and the native SourceTree.
+	// Rendering uses the existing OBS preview widget, not this object.
 }
 
 void PortraitCanvas::closeEditor()
 {
+	previewState.visible.store(false, std::memory_order_release);
+	if (auto *main = OBSBasic::Get()) main->RefreshXinkxPreviewLayout();
 	if (auto *window = static_cast<QMainWindow *>(obs_frontend_get_main_window())) {
 		if (auto *landscape = window->findChild<QWidget *>(QStringLiteral("xinkxLandscapePane")))
 			landscape->show();

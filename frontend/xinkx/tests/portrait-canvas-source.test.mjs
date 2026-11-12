@@ -16,7 +16,9 @@ assert.match(portrait, /obs_canvas_set_channel\(canvas, 0, obs_scene_get_source\
 assert.match(portrait, /obs_scene_add\(scene, source\.source\)/);
 assert.match(portrait, /obs_sceneitem_set_info2\(item, &info\)/);
 assert.match(portrait, /store\.setValue\(storeKey\(sceneName\)/);
-assert.match(portrait, /class PortraitDisplay : public OBSQTDisplay/);
+assert.match(portrait, /class PortraitDisplay : public QWidget/);
+assert.doesNotMatch(portrait, /class PortraitDisplay : public OBSQTDisplay/);
+assert.match(portrait, /PortraitCanvas::renderPreview/);
 assert.match(outputs, /account\.destination\.portrait \? PortraitCanvas::instance\(\)\.video\(\) : obs_get_video\(\)/);
 assert.match(outputs, /obs_encoder_set_video\(encoder, video \? video : obs_get_video\(\)\)/);
 assert.match(settings, /Редактировать вертикальную композицию/);

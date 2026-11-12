@@ -24,10 +24,10 @@ for (const term of [
   'gs_draw_quadf(nullptr',
   'gs_set_viewport(0, 0, cx, cy)',
   'xinkxPortraitSourcesWorkspace',
-  'xinkxCanvasSplitter',
-  'splitter->addWidget(nativePreview)',
-  'splitter->addWidget(side)',
-  'guardedSplitter->deleteLater()',
+  'PortraitCanvas::portraitPreviewRegion',
+  'nativePreview->installEventFilter(this)',
+  'previewState.visible.store(true',
+  'PortraitCanvas::renderPreview',
   'xinkxPortraitSourceList',
   'xinkxSourcesSplitter',
   'xinkxPortraitNativeSourceTree',
@@ -55,6 +55,7 @@ assert.doesNotMatch(canvas, /xinkxSourceCanvasTabs/);
 assert.doesNotMatch(canvas, /xinkxUnifiedSourcesWorkspace/);
 assert.doesNotMatch(canvas, /xinkxLandscapeSourceMode/);
 assert.doesNotMatch(canvas, /xinkxPortraitSourceMode/);
+assert.doesNotMatch(canvas, /xinkxCanvasSplitter/);
 assert.match(canvas, /guardedFrame->setParent\(guardedContents\)/);
 assert.match(canvas, /obs_sceneitem_remove\(layer\.item\)/);
 assert.doesNotMatch(canvas, /on_actionRemoveSource_triggered/);

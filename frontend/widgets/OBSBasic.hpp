@@ -873,6 +873,8 @@ private slots:
 	void TogglePreview();
 
 public:
+	// Recalculate the native 16:9 viewport when the 9:16 viewport opens/closes.
+	void RefreshXinkxPreviewLayout();
 	inline void GetDisplayRect(int &x, int &y, int &cx, int &cy)
 	{
 		x = previewX;

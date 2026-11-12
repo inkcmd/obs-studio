@@ -10,12 +10,11 @@ const dialog = read('../../dialogs/OBSBasicSourceSelect.cpp');
 const youtube = read('../ChatGateway.cpp');
 const broadcast = read('../BroadcastWorkspace.cpp');
 
-// Both OBS GPU previews are inside the original central grid, not an
-// independently titled or differently coloured portrait sidecar.
-assert.match(portrait, /previewGrid->removeWidget\(nativePreview\)/);
-assert.match(portrait, /splitter->addWidget\(nativePreview\)/);
-assert.match(portrait, /splitter->addWidget\(side\)/);
-assert.match(portrait, /previewGrid->addWidget\(splitter, 1, 0, 1, 2\)/);
+// One OBSQTDisplay presents both GPU viewports; no secondary render surface.
+assert.match(portrait, /new PortraitDisplay\(nativePreview, side\)/);
+assert.match(portrait, /PortraitCanvas::renderPreview/);
+assert.doesNotMatch(portrait, /new QSplitter\(Qt::Horizontal/);
+assert.doesNotMatch(portrait, /class PortraitDisplay : public OBSQTDisplay/);
 assert.doesNotMatch(portrait, /Вертикальный холст · 9:16/);
 assert.doesNotMatch(portrait, /0\.38f, 0\.51f, 0\.65f/);
 

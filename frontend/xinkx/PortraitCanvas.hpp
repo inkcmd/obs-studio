@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include <QString>
 #include <QVector>
 
@@ -16,6 +18,18 @@ public:
 	static PortraitCanvas &instance();
 	video_t *video();
 	void sync();
+	// Two viewports on OBS's existing display; the portrait video mix remains separate.
+	struct PreviewRegion {
+		int x, y, width, height;
+		bool contains(float px, float py) const
+		{
+			return px >= x && px < x + width && py >= y && py < y + height;
+		}
+	};
+	static int landscapePreviewWidth(int displayWidth);
+	static PreviewRegion portraitPreviewRegion(int displayWidth, int displayHeight);
+	bool previewVisible() const;
+	void renderPreview(uint32_t displayWidth, uint32_t displayHeight) const;
 	// OBS duplicates the horizontal scene separately; clone the portrait
 	// layout at the same time, retaining independent transform storage.
 	void duplicateLayout(const QString &fromScene, const QString &toScene);

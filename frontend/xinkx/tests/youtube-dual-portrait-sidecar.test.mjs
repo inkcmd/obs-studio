@@ -17,7 +17,7 @@ for (const text of [
 
 for (const text of [
   'xinkxPortraitEditor',
-  'previewGrid->addWidget(splitter, 1, 0, 1, 2)',
+  'PortraitCanvas::renderPreview',
   'preview->pressed =',
   'preview->resized =',
   'obs_sceneitem_get_box_transform',
@@ -27,6 +27,6 @@ for (const text of [
   'Создать XINKX',
   'obs_frontend_open_source_properties',
   'delete editor;',
-]) assert.ok(portrait.includes(text), `missing portrait sidecar behavior: ${text}`);
+]) assert.ok(portrait.includes(text), `missing portrait unified-GPU behavior: ${text}`);
 
 console.log('XINKX dual-mode YouTube OAuth and shared preview-container portrait canvas source contract OK');
