@@ -22,6 +22,9 @@ target_sources(
     xinkx/LocalAssistants.hpp
     xinkx/EngineRegistry.cpp
     xinkx/EngineRegistry.hpp
+    xinkx/RecordingEngine.cpp
+    xinkx/RecordingEngine.hpp
+    xinkx/RecordingWorkspace.cpp
     xinkx/MultiStreamManager.cpp
     xinkx/MultiStreamManager.hpp
     xinkx/PortraitCanvas.cpp

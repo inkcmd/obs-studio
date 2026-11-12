@@ -1,6 +1,7 @@
 #include "OBSBasicControls.hpp"
 #include "OBSBasic.hpp"
 #include "qt-wrappers.hpp"
+#include <xinkx/RecordingEngine.hpp>
 
 #include <QKeySequence>
 #include <QSizePolicy>
@@ -26,6 +27,19 @@ OBSBasicControls::OBSBasicControls(OBSBasic *main) : QFrame(nullptr), ui(new Ui:
 	auto *accountMenu = new QMenu(accounts);
 	accounts->setMenu(accountMenu);
 	ui->horizontalLayout_7->insertWidget(1, accounts);
+
+	// Configuration belongs to the stock Record control, not to OBS source filters.
+	auto *recordOptions = new QToolButton(this);
+	recordOptions->setObjectName(QStringLiteral("xinkxRecordingOptions"));
+	recordOptions->setText(QStringLiteral("▾"));
+	recordOptions->setToolTip(QStringLiteral("Настройки отдельных записей"));
+	recordOptions->setMinimumSize(32, 28);
+	recordOptions->setPopupMode(QToolButton::InstantPopup);
+	auto *recordMenu = new QMenu(recordOptions);
+	auto *editRecording = recordMenu->addAction(QStringLiteral("Настроить записи…"));
+	connect(editRecording, &QAction::triggered, this, [main] { xinkx::showRecordingSettings(main); });
+	recordOptions->setMenu(recordMenu);
+	ui->recordingLayout->insertWidget(1, recordOptions);
 	connect(accountMenu, &QMenu::aboutToShow, this, [main, accountMenu] { main->ShowStreamAccountsMenu(accountMenu); });
 
 	streamButtonMenu.reset(new QMenu());
@@ -313,4 +327,16 @@ void OBSBasicControls::EnableVirtualCamButtons()
 {
 	ui->virtualCamButton->setVisible(true);
 	ui->virtualCamConfigButton->setVisible(true);
+}
+
+void OBSBasicControls::SetXinkxRecording(bool active)
+{
+	// Do not fake stock RecordingStarted: that signal also controls statusbar and OBS API.
+	if (active) {
+		setClasses(ui->recordButton, "state-active");
+		ui->recordButton->setText(QTStr("Basic.Main.StopRecording"));
+	} else {
+		setClasses(ui->recordButton, "");
+		ui->recordButton->setText(QTStr("Basic.Main.StartRecording"));
+	}
 }

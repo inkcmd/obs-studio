@@ -50,6 +50,7 @@ private slots:
 	void EnableVirtualCamButtons();
 
 public:
+	void SetXinkxRecording(bool active);
 	OBSBasicControls(OBSBasic *main);
 	inline ~OBSBasicControls() {}
 

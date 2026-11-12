@@ -18,6 +18,7 @@
 ******************************************************************************/
 
 #include "OBSBasic.hpp"
+#include <xinkx/RecordingEngine.hpp>
 
 #include <components/UIValidation.hpp>
 #include <dialogs/OBSRemux.hpp>
@@ -256,6 +257,10 @@ void OBSBasic::RecordingFileChanged(QString lastRecordingPath)
 
 void OBSBasic::RecordActionTriggered()
 {
+	if (!xinkx::recordingJobsNativeOnly()) {
+		xinkx::toggleRecordingJobs(this);
+		return;
+	}
 	if (outputHandler->RecordingActive()) {
 		bool confirm = config_get_bool(App()->GetUserConfig(), "BasicWindow", "WarnBeforeStoppingRecord");
 
