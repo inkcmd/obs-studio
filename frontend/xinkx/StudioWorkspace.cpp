@@ -305,13 +305,6 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	auto *openProperties = new QPushButton(QStringLiteral("Свойства источника"), content);
 	openProperties->setEnabled(false);
 	layout->addWidget(openProperties);
-	auto *overlaySource = new QPushButton(QStringLiteral("Открыть каталог источников XINKX"), content);
-	overlaySource->setToolTip(QStringLiteral("Выбрать чат, рамку, реакцию или свой пресет с предпросмотром."));
-	layout->addWidget(overlaySource);
-	QObject::connect(overlaySource, &QPushButton::clicked, mainWindow, [mainWindow] {
-		auto *runtime = mainWindow->findChild<OverlayRuntime *>(QStringLiteral("xinkxOverlayRuntime"));
-		if (runtime) runtime->showCatalog(mainWindow, mainWindow);
-	});
 	guardWheelFields(content);
 	scroll->setWidget(content);
 	inspector->setWidget(scroll);

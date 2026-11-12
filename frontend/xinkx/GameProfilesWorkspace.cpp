@@ -254,8 +254,12 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 			profile.value(QStringLiteral("kickCategoryName")).toString());
 		selectSaved(youtube, profile.value(QStringLiteral("youtubeCategory")).toString(),
 			profile.value(QStringLiteral("youtubeCategoryName")).toString());
-		selectSaved(youtubeEvent, profile.value(QStringLiteral("youtubeBroadcast")).toString(),
-			profile.value(QStringLiteral("youtubeBroadcastName")).toString());
+		// Do not insert a stale broadcast title from a profile into the live
+		// options. Only the API-verified list can offer a selectable ID.
+		const QString wantedBroadcast = profile.value(QStringLiteral("youtubeBroadcast")).toString();
+		youtubeEvent->setProperty("xinkxPendingBroadcastId", wantedBroadcast);
+		const int broadcastIndex = youtubeEvent->findData(wantedBroadcast);
+		youtubeEvent->setCurrentIndex(broadcastIndex > 0 ? broadcastIndex : 0);
 	};
 	QObject::connect(profiles, &QComboBox::currentIndexChanged, group, load);
 	QObject::connect(profiles, &QComboBox::currentIndexChanged, group, [=] {
@@ -275,8 +279,10 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 	auto attempts = std::make_shared<int>(0);
 	QObject::connect(awaitScenes, &QTimer::timeout, group, [=] {
 		if (scene->count() > 1 || ++*attempts > 75) { awaitScenes->stop(); return; }
-		load();
-		if (scene->count() > 1) awaitScenes->stop();
+		// Do not reset the whole broadcast editor (and the verified YouTube
+		// selection) every 400 ms while waiting for OBS scenes to load.
+		refreshScenes(scene);
+		if (scene->count() > 1) { load(); awaitScenes->stop(); }
 	});
 	awaitScenes->start();
 	QObject::connect(newProfile, &QPushButton::clicked, group, [=] {

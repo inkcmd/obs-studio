@@ -676,7 +676,9 @@ void ChatGateway::inspectBroadcast(const QString &id, const QString &youtubeBroa
 				const auto item = entry.toObject();
 				const auto status = item.value(QStringLiteral("status")).toObject();
 				const QString lifecycle = status.value(QStringLiteral("lifeCycleStatus")).toString();
-				if (lifecycle == QStringLiteral("complete") || lifecycle == QStringLiteral("revoked")) continue;
+				if (lifecycle != QStringLiteral("live") && lifecycle != QStringLiteral("liveStarting") &&
+				    lifecycle != QStringLiteral("ready") && lifecycle != QStringLiteral("created") &&
+				    lifecycle != QStringLiteral("testing") && lifecycle != QStringLiteral("testStarting")) continue;
 				const auto snippet = item.value(QStringLiteral("snippet")).toObject();
 				const QJsonObject value{{QStringLiteral("id"), item.value(QStringLiteral("id"))},
 					{QStringLiteral("title"), snippet.value(QStringLiteral("title"))},
@@ -702,6 +704,8 @@ void ChatGateway::inspectBroadcast(const QString &id, const QString &youtubeBroa
 			QJsonObject output = selected;
 			output.insert(QStringLiteral("platform"), QStringLiteral("youtube"));
 			output.insert(QStringLiteral("broadcasts"), broadcasts);
+			if (!lookup->errors.isEmpty())
+				output.insert(QStringLiteral("lookupWarnings"), lookup->errors.join(QStringLiteral("; ")));
 			const QString boundStreamId = selected.value(QStringLiteral("boundStreamId")).toString();
 			if (boundStreamId.isEmpty()) {
 				emit broadcastInfo(id, output);
@@ -1097,6 +1101,7 @@ void ChatGateway::pollYouTube(const QString &id)
 	const QString url = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts"),
 		{{QStringLiteral("part"), QStringLiteral("snippet,status")},
 		 {QStringLiteral("broadcastStatus"), QStringLiteral("active")},
+		 {QStringLiteral("broadcastType"), QStringLiteral("all")},
 		 {QStringLiteral("maxResults"), QStringLiteral("50")}});
 	authorized(id, url, {}, [this, id](const HttpResult &result) {
 		if (!youtube.contains(id)) return;

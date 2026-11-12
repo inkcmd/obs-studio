@@ -364,6 +364,9 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 	});
 	QObject::connect(gateway, &ChatGateway::broadcastInfo, panel, [=](const QString &id, const QJsonObject &info) {
 		const QString platform = info.value(QStringLiteral("platform")).toString();
+		// Portrait and landscape outputs may use the same channel. Only one
+		// account is allowed to update the shared YouTube event picker.
+		if (platform == QStringLiteral("youtube") && id != youtubeAccount().id) return;
 		const QString actualTitle = info.value(QStringLiteral("title")).toString();
 		const QString actualDescription = info.value(QStringLiteral("description")).toString();
 		const QString actualGame = info.value(QStringLiteral("categoryName")).toString();
@@ -392,36 +395,56 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 		if (selectedId.isEmpty()) youtubeIds->remove(id);
 		else (*youtubeIds)[id] = selectedId;
 		const QSignalBlocker blocked(youtubeEvent);
-		const QString previously = !youtubeEvent->currentData().toString().isEmpty()
+		const QString pending = youtubeEvent->property("xinkxPendingBroadcastId").toString();
+		const QString previously = !pending.isEmpty() ? pending :
+			!youtubeEvent->currentData().toString().isEmpty()
 			? youtubeEvent->currentData().toString()
 			: local->value(key(QStringLiteral("youtubeBroadcast"))).toString();
+		youtubeEvent->setProperty("xinkxPendingBroadcastId", QString{});
 		youtubeEvent->clear();
 		youtubeEvent->addItem(QStringLiteral("Выберите эфир YouTube"), QString{});
 		for (const auto &entry : info.value(QStringLiteral("broadcasts")).toArray()) {
 			const auto item = entry.toObject();
 			const QString lifecycle = item.value(QStringLiteral("lifecycle")).toString();
+			const QString eventId = item.value(QStringLiteral("id")).toString();
+			if (eventId.isEmpty() || (lifecycle != QStringLiteral("live") &&
+				lifecycle != QStringLiteral("liveStarting") &&
+				lifecycle != QStringLiteral("ready") &&
+				lifecycle != QStringLiteral("created") &&
+				lifecycle != QStringLiteral("testing") &&
+				lifecycle != QStringLiteral("testStarting"))) continue;
+			if (youtubeEvent->findData(eventId) > 0) continue;
 			const QString label = item.value(QStringLiteral("title")).toString();
 			youtubeEvent->addItem(lifecycle == QStringLiteral("live")
-				? QStringLiteral("● LIVE · %1").arg(label) : label,
-				item.value(QStringLiteral("id")).toString());
+				? QStringLiteral("● LIVE · %1").arg(label) : label, eventId);
 		}
 		// Prefer the current live/bound event found by the gateway. A profile
 		// may still explicitly name another upcoming event, and it remains
 		// available in the list for deliberate manual selection.
 		const int previousIndex = youtubeEvent->findData(previously);
 		const int activeIndex = youtubeEvent->findData(selectedId);
-		if (activeIndex > 0) youtubeEvent->setCurrentIndex(activeIndex);
-		else if (previousIndex > 0) youtubeEvent->setCurrentIndex(previousIndex);
+		// Preserve an explicitly chosen scheduled broadcast; otherwise use
+		// the sole unambiguous live or configured event reported by the API.
+		if (previousIndex > 0) youtubeEvent->setCurrentIndex(previousIndex);
+		else if (activeIndex > 0) youtubeEvent->setCurrentIndex(activeIndex);
 		else if (!previously.isEmpty()) {
-			youtubeHealth->setText(QStringLiteral("Сохранённый ID больше не относится к активным "
-				"или запланированным эфирам. Выбери актуальный эфир YouTube."));
-			local->remove(key(QStringLiteral("youtubeBroadcast")));
-			local->remove(key(QStringLiteral("youtubeBroadcastName")));
-			flush->start();
+			youtubeHealth->setText(info.contains(QStringLiteral("lookupWarnings"))
+				? QStringLiteral("Не удалось проверить все эфиры YouTube: %1")
+					.arg(info.value(QStringLiteral("lookupWarnings")).toString())
+				: QStringLiteral("Сохранённый эфир завершён или недоступен. Выбери "
+					"актуальный эфир YouTube."));
+			if (!info.contains(QStringLiteral("lookupWarnings"))) {
+				local->remove(key(QStringLiteral("youtubeBroadcast")));
+				local->remove(key(QStringLiteral("youtubeBroadcastName")));
+				flush->start();
+			}
 		} else if (youtubeEvent->count() == 1) {
 			youtubeHealth->setText(QStringLiteral("На подключённом YouTube-канале нет активных "
 				"или запланированных эфиров. Создай эфир в YouTube Studio."));
 		}
+		if (info.contains(QStringLiteral("lookupWarnings")) && youtubeEvent->currentIndex() > 0)
+			youtubeHealth->setText(QStringLiteral("YouTube: часть списка недоступна: %1")
+				.arg(info.value(QStringLiteral("lookupWarnings")).toString()));
 		const QString currentId = youtubeEvent->currentData().toString();
 		if (!currentId.isEmpty() && currentId == selectedId) {
 			QStringList diagnostics;
@@ -447,7 +470,7 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 			}
 			youtubeHealth->setText(diagnostics.join(QLatin1Char('\n')));
 		}
-		if (!youtubeEvent->currentData().toString().isEmpty() && activeIndex > 0) {
+		if (!youtubeEvent->currentData().toString().isEmpty()) {
 			local->setValue(key(QStringLiteral("youtubeBroadcast")), youtubeEvent->currentData().toString());
 			local->setValue(key(QStringLiteral("youtubeBroadcastName")), youtubeEvent->currentText());
 			flush->start();
@@ -456,6 +479,8 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 
 	QObject::connect(gateway, &ChatGateway::broadcastResult, panel, [=](const QString &id, const QString &message, bool success) {
 		writeDiagnostic(QStringLiteral("broadcast:%1:%2").arg(id, success ? QStringLiteral("ok") : QStringLiteral("error")), message);
+		if (!success && id == youtubeAccount().id && message.startsWith(QStringLiteral("YouTube:")))
+			youtubeHealth->setText(message);
 		(*report)[id] = message + warnings->value(id);
 		QStringList lines;
 		for (const auto &account : gateway->accounts())

@@ -18,6 +18,7 @@
 
 #include "OBSApp.hpp"
 #include "OBSBasicSourceSelect.hpp"
+#include <xinkx/OverlayRuntime.hpp>
 
 #include <utility/ResizeSignaler.hpp>
 #include <utility/ThumbnailManager.hpp>
@@ -26,6 +27,17 @@
 #include "qt-wrappers.hpp"
 
 #include <QList>
+#include <QGroupBox>
+#include <QHBoxLayout>
+#include <QJsonDocument>
+#include <QListWidget>
+#include <QPushButton>
+#include <QVBoxLayout>
+#include <QIcon>
+#include <QScrollBar>
+#include <QUuid>
+#include <QLabel>
+#include <algorithm>
 #include <QMessageBox>
 
 #include "moc_OBSBasicSourceSelect.cpp"
@@ -237,6 +249,105 @@ OBSBasicSourceSelect::OBSBasicSourceSelect(OBSBasic *parent, undo_stack &undo_s,
 	setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
 
 	ui->setupUi(this);
+
+	// Both native Source dialogs (horizontal and portrait) use this same
+	// example picker. No separate XINKX catalog window is needed.
+	const auto examples = xinkx::sourcePresetExamples();
+	if (!examples.isEmpty()) {
+		auto *group = new QGroupBox(QStringLiteral("Примеры источников XINKX"), this);
+		group->setObjectName(QStringLiteral("xinkxInlineSourceExamples"));
+		auto *column = new QVBoxLayout(group);
+		column->setContentsMargins(8, 5, 8, 5);
+		auto *list = new QListWidget(group);
+		list->setObjectName(QStringLiteral("xinkxInlinePresetList"));
+		list->setViewMode(QListView::IconMode);
+		list->setFlow(QListView::LeftToRight);
+		list->setWrapping(false);
+		list->setIconSize(QSize(112, 63));
+		list->setGridSize(QSize(154, 106));
+		list->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+		list->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+		list->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+		list->setFixedHeight(127);
+		for (qsizetype i = 0; i < examples.size(); ++i) {
+			const auto &example = examples.at(i);
+			auto *item = new QListWidgetItem(QIcon(example.preview), example.title, list);
+			item->setData(Qt::UserRole, static_cast<int>(i));
+			item->setToolTip(example.description);
+			item->setTextAlignment(Qt::AlignCenter);
+		}
+		column->addWidget(list);
+		auto *buttons = new QHBoxLayout();
+		auto *description = new QLabel(QStringLiteral("Выбери готовый пример или свой пресет"), group);
+		description->setWordWrap(true);
+		buttons->addWidget(description, 1);
+		auto *add = new QPushButton(QStringLiteral("Добавить пример на сцену"), group);
+		add->setEnabled(false);
+		buttons->addWidget(add);
+		column->addLayout(buttons);
+		connect(list, &QListWidget::currentItemChanged, this, [=](QListWidgetItem *item) {
+			add->setEnabled(item != nullptr);
+			if (item) description->setText(examples.at(item->data(Qt::UserRole).toInt()).description);
+		});
+		const auto addExample = [=] {
+			const auto *item = list->currentItem();
+			if (!item) return;
+			const auto &example = examples.at(item->data(Qt::UserRole).toInt());
+			const QByteArray type = (example.layer == QStringLiteral("effects") ? "xinkx_reactions" :
+				example.layer == QStringLiteral("frame") ? "xinkx_frame" :
+				example.layer == QStringLiteral("chat") ? "xinkx_chat" :
+				example.layer == QStringLiteral("alerts") ? "xinkx_alerts" :
+				example.layer == QStringLiteral("timer") ? "xinkx_timer" :
+				example.layer == QStringLiteral("viewers") ? "xinkx_viewers" : "browser_source");
+			QJsonObject settings = example.settings;
+			obs_video_info video{};
+			if (!obs_get_video_info(&video)) return;
+			const int width = example.layer == QStringLiteral("chat") ? 720 :
+				example.layer == QStringLiteral("timer") ? 480 :
+				example.layer == QStringLiteral("alerts") ? 960 :
+				example.layer == QStringLiteral("viewers") ? 520 :
+				example.layer == QStringLiteral("frame") ? 800 : static_cast<int>(video.base_width);
+			const int height = example.layer == QStringLiteral("chat") ? 560 :
+				example.layer == QStringLiteral("timer") ? 180 :
+				example.layer == QStringLiteral("alerts") ? 440 :
+				example.layer == QStringLiteral("viewers") ? 100 :
+				example.layer == QStringLiteral("frame") ? 450 : static_cast<int>(video.base_height);
+			if (!settings.contains(QStringLiteral("width"))) settings.insert(QStringLiteral("width"), width);
+			if (!settings.contains(QStringLiteral("height"))) settings.insert(QStringLiteral("height"), height);
+			if (settings.value(QStringLiteral("reaction")).toString() == QStringLiteral("custom"))
+				settings.insert(QStringLiteral("reaction"), QStringLiteral("custom-") +
+					QUuid::createUuid().toString(QUuid::WithoutBraces).left(8));
+			const QByteArray json = QJsonDocument(settings).toJson(QJsonDocument::Compact);
+			OBSDataAutoRelease data = obs_data_create_from_json(json.constData());
+			if (!data) return;
+			std::string name = getNewSourceName(QStringLiteral("XINKX · %1").arg(example.title).toStdString());
+			OBSSourceAutoRelease source = obs_source_create(type.constData(), name.c_str(), data, nullptr);
+			if (!source) {
+				QMessageBox::warning(this, QStringLiteral("XINKX"),
+					QStringLiteral("Тип источника XINKX недоступен в этой сборке OBS"));
+				return;
+			}
+			if (targetSceneAdd) {
+				targetSceneAdd(source, true);
+			} else {
+				OBSBasic *main = OBSBasic::Get();
+				OBSScene scene = main->GetCurrentScene();
+				if (!scene) return;
+				OBSData before = OBSBasic::BackupScene(scene);
+				const auto added = setupExistingSource(obs_source_get_uuid(source),
+					ui->sourceVisible->isChecked(), false);
+				if (!added.has_value()) return;
+				OBSData after = OBSBasic::BackupScene(scene);
+				main->CreateSceneUndoRedoAction(QStringLiteral("XINKX: добавить ") + example.title,
+					before, after);
+			}
+			close();
+		};
+		connect(add, &QPushButton::clicked, this, addExample);
+		connect(list, &QListWidget::itemDoubleClicked, this, [=](QListWidgetItem *) { addExample(); });
+		ui->verticalLayout_7->addWidget(group);
+		resize(width(), std::min(900, height() + 215));
+	}
 
 	existingFlowLayout = ui->existingListFrame->flowLayout();
 	existingFlowLayout->setContentsMargins(0, 0, 0, 0);

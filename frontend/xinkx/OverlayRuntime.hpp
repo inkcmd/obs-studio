@@ -2,6 +2,9 @@
 
 #include <QHash>
 #include <QJsonObject>
+#include <QList>
+#include <QPixmap>
+#include <QString>
 #include <QObject>
 #include <QSet>
 #include <QTcpServer>
@@ -13,6 +16,17 @@ class QWidget;
 class OBSBasic;
 
 namespace xinkx {
+
+// Shared with OBS's native Add Source dialog. Preview images and settings come
+// from the same catalog as user-saved XINKX presets.
+struct SourcePresetExample {
+	QString title;
+	QString description;
+	QString layer;
+	QJsonObject settings;
+	QPixmap preview;
+};
+QList<SourcePresetExample> sourcePresetExamples();
 
 // One in-process event bridge shared by overlays, reactions and future chat/alerts.
 // The only listener is loopback; no Node, Kubernetes or external overlay service.

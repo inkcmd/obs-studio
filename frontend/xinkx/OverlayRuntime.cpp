@@ -313,6 +313,15 @@ QPixmap catalogPreview(const SourcePreset &item)
 
 } // namespace
 
+QList<SourcePresetExample> sourcePresetExamples()
+{
+	QList<SourcePresetExample> result;
+	for (const auto &entry : catalogPresets())
+		result.append({entry.title, entry.description, entry.layer, entry.settings,
+			catalogPreview(entry)});
+	return result;
+}
+
 OverlayRuntime::OverlayRuntime(QObject *parent) : QObject(parent)
 {
 	connect(&listener, &QTcpServer::newConnection, this, &OverlayRuntime::acceptConnections);
@@ -1100,19 +1109,13 @@ void installOverlayWorkspace(OBSBasic *mainWindow, QDockWidget *sourceInspector)
 		metrics->setToolTip(QStringLiteral("Журнал событий хранится локально; старые события не повторяются после запуска"));
 		layout->addWidget(metrics);
 	}
-	auto *catalogButton = new QPushButton(QStringLiteral("Каталог источников · чаты, реакции, рамки"), content);
-	layout->addWidget(catalogButton);
-	QObject::connect(catalogButton, &QPushButton::clicked, dock, [=] {
-		runtime->showCatalog(mainWindow, dock);
-	});
 	auto *shapeButton = new QPushButton(QStringLiteral("Нарисовать элемент · фигура, контур, градиент"), content);
 	layout->addWidget(shapeButton);
 	QObject::connect(shapeButton, &QPushButton::clicked, dock, [=] {
 		showShapeCreator(mainWindow, dock);
 	});
-	auto *sourceHint = new QLabel(QStringLiteral("Выбери оформление в каталоге, посмотри пример и добавь на сцену. "
-		"Перемещай и меняй размер за маркеры в предпросмотре OBS. "
-		"Настройки каждого источника и свои пресеты сохраняются отдельно."), content);
+	auto *sourceHint = new QLabel(QStringLiteral("Примеры чата, реакций, рамок и сохранённые пресеты доступны "
+		"внизу штатного окна «Источники → +». После добавления редактируй их на холсте OBS."), content);
 	sourceHint->setWordWrap(true);
 	layout->addWidget(sourceHint);
 	auto *testSelected = new QPushButton(QStringLiteral("Проверить выделенный источник на сцене"), content);
