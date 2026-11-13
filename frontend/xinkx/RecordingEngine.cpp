@@ -91,6 +91,7 @@ struct Run {
 	OBSEncoderAutoRelease audioEncoder;
 	OBSSource source;
 	obs_view_t *view = nullptr;
+	QString outputPath;
 	bool started = false;
 	bool stopping = false;
 	QElapsedTimer created;
@@ -175,6 +176,21 @@ public:
 		return std::any_of(runs.begin(), runs.end(), [&id](const auto &run) {
 			return run->job.id == id && run->output && obs_output_active(run->output);
 		});
+	}
+
+	QJsonArray sessions() const
+	{
+		QJsonArray result;
+		for (const auto &run : runs) {
+			if (!run->started || !run->output || !obs_output_active(run->output) ||
+			    !run->created.isValid()) continue;
+			result.append(QJsonObject{
+				{QStringLiteral("jobId"), run->job.id},
+				{QStringLiteral("name"), run->job.name},
+				{QStringLiteral("file"), run->outputPath.left(1024)},
+				{QStringLiteral("elapsedMs"), static_cast<double>(run->created.elapsed())}});
+		}
+		return result;
 	}
 
 	void toggleJob(const RecordingJob &job)
@@ -325,7 +341,8 @@ private:
 		const QString filename = safeFileName(job.name) + QLatin1Char('_') +
 			QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss-zzz")) + QLatin1Char('.') + ext;
 		OBSDataAutoRelease outputSettings = obs_data_create();
-		obs_data_set_string(outputSettings, "path", QDir(directory).filePath(filename).toUtf8().constData());
+		run->outputPath = QDir(directory).filePath(filename);
+		obs_data_set_string(outputSettings, "path", run->outputPath.toUtf8().constData());
 		run->output = obs_output_create("ffmpeg_muxer", (QByteArray("xinkx_rec_") + id).constData(), outputSettings, nullptr);
 		if (!run->output) {
 			errors << QStringLiteral("%1: ffmpeg_muxer недоступен").arg(job.name);
@@ -471,6 +488,23 @@ bool recordingJobActive(OBSBasic *main, const QString &id)
 	for (const auto &job : loadRecordingJobs())
 		if (job.id == id && job.kind == QStringLiteral("obs")) return main->RecordingActive();
 	return false;
+}
+
+QJsonArray activeRecordingSessions(OBSBasic *main)
+{
+	QJsonArray sessions;
+	if (!main) return sessions;
+	if (auto *instance = static_cast<RecordingEngine *>(main->findChild<QObject *>(
+		QStringLiteral("xinkxRecordingEngine"), Qt::FindDirectChildrenOnly)))
+		sessions = instance->sessions();
+	if (main->RecordingActive()) {
+		sessions.append(QJsonObject{
+			{QStringLiteral("jobId"), QStringLiteral("obs-primary")},
+			{QStringLiteral("name"), QStringLiteral("Основная запись OBS")},
+			{QStringLiteral("file"), QString()},
+			{QStringLiteral("elapsedMs"), -1}});
+	}
+	return sessions;
 }
 
 void toggleRecordingJob(OBSBasic *main, const QString &id)

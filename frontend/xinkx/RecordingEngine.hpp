@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QString>
+#include <QJsonArray>
 #include <QVector>
 
 class OBSBasic;
@@ -36,6 +37,9 @@ void stopRecordingJobs(OBSBasic *main);
 void refreshRecordingButton(OBSBasic *main);
 bool recordingJobsNativeOnly();
 bool recordingJobActive(OBSBasic *main, const QString &id);
+// Snapshot of active jobs for montage markers. elapsedMs counts from the
+// output start request; it is not a frame-accurate encoded-video PTS.
+QJsonArray activeRecordingSessions(OBSBasic *main);
 void toggleRecordingJob(OBSBasic *main, const QString &id);
 
 } // namespace xinkx

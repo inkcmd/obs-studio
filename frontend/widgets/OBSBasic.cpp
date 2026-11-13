@@ -48,6 +48,7 @@
 #include <widgets/OBSProjector.hpp>
 #include <xinkx/StudioWorkspace.hpp>
 #include <xinkx/RecordingEngine.hpp>
+#include <xinkx/EngineRegistry.hpp>
 #include <xinkx/MultiStreamManager.hpp>
 
 #include <OBSStudioAPI.hpp>
@@ -2080,6 +2081,7 @@ void OBSBasic::closeWindow()
 
 	/* Clear all scene data (dialogs, widgets, widget sub-items, scenes,
 	 * sources, etc) so that all references are released before shutdown */
+	xinkx::shutdownEngineServices(this);
 	xinkx::stopRecordingJobs(this);
 	xinkx::shutdownStudioOutputs(this);
 	ClearSceneData();

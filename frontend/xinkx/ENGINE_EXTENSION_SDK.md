@@ -86,3 +86,51 @@ RecordingEngine job file/PTS would be required for frame-accurate editing.
 - Keep automatic event markers off; confirm no auto marks appear.
 - Close XINKX normally and confirm no crash reports. The sandbox cannot
   validate native MSVC runtime behavior.
+
+## Engine Platform v2 — action schemas and lifecycle
+
+New engines can provide `start(QString *error)` and `stop()` to acquire and
+release resources. `EngineRegistry` starts an extension only after validating
+its ID, action names, and argument schemas. Only running extensions receive
+live EventCore events or commands. `shutdownEngineServices` is called before
+OBS frees its scene data; cleanup is idempotent and extensions stop in reverse
+registration order. Legacy engines that are not yet `EngineExtension`
+adapters keep their existing lifecycle; they are **not** started twice.
+
+An action may now declare typed `EngineArgument` entries in the optional
+`arguments` field while retaining v1's `argumentKey`, `argumentType`, and
+`defaults` for existing saved rules. Parameter types: `text`, `seconds`,
+`boolean`, `choice`. Text has a maximum length, seconds have a bounded integer
+range, and choices use an allowlist. Arguments are checked by the registry
+before dispatch. The manual **Действия** tab and EventAutomation's rule editor
+both use `EngineActionForm`, so no per-engine form needs to be added. Manual-only
+actions still cannot run from event rules.
+
+Example two-argument declaration (conceptual):
+
+```cpp
+return {{QStringLiteral("example.message"), QStringLiteral("Сообщение"), true,
+         {}, {}, {}, {
+             {QStringLiteral("text"), QStringLiteral("Текст"),
+              QStringLiteral("text"), true, 0, 160},
+             {QStringLiteral("enabled"), QStringLiteral("Включено"),
+              QStringLiteral("boolean")}}}};
+```
+
+Existing OBS commands have typed schemas in `StudioCommandsExtension`.
+`markers.add` has a required label. Invalid argument types, missing required
+values, and unregistered fields are rejected before entering a handler.
+
+## Marker association with active recordings
+
+Markers created during independent recordings now also store `jobId`, job
+name, current output file, and elapsed milliseconds for each active output.
+The CSV export preserves the original five columns and appends
+`recording_job`, `recording_file`, `recording_elapsed_ms`. Multiple concurrent
+recordings create multiple rows for the same marker. Old marker JSON loads
+without these fields. Stock OBS recording appears as a named active session,
+but its actual file path/timecode are not tracked by this patch.
+
+This elapsed time is computed at marker creation after an output start request;
+it is **not** a sample-accurate or frame-accurate muxer PTS. Timeline alignment
+requires verification against the recorded media before frame-precise editing.

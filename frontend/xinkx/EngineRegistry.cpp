@@ -1,4 +1,5 @@
 #include "EngineRegistry.hpp"
+#include "EngineActionForm.hpp"
 
 #include "AlertEngine.hpp"
 #include "ChatGateway.hpp"
@@ -17,6 +18,7 @@
 
 #include <obs.h>
 
+#include <QComboBox>
 #include <QDateTime>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -24,6 +26,8 @@
 #include <QJsonObject>
 #include <QJsonDocument>
 #include <QRegularExpression>
+#include <QSignalBlocker>
+#include <QMessageBox>
 #include <QSet>
 #include <QLabel>
 #include <QPushButton>
@@ -59,22 +63,46 @@ public:
 	QList<EngineAction> actions() const override
 	{
 		return {
-			{QStringLiteral("scene.create"), QStringLiteral("Создать сцену"), false},
+			{QStringLiteral("scene.create"), QStringLiteral("Создать сцену"), false,
+				{}, {}, {}, {{QStringLiteral("name"), QStringLiteral("Имя сцены"),
+					QStringLiteral("text"), true, 0, 100}}},
 			{QStringLiteral("scene.activate"), QStringLiteral("Активировать сцену"), true,
-				QStringLiteral("name"), QStringLiteral("text")},
-			{QStringLiteral("overlay.add"), QStringLiteral("Добавить оверлей"), false},
-			{QStringLiteral("source.text.add"), QStringLiteral("Добавить текст"), false},
+				QStringLiteral("name"), QStringLiteral("text"), {},
+				{{QStringLiteral("name"), QStringLiteral("Имя сцены"),
+					QStringLiteral("text"), true, 0, 100}}},
+			{QStringLiteral("overlay.add"), QStringLiteral("Добавить оверлей"), false,
+				{}, {}, QJsonObject{{QStringLiteral("layer"), QStringLiteral("chat")}},
+				{{QStringLiteral("layer"), QStringLiteral("Тип слоя"), QStringLiteral("choice"), true,
+					0, 0, {QStringLiteral("chat"), QStringLiteral("alerts"), QStringLiteral("effects"),
+						QStringLiteral("timer"), QStringLiteral("viewers"), QStringLiteral("frame"),
+						QStringLiteral("all")}}}},
+			{QStringLiteral("source.text.add"), QStringLiteral("Добавить текст"), false,
+				{}, {}, {}, {{QStringLiteral("name"), QStringLiteral("Имя источника"),
+					QStringLiteral("text"), true, 0, 100},
+					{QStringLiteral("text"), QStringLiteral("Содержимое"),
+					QStringLiteral("text"), true, 0, 4096}}},
 			{QStringLiteral("source.visible"), QStringLiteral("Показать источник"), true,
 				QStringLiteral("name"), QStringLiteral("text"),
-				QJsonObject{{QStringLiteral("visible"), true}}},
+				QJsonObject{{QStringLiteral("visible"), true}},
+				{{QStringLiteral("name"), QStringLiteral("Имя источника"),
+					QStringLiteral("text"), true, 0, 100},
+					{QStringLiteral("visible"), QStringLiteral("Виден"),
+					QStringLiteral("boolean")}}},
 			{QStringLiteral("effect.trigger"), QStringLiteral("Эффект"), true,
-				QStringLiteral("effect"), QStringLiteral("text")},
+				QStringLiteral("effect"), QStringLiteral("text"), {},
+				{{QStringLiteral("effect"), QStringLiteral("Эффект"),
+					QStringLiteral("choice"), true, 0, 0,
+					{QStringLiteral("gg"), QStringLiteral("boom"),
+						QStringLiteral("low-hp"), QStringLiteral("confetti")}}}},
 			{QStringLiteral("timer.start"), QStringLiteral("Запустить таймер"), true,
-				QStringLiteral("seconds"), QStringLiteral("seconds")},
+				QStringLiteral("seconds"), QStringLiteral("seconds"), {},
+				{{QStringLiteral("seconds"), QStringLiteral("Секунды"),
+					QStringLiteral("seconds"), true, 1, 3600}}},
 			{QStringLiteral("timer.pause"), QStringLiteral("Приостановить таймер"), true},
 			{QStringLiteral("timer.hide"), QStringLiteral("Скрыть таймер"), true},
 		};
 	}
+
 	QJsonObject execute(const QString &, const QJsonObject &arguments) override
 	{
 		if (!main) return failure(QStringLiteral("Окно OBS недоступно"));
@@ -95,6 +123,21 @@ EngineRegistry::EngineRegistry(OBSBasic *window) : QObject(window)
 		connect(core, &EventCore::delivered, this, &EngineRegistry::deliverToExtensions);
 }
 
+EngineRegistry::~EngineRegistry()
+{
+	shutdownExtensions();
+}
+
+void EngineRegistry::shutdownExtensions()
+{
+	if (shuttingDown) return;
+	shuttingDown = true;
+	for (auto it = extensions.crbegin(); it != extensions.crend(); ++it) {
+		if (*it && runningExtensions.contains((*it)->moduleId())) (*it)->stop();
+	}
+	runningExtensions.clear();
+}
+
 void EngineRegistry::registerModule(const QString &id, const QString &name,
 				    const QStringList &capabilities, QObject *object)
 {
@@ -102,6 +145,7 @@ void EngineRegistry::registerModule(const QString &id, const QString &name,
 	for (const auto &module : modules)
 		if (module.id == id) return;
 	modules.push_back({id, name, capabilities, object});
+	emit catalogChanged();
 }
 
 bool EngineRegistry::registerExtension(EngineExtension *extension, QString *error)
@@ -113,6 +157,7 @@ bool EngineRegistry::registerExtension(EngineExtension *extension, QString *erro
 		if (error) *error = reason;
 		return false;
 	};
+	if (shuttingDown) return reject(QStringLiteral("Реестр движков уже останавливается"));
 	if (!extension || extension->thread() != thread())
 		return reject(QStringLiteral("Движок должен выполняться в UI-потоке"));
 	const QString id = extension->moduleId();
@@ -138,6 +183,22 @@ bool EngineRegistry::registerExtension(EngineExtension *extension, QString *erro
 		if (id != QStringLiteral("obs") && !action.id.startsWith(id + QLatin1Char('.')))
 			return reject(QStringLiteral("Команды должны начинаться с ID движка"));
 		if (ownActions.contains(action.id)) return reject(QStringLiteral("Команда повторяется"));
+		QSet<QString> keys;
+		if (action.arguments.size() > 12)
+			return reject(QStringLiteral("Слишком много параметров команды"));
+		for (const auto &arg : action.arguments) {
+			static const QRegularExpression keyFormat(QStringLiteral("^[a-z][a-zA-Z0-9_]{0,39}$"));
+			if (!keyFormat.match(arg.key).hasMatch() || keys.contains(arg.key) ||
+			    arg.title.size() > 80 || arg.title.trimmed().isEmpty() ||
+			    !(QStringList{QStringLiteral("text"), QStringLiteral("seconds"),
+				QStringLiteral("boolean"), QStringLiteral("choice")}).contains(arg.type) ||
+			    (arg.type == QStringLiteral("choice") &&
+				(arg.choices.isEmpty() || arg.choices.size() > 32)) ||
+			    (arg.type == QStringLiteral("seconds") && (arg.minimum < 0 || arg.maximum < arg.minimum)) ||
+			    (arg.type == QStringLiteral("text") && (arg.maximum < 1 || arg.maximum > 4096)))
+				return reject(QStringLiteral("Некорректная схема параметров"));
+			keys.insert(arg.key);
+		}
 		ownActions.insert(action.id);
 		for (const auto &previous : extensions) {
 			if (!previous) continue;
@@ -145,7 +206,13 @@ bool EngineRegistry::registerExtension(EngineExtension *extension, QString *erro
 				if (used.id == action.id) return reject(QStringLiteral("Команда уже зарегистрирована"));
 		}
 	}
+	QString startError;
+	if (!extension->start(&startError)) {
+		extension->stop(); // A partially initialized extension must release its resources.
+		return reject(startError.isEmpty() ? QStringLiteral("Движок не смог запуститься") : startError);
+	}
 	extensions.append(extension);
+	runningExtensions.insert(id);
 	registerModule(id, extension->moduleTitle(), extension->capabilities(), extension);
 	return true;
 }
@@ -153,8 +220,10 @@ bool EngineRegistry::registerExtension(EngineExtension *extension, QString *erro
 void EngineRegistry::deliverToExtensions(const StudioEvent &event)
 {
 	// EventCore already bounded, deduplicated and delivered on the GUI thread.
+	if (shuttingDown) return;
 	for (const auto &extension : extensions)
-		if (extension && extension->eventTypes().contains(event.type)) extension->onEvent(event);
+		if (extension && runningExtensions.contains(extension->moduleId()) &&
+		    extension->eventTypes().contains(event.type)) extension->onEvent(event);
 }
 
 QJsonArray EngineRegistry::actionCatalog() const
@@ -162,14 +231,29 @@ QJsonArray EngineRegistry::actionCatalog() const
 	QJsonArray result;
 	for (const auto &extension : extensions) {
 		if (!extension) continue;
-		for (const auto &action : extension->actions())
+		for (const auto &action : extension->actions()) {
+			QJsonArray parameters;
+			for (const auto &argument : action.arguments) {
+				QJsonArray choices;
+				for (const auto &choice : argument.choices) choices.append(choice);
+				parameters.append(QJsonObject{
+					{QStringLiteral("key"), argument.key},
+					{QStringLiteral("title"), argument.title},
+					{QStringLiteral("type"), argument.type},
+					{QStringLiteral("required"), argument.required},
+					{QStringLiteral("minimum"), argument.minimum},
+					{QStringLiteral("maximum"), argument.maximum},
+					{QStringLiteral("choices"), choices}});
+			}
 			result.append(QJsonObject{{QStringLiteral("id"), action.id},
 				{QStringLiteral("title"), action.title},
 				{QStringLiteral("engine"), extension->moduleId()},
 				{QStringLiteral("automatable"), action.automatable},
 				{QStringLiteral("argumentKey"), action.argumentKey},
 				{QStringLiteral("argumentType"), action.argumentType},
-				{QStringLiteral("defaults"), action.defaults}});
+				{QStringLiteral("defaults"), action.defaults},
+				{QStringLiteral("arguments"), parameters}});
+		}
 	}
 	return result;
 }
@@ -185,23 +269,89 @@ QStringList EngineRegistry::automatableActions() const
 	return list;
 }
 
-QJsonObject EngineRegistry::executeAction(const QJsonObject &command, bool fromRule)
+bool EngineRegistry::prepareAction(const QJsonObject &command, bool fromRule,
+	EngineExtension **target, QJsonObject *normalized, QString *error) const
 {
+	const auto reject = [error](const QString &message) {
+		if (error) *error = message;
+		return false;
+	};
 	if (QThread::currentThread() != thread())
-		return failure(QStringLiteral("Команды должны выполняться в UI-потоке"));
+		return reject(QStringLiteral("Команды должны выполняться в UI-потоке"));
+	if (shuttingDown) return reject(QStringLiteral("Движки останавливаются"));
 	if (QJsonDocument(command).toJson(QJsonDocument::Compact).size() > 4096)
-		return failure(QStringLiteral("Слишком большой аргумент команды"));
+		return reject(QStringLiteral("Слишком большой аргумент команды"));
 	const QString id = command.value(QStringLiteral("command")).toString();
 	for (const auto &extension : extensions) {
 		if (!extension) continue;
 		for (const auto &action : extension->actions()) {
 			if (action.id != id) continue;
+			if (!runningExtensions.contains(extension->moduleId()))
+				return reject(QStringLiteral("Движок не запущен"));
 			if (fromRule && !action.automatable)
-				return failure(QStringLiteral("Команда запрещена в правилах"));
-			return extension->execute(id, command);
+				return reject(QStringLiteral("Команда запрещена в правилах"));
+			QList<EngineArgument> schema = action.arguments;
+			// v1 in-process extensions may still expose only one legacy argument.
+			if (schema.isEmpty() && !action.argumentKey.isEmpty()) {
+				schema.append({action.argumentKey, action.argumentKey, action.argumentType,
+					false, action.argumentType == QStringLiteral("seconds") ? 1 : 0,
+					action.argumentType == QStringLiteral("seconds") ? 3600 : 4096});
+			}
+			QJsonObject args = action.defaults;
+			args.insert(QStringLiteral("command"), id);
+			for (auto it = command.begin(); it != command.end(); ++it) {
+				if (it.key() == QStringLiteral("command")) continue;
+				bool declared = false;
+				for (const auto &argument : schema)
+					if (argument.key == it.key()) { declared = true; break; }
+				if (!declared) return reject(QStringLiteral("Неизвестный параметр: ") + it.key());
+				args.insert(it.key(), it.value());
+			}
+			for (const auto &argument : schema) {
+				const QJsonValue value = args.value(argument.key);
+				if (value.isUndefined() || value.isNull()) {
+					if (argument.required) return reject(QStringLiteral("Не задан параметр: ") + argument.title);
+					continue;
+				}
+				if (argument.type == QStringLiteral("text")) {
+					if (!value.isString() || value.toString().size() > argument.maximum ||
+					    (argument.required && value.toString().trimmed().isEmpty()))
+						return reject(QStringLiteral("Неверный текстовый параметр: ") + argument.title);
+				} else if (argument.type == QStringLiteral("seconds")) {
+					const double seconds = value.toDouble(-1);
+					if (!value.isDouble() || seconds != static_cast<int>(seconds) ||
+					    seconds < argument.minimum || seconds > argument.maximum)
+						return reject(QStringLiteral("Неверное число: ") + argument.title);
+				} else if (argument.type == QStringLiteral("boolean")) {
+					if (!value.isBool()) return reject(QStringLiteral("Ожидается true/false: ") + argument.title);
+				} else if (argument.type == QStringLiteral("choice")) {
+					if (!value.isString() || !argument.choices.contains(value.toString()))
+						return reject(QStringLiteral("Недопустимое значение: ") + argument.title);
+				}
+			}
+			if (normalized) *normalized = args;
+			if (target) *target = extension;
+			return true;
 		}
 	}
-	return failure(QStringLiteral("Команда не зарегистрирована"));
+	return reject(QStringLiteral("Команда не зарегистрирована"));
+}
+
+bool EngineRegistry::validateAction(const QJsonObject &command, bool fromRule, QString *error) const
+{
+	return prepareAction(command, fromRule, nullptr, nullptr, error);
+}
+
+QJsonObject EngineRegistry::executeAction(const QJsonObject &command, bool fromRule)
+{
+	EngineExtension *target = nullptr;
+	QJsonObject normalized;
+	QString error;
+	if (!prepareAction(command, fromRule, &target, &normalized, &error)) return failure(error);
+	const QJsonObject result = target->execute(command.value(QStringLiteral("command")).toString(), normalized);
+	if (!result.value(QStringLiteral("ok")).isBool())
+		return failure(QStringLiteral("Движок вернул некорректный результат"));
+	return result;
 }
 
 QJsonArray EngineRegistry::inventory() const
@@ -217,6 +367,8 @@ QJsonArray EngineRegistry::inventory() const
 		for (const auto &extension : extensions)
 			if (extension && extension->moduleId() == module.id) {
 				entry.insert(QStringLiteral("health"), extension->health());
+				entry.insert(QStringLiteral("lifecycle"),
+					runningExtensions.contains(module.id) ? QStringLiteral("running") : QStringLiteral("stopped"));
 				entry.insert(QStringLiteral("actions"), static_cast<int>(extension->actions().size()));
 				QJsonArray subscriptions;
 				for (const auto &type : extension->eventTypes()) subscriptions.append(type);
@@ -234,6 +386,13 @@ void installEngineServices(OBSBasic *window)
 	auto *registry = new EngineRegistry(window);
 	registry->registerExtension(new StudioCommandsExtension(window, registry));
 	registry->registerExtension(new MarkerEngine(registry));
+}
+
+void shutdownEngineServices(OBSBasic *window)
+{
+	if (!window) return;
+	if (auto *registry = window->findChild<EngineRegistry *>(QStringLiteral("xinkxEngineRegistry")))
+		registry->shutdownExtensions();
 }
 
 void installEngineHub(OBSBasic *window)
@@ -320,7 +479,81 @@ void installEngineHub(OBSBasic *window)
 	catalog->setRootIsDecorated(false);
 	catalog->setMaximumHeight(240);
 	layout->addWidget(catalog);
+
+	// A command panel backed by the same typed action catalog used by rules.
+	// New extensions appear here without adding another engine-specific UI.
+	auto *commandsPage = new QWidget(tabs);
+	auto *commandsPageLayout = new QVBoxLayout(commandsPage);
+	auto *commandsGroup = new QGroupBox(QStringLiteral("Команды движков"), commandsPage);
+	auto *commandsLayout = new QVBoxLayout(commandsGroup);
+	auto *actionSelect = new QComboBox(commandsGroup);
+	actionSelect->setObjectName(QStringLiteral("xinkxEngineActionSelect"));
+	commandsLayout->addWidget(actionSelect);
+	auto *actionForm = new EngineActionForm(commandsGroup);
+	commandsLayout->addWidget(actionForm);
+	auto *actionButton = new QPushButton(QStringLiteral("Выполнить команду"), commandsGroup);
+	commandsLayout->addWidget(actionButton);
+	auto *actionResult = new QLabel(commandsGroup);
+	actionResult->setWordWrap(true);
+	actionResult->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	commandsLayout->addWidget(actionResult);
+	commandsPageLayout->addWidget(commandsGroup);
+	commandsPageLayout->addStretch(1);
+	tabs->addTab(commandsPage, QStringLiteral("Действия"));
 	const QPointer<EngineRegistry> safeRegistry(registry);
+	const auto updateAction = [safeRegistry, actionSelect, actionForm, actionButton] {
+		if (!safeRegistry) return;
+		const QString id = actionSelect->currentData().toString();
+		actionButton->setEnabled(!id.isEmpty());
+		for (const auto &value : safeRegistry->actionCatalog()) {
+			const auto action = value.toObject();
+			if (action.value(QStringLiteral("id")).toString() == id) {
+				actionForm->setAction(action);
+				return;
+			}
+		}
+		actionForm->setAction({});
+	};
+	const auto refreshActions = [safeRegistry, actionSelect, updateAction] {
+		if (!safeRegistry) return;
+		const QString previous = actionSelect->currentData().toString();
+		const QSignalBlocker blocked(actionSelect);
+		actionSelect->clear();
+		for (const auto &value : safeRegistry->actionCatalog()) {
+			const auto spec = value.toObject();
+			const QString id = spec.value(QStringLiteral("id")).toString();
+			actionSelect->addItem(spec.value(QStringLiteral("title")).toString() +
+				QStringLiteral(" · ") + id, id);
+		}
+		const int index = actionSelect->findData(previous);
+		if (index >= 0) actionSelect->setCurrentIndex(index);
+		updateAction();
+	};
+	QObject::connect(actionSelect, &QComboBox::currentIndexChanged, commandsGroup,
+		[updateAction](int) { updateAction(); });
+	QObject::connect(actionButton, &QPushButton::clicked, commandsGroup,
+		[safeRegistry, actionSelect, actionForm, actionResult, commandsGroup] {
+			if (!safeRegistry) return;
+			const auto command = actionForm->command();
+			// Manual actions are intentionally not permitted in event automation;
+			// require explicit confirmation before mutating the OBS scene.
+			for (const auto &entry : safeRegistry->actionCatalog()) {
+				const auto spec = entry.toObject();
+				if (spec.value(QStringLiteral("id")).toString() == actionSelect->currentData().toString() &&
+				    !spec.value(QStringLiteral("automatable")).toBool()) {
+					if (QMessageBox::question(commandsGroup, QStringLiteral("Подтверждение"),
+						QStringLiteral("Выполнить действие %1?").arg(actionSelect->currentText())) != QMessageBox::Yes)
+						return;
+					break;
+				}
+			}
+			const auto result = safeRegistry->executeAction(command);
+			actionResult->setText(QStringLiteral("%1: %2").arg(
+				result.value(QStringLiteral("ok")).toBool() ? QStringLiteral("OK") : QStringLiteral("Ошибка"),
+				result.value(QStringLiteral("message")).toString()));
+		});
+	QObject::connect(registry, &EngineRegistry::catalogChanged, commandsGroup, refreshActions);
+	refreshActions();
 	const auto refreshCatalog = [safeRegistry, catalog] {
 		if (!safeRegistry) return;
 		catalog->clear();

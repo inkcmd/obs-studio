@@ -1,6 +1,7 @@
 #include "MarkerEngine.hpp"
 
 #include "EngineRegistry.hpp"
+#include "RecordingEngine.hpp"
 #include "StreamAccounts.hpp"
 #include "StudioWorkspace.hpp"
 
@@ -67,6 +68,11 @@ MarkerEngine::MarkerEngine(QObject *parent) : EngineExtension(parent)
 
 MarkerEngine::~MarkerEngine()
 {
+	stop();
+}
+
+void MarkerEngine::stop()
+{
 	if (saveTimer.isActive()) flush();
 }
 
@@ -75,7 +81,7 @@ void MarkerEngine::load()
 	if (path.isEmpty()) return;
 	QFile file(path);
 	if (!file.open(QIODevice::ReadOnly)) return;
-	if (file.size() > 512 * 1024) return;
+	if (file.size() > 32 * 1024 * 1024) return;
 	QJsonParseError error{};
 	const auto doc = QJsonDocument::fromJson(file.readAll(), &error);
 	if (error.error != QJsonParseError::NoError || !doc.isObject()) return;
@@ -92,12 +98,26 @@ void MarkerEngine::load()
 		if (when.size() > 50) continue;
 		const auto label = sanitizedLabel(entry.value(QStringLiteral("label")).toString());
 		if (label.isEmpty()) continue;
+		QJsonArray recordings;
+		for (const auto &value : entry.value(QStringLiteral("recordings")).toArray()) {
+			if (recordings.size() >= 16) break;
+			if (!value.isObject()) continue;
+			const auto recording = value.toObject();
+			const QString jobId = recording.value(QStringLiteral("jobId")).toString().left(80);
+			if (jobId.isEmpty()) continue;
+			recordings.append(QJsonObject{
+				{QStringLiteral("jobId"), jobId},
+				{QStringLiteral("name"), recording.value(QStringLiteral("name")).toString().left(120)},
+				{QStringLiteral("file"), recording.value(QStringLiteral("file")).toString().left(1024)},
+				{QStringLiteral("elapsedMs"), recording.value(QStringLiteral("elapsedMs")).toDouble(-1)}});
+		}
 		entries.append(QJsonObject{
 			{QStringLiteral("time"), when},
 			{QStringLiteral("label"), label},
 			{QStringLiteral("type"), entry.value(QStringLiteral("type")).toString().left(32)},
 			{QStringLiteral("platform"), entry.value(QStringLiteral("platform")).toString().left(32)},
-			{QStringLiteral("elapsedMs"), entry.value(QStringLiteral("elapsedMs")).toDouble()}});
+			{QStringLiteral("elapsedMs"), entry.value(QStringLiteral("elapsedMs")).toDouble()},
+			{QStringLiteral("recordings"), recordings}});
 		if (entries.size() > 1000) entries.removeAt(0);
 	}
 }
@@ -118,7 +138,7 @@ bool MarkerEngine::flush(QString *error)
 	QJsonArray automatic;
 	for (const auto &type : kAutoTypes)
 		if (autoTypes.contains(type)) automatic.append(type);
-	const QJsonDocument doc(QJsonObject{{QStringLiteral("version"), 1},
+	const QJsonDocument doc(QJsonObject{{QStringLiteral("version"), 2},
 		{QStringLiteral("autoTypes"), automatic}, {QStringLiteral("markers"), entries}});
 	const auto bytes = doc.toJson(QJsonDocument::Indented);
 	QSaveFile file(path);
@@ -135,10 +155,17 @@ bool MarkerEngine::add(const QString &label, const QString &type, const QString 
 {
 	const auto value = sanitizedLabel(label);
 	if (value.isEmpty()) return false;
+	// Capture all active recording jobs at the moment of the marker. The
+	// timestamps are approximate elapsed time, not encoded frame timestamps.
+	QJsonArray recordings;
+	if (auto *window = qobject_cast<OBSBasic *>(parent() ? parent()->parent() : nullptr))
+		recordings = activeRecordingSessions(window);
+	while (recordings.size() > 16) recordings.removeAt(recordings.size() - 1);
 	entries.append(QJsonObject{{QStringLiteral("time"), QDateTime::currentDateTime().toString(Qt::ISODateWithMs)},
 		{QStringLiteral("label"), value}, {QStringLiteral("type"), type.left(32)},
 		{QStringLiteral("platform"), platform.left(32)},
-		{QStringLiteral("elapsedMs"), static_cast<double>(session.elapsed())}});
+		{QStringLiteral("elapsedMs"), static_cast<double>(session.elapsed())},
+		{QStringLiteral("recordings"), recordings}});
 	while (entries.size() > 1000) entries.removeAt(0);
 	saveTimer.start();
 	emit changed();
@@ -213,14 +240,27 @@ bool MarkerEngine::exportCsv(const QString &fileName, QString *error) const
 		return false;
 	}
 	QTextStream out(&file);
-	out << "time,elapsed_since_xinkx_launch_ms,type,platform,label\n";
+	out << "time,elapsed_since_xinkx_launch_ms,type,platform,label,recording_job,recording_file,recording_elapsed_ms\n";
 	for (const auto &value : entries) {
 		const auto entry = value.toObject();
-		out << quotedCsv(entry.value(QStringLiteral("time")).toString()) << ','
-			<< QString::number(entry.value(QStringLiteral("elapsedMs")).toDouble(), 'f', 0) << ','
-			<< quotedCsv(entry.value(QStringLiteral("type")).toString()) << ','
-			<< quotedCsv(entry.value(QStringLiteral("platform")).toString()) << ','
-			<< quotedCsv(entry.value(QStringLiteral("label")).toString()) << '\n';
+		const QString prefix = quotedCsv(entry.value(QStringLiteral("time")).toString()) + QLatin1Char(',') +
+			QString::number(entry.value(QStringLiteral("elapsedMs")).toDouble(), 'f', 0) + QLatin1Char(',') +
+			quotedCsv(entry.value(QStringLiteral("type")).toString()) + QLatin1Char(',') +
+			quotedCsv(entry.value(QStringLiteral("platform")).toString()) + QLatin1Char(',') +
+			quotedCsv(entry.value(QStringLiteral("label")).toString());
+		const auto recordings = entry.value(QStringLiteral("recordings")).toArray();
+		if (recordings.isEmpty()) {
+			out << prefix << ",,,\n";
+			continue;
+		}
+		for (const auto &value : recordings) {
+			const auto recording = value.toObject();
+			const double elapsed = recording.value(QStringLiteral("elapsedMs")).toDouble(-1);
+			out << prefix << ','
+				<< quotedCsv(recording.value(QStringLiteral("name")).toString()) << ','
+				<< quotedCsv(recording.value(QStringLiteral("file")).toString()) << ','
+				<< (elapsed < 0 ? QString() : QString::number(elapsed, 'f', 0)) << '\n';
+		}
 	}
 	out.flush();
 	if (out.status() != QTextStream::Ok || !file.commit()) {
@@ -242,23 +282,37 @@ void installMarkerWorkspace(OBSBasic *mainWindow)
 	auto *layout = new QVBoxLayout(page);
 	auto *description = new QLabel(QStringLiteral(
 		"Метки важных моментов для монтажа. Сохраняются локально с системным временем. "
-		"Таймер в CSV отсчитывает время с запуска XINKX, не точный таймкод видео."), page);
+		"Активные записи добавляются к маркеру вместе с именем файла и примерным временем. "
+		"Это не точный таймкод видео; для штатной записи OBS путь может быть неизвестен."), page);
 	description->setWordWrap(true);
 	layout->addWidget(description);
 	auto *list = new QTreeWidget(page);
 	list->setHeaderLabels({QStringLiteral("Время"), QStringLiteral("Тип"),
-		QStringLiteral("Площадка"), QStringLiteral("Заметка")});
+		QStringLiteral("Площадка"), QStringLiteral("Заметка"), QStringLiteral("Записи")});
 	list->setRootIsDecorated(false);
 	layout->addWidget(list);
 	const auto refresh = [engine, list] {
 		list->clear();
 		for (const auto &value : engine->markers()) {
 			const auto marker = value.toObject();
-			new QTreeWidgetItem(list, {
+			QStringList files;
+			QStringList paths;
+			for (const auto &value : marker.value(QStringLiteral("recordings")).toArray()) {
+				const auto recording = value.toObject();
+				const double elapsed = recording.value(QStringLiteral("elapsedMs")).toDouble(-1);
+				const QString at = elapsed < 0 ? QStringLiteral("?") :
+					QStringLiteral("%1:%2").arg(static_cast<qint64>(elapsed) / 60000)
+						.arg((static_cast<qint64>(elapsed) / 1000) % 60, 2, 10, QLatin1Char('0'));
+				files.append(recording.value(QStringLiteral("name")).toString() +
+					QStringLiteral(" (") + at + QLatin1Char(')'));
+				paths.append(recording.value(QStringLiteral("file")).toString());
+			}
+			auto *row = new QTreeWidgetItem(list, {
 				marker.value(QStringLiteral("time")).toString(),
 				marker.value(QStringLiteral("type")).toString(),
 				marker.value(QStringLiteral("platform")).toString(),
-				marker.value(QStringLiteral("label")).toString()});
+				marker.value(QStringLiteral("label")).toString(), files.join(QStringLiteral(", "))});
+			row->setToolTip(4, paths.join(QLatin1Char('\n')));
 		}
 		list->scrollToBottom();
 	};

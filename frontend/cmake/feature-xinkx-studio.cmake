@@ -23,6 +23,8 @@ target_sources(
     xinkx/EngineRegistry.cpp
     xinkx/EngineRegistry.hpp
     xinkx/EngineExtension.hpp
+    xinkx/EngineActionForm.cpp
+    xinkx/EngineActionForm.hpp
     xinkx/MarkerEngine.cpp
     xinkx/MarkerEngine.hpp
     xinkx/RecordingEngine.cpp

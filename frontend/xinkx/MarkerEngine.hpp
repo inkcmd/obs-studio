@@ -30,7 +30,9 @@ public:
 	QList<EngineAction> actions() const override
 	{
 		return {{QStringLiteral("markers.add"), QStringLiteral("Добавить маркер"), true,
-			QStringLiteral("label"), QStringLiteral("text")}};
+			QStringLiteral("label"), QStringLiteral("text"), {},
+			{{QStringLiteral("label"), QStringLiteral("Название маркера"),
+				QStringLiteral("text"), true, 0, 120}}}};
 	}
 	QStringList eventTypes() const override
 	{
@@ -40,6 +42,7 @@ public:
 	QJsonObject execute(const QString &actionId, const QJsonObject &arguments) override;
 	void onEvent(const StudioEvent &event) override;
 	QJsonObject health() const override;
+	void stop() override;
 
 	QJsonArray markers() const { return entries; }
 	QStringList automaticTypes() const;

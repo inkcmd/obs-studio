@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QObject>
 #include <QPointer>
+#include <QSet>
 #include <QStringList>
 #include <QVector>
 
@@ -20,6 +21,7 @@ class EngineRegistry final : public QObject {
 	Q_OBJECT
 public:
 	explicit EngineRegistry(OBSBasic *window);
+	~EngineRegistry() override;
 	void registerModule(const QString &id, const QString &name, const QStringList &capabilities,
 			    QObject *object);
 	// Extension registration rejects duplicate engine/action IDs and invalid names.
@@ -31,6 +33,12 @@ public:
 	// The only action dispatcher for local XINKX modules. Event automation may
 	// invoke only actions explicitly marked automatable by their owner.
 	QJsonObject executeAction(const QJsonObject &command, bool fromRule = false);
+	bool validateAction(const QJsonObject &command, bool fromRule, QString *error = nullptr) const;
+	// Idempotent, called before OBS destroys scene data and on registry cleanup.
+	void shutdownExtensions();
+
+signals:
+	void catalogChanged();
 
 private:
 	struct Module {
@@ -41,11 +49,16 @@ private:
 	};
 	QVector<Module> modules;
 	QVector<QPointer<EngineExtension>> extensions;
+	QSet<QString> runningExtensions;
+	bool shuttingDown = false;
+	bool prepareAction(const QJsonObject &command, bool fromRule,
+		EngineExtension **target, QJsonObject *normalized, QString *error) const;
 	void deliverToExtensions(const StudioEvent &event);
 };
 
 // Called after StudioAutomation and EventCore exist, before EventAutomation.
 void installEngineServices(OBSBasic *window);
+void shutdownEngineServices(OBSBasic *window);
 void installEngineHub(OBSBasic *window);
 
 } // namespace xinkx
