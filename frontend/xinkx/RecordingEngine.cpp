@@ -29,6 +29,7 @@
 #include <QUuid>
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -88,7 +89,7 @@ struct Run {
 	RecordingJob job;
 	OBSOutputAutoRelease output;
 	OBSEncoderAutoRelease videoEncoder;
-	OBSEncoderAutoRelease audioEncoder;
+	std::array<OBSEncoderAutoRelease, 6> audioEncoders;
 	OBSSource source;
 	obs_view_t *view = nullptr;
 	QString outputPath;
@@ -101,7 +102,7 @@ struct Run {
 		if (output && obs_output_active(output)) obs_output_force_stop(output);
 		output = nullptr;
 		videoEncoder = nullptr;
-		audioEncoder = nullptr;
+		for (auto &encoder : audioEncoders) encoder = nullptr;
 		if (view) {
 			obs_view_set_source(view, 0, nullptr);
 			obs_view_remove(view);
@@ -338,17 +339,31 @@ private:
 		obs_encoder_set_video(run->videoEncoder, mix);
 		if (job.kind == QStringLiteral("portrait") && !job.inherit && job.width > 0 && job.height > 0)
 			obs_encoder_set_scaled_size(run->videoEncoder, uint32_t(job.width), uint32_t(job.height));
-		// Each recording uses a different name/encoder; audio comes from the selected OBS mix.
-		if (job.audioMix >= 0) {
-			OBSDataAutoRelease aSettings = obs_data_create();
-			obs_data_set_int(aSettings, "bitrate", 192);
-			run->audioEncoder = obs_audio_encoder_create("ffmpeg_aac",
-				(QByteArray("xinkx_rec_audio_") + id).constData(), aSettings, size_t(job.audioMix), nullptr);
-			if (!run->audioEncoder) {
-				errors << QStringLiteral("%1: AAC-кодировщик недоступен").arg(job.name);
+		// Mixes are configured in OBS Advanced Audio Properties. A clean video
+		// source does not implicitly isolate its game/Discord/microphone audio.
+		// ffmpeg_muxer requires contiguous file track indices (0..N-1), even
+		// when the selected OBS mixer indices are non-contiguous (e.g. 2,3,4).
+		int fileTrack = 0;
+		for (int mixIndex = 0; mixIndex < 6; ++mixIndex) {
+			if (!(job.audioTracks & (1 << mixIndex))) continue;
+			if (!obs_get_audio()) {
+				errors << QStringLiteral("%1: аудиоподсистема OBS недоступна").arg(job.name);
 				return false;
 			}
-			obs_encoder_set_audio(run->audioEncoder, obs_get_audio());
+			OBSDataAutoRelease aSettings = obs_data_create();
+			obs_data_set_int(aSettings, "bitrate", 192);
+			const QByteArray encoderName = QByteArray("xinkx_rec_audio_") + id + '_' +
+				QByteArray::number(mixIndex + 1);
+			auto &audioEncoder = run->audioEncoders[size_t(fileTrack)];
+			audioEncoder = obs_audio_encoder_create("ffmpeg_aac", encoderName.constData(),
+				aSettings, size_t(mixIndex), nullptr);
+			if (!audioEncoder) {
+				errors << QStringLiteral("%1: AAC-кодировщик дорожки OBS %2 недоступен")
+					.arg(job.name).arg(mixIndex + 1);
+				return false;
+			}
+			obs_encoder_set_audio(audioEncoder, obs_get_audio());
+			++fileTrack;
 		}
 		const QString root = job.folder.isEmpty() ? defaultFolder() : job.folder;
 		const QString directory = job.sessionFolder ? QDir(root).filePath(currentSession) : root;
@@ -366,13 +381,18 @@ private:
 		OBSDataAutoRelease outputSettings = obs_data_create();
 		run->outputPath = QDir(directory).filePath(filename);
 		obs_data_set_string(outputSettings, "path", run->outputPath.toUtf8().constData());
-		run->output = obs_output_create("ffmpeg_muxer", (QByteArray("xinkx_rec_") + id).constData(), outputSettings, nullptr);
+		// The stock ffmpeg_muxer has OBS_OUTPUT_AUDIO set and cannot start
+		// with zero audio encoders. Use the video-only variant for silent jobs.
+		const char *outputId = fileTrack ? "ffmpeg_muxer" : "xinkx_ffmpeg_video_only_muxer";
+		run->output = obs_output_create(outputId, (QByteArray("xinkx_rec_") + id).constData(), outputSettings, nullptr);
 		if (!run->output) {
-			errors << QStringLiteral("%1: ffmpeg_muxer недоступен").arg(job.name);
+			errors << QStringLiteral("%1: файловый выход %2 недоступен").arg(job.name, QString::fromUtf8(outputId));
 			return false;
 		}
 		obs_output_set_video_encoder(run->output, run->videoEncoder);
-		if (run->audioEncoder) obs_output_set_audio_encoder(run->output, run->audioEncoder, 0);
+		for (int fileIndex = 0; fileIndex < fileTrack; ++fileIndex)
+			obs_output_set_audio_encoder(run->output, run->audioEncoders[size_t(fileIndex)],
+				size_t(fileIndex));
 		if (!obs_output_start(run->output)) {
 			errors << QStringLiteral("%1: %2").arg(job.name,
 				QString::fromUtf8(obs_output_get_last_error(run->output) ? obs_output_get_last_error(run->output) : "Ошибка запуска"));
@@ -437,7 +457,14 @@ QVector<RecordingJob> loadRecordingJobs()
 		job.preset = obj.value(QStringLiteral("preset")).toString(QStringLiteral("p4"));
 		job.rateControl = obj.value(QStringLiteral("rateControl")).toString(QStringLiteral("quality"));
 		job.bitrate = obj.value(QStringLiteral("bitrate")).toInt(12000);
-		job.audioMix = obj.value(QStringLiteral("audioMix")).toInt(0);
+		// Existing single-track profiles keep their original audio (including -1 = mute).
+		// New profiles store a 6-bit mask instead of a single mixer number.
+		if (obj.contains(QStringLiteral("audioTracks"))) {
+			job.audioTracks = obj.value(QStringLiteral("audioTracks")).toInt(1) & 0x3f;
+		} else {
+			const int oldMix = obj.value(QStringLiteral("audioMix")).toInt(0);
+			job.audioTracks = oldMix >= 0 && oldMix < 6 ? (1 << oldMix) : 0;
+		}
 		job.folder = obj.value(QStringLiteral("folder")).toString();
 		job.sessionFolder = obj.value(QStringLiteral("sessionFolder")).toBool(true);
 		job.format = obj.value(QStringLiteral("format")).toString(QStringLiteral("mkv"));
@@ -468,7 +495,7 @@ bool saveRecordingJobs(const QVector<RecordingJob> &jobs, QString *error)
 		obj[QStringLiteral("preset")] = job.preset;
 		obj[QStringLiteral("rateControl")] = job.rateControl;
 		obj[QStringLiteral("bitrate")] = job.bitrate;
-		obj[QStringLiteral("audioMix")] = job.audioMix;
+		obj[QStringLiteral("audioTracks")] = job.audioTracks & 0x3f;
 		obj[QStringLiteral("folder")] = job.folder;
 		obj[QStringLiteral("sessionFolder")] = job.sessionFolder;
 		obj[QStringLiteral("format")] = job.format;

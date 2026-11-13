@@ -874,6 +874,23 @@ struct obs_output_info ffmpeg_muxer = {
 	.get_properties = ffmpeg_mux_properties,
 };
 
+/* Same FFmpeg file muxer, but without the OBS_OUTPUT_AUDIO flag. The regular
+ * ffmpeg_muxer requires at least one audio encoder; this variant permits
+ * XINKX Record Engine to write a true video-only file (e.g. webcam). The
+ * helper process already supports num_audio_streams == 0. */
+struct obs_output_info xinkx_ffmpeg_video_only_muxer = {
+	.id = "xinkx_ffmpeg_video_only_muxer",
+	.flags = OBS_OUTPUT_VIDEO | OBS_OUTPUT_ENCODED | OBS_OUTPUT_CAN_PAUSE,
+	.get_name = ffmpeg_mux_getname,
+	.create = ffmpeg_mux_create,
+	.destroy = ffmpeg_mux_destroy,
+	.start = ffmpeg_mux_start,
+	.stop = ffmpeg_mux_stop,
+	.encoded_packet = ffmpeg_mux_data,
+	.get_total_bytes = ffmpeg_mux_total_bytes,
+	.get_properties = ffmpeg_mux_properties,
+};
+
 static int connect_time(struct ffmpeg_muxer *stream)
 {
 	UNUSED_PARAMETER(stream);

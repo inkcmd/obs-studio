@@ -26,7 +26,9 @@ struct RecordingJob {
 	QString preset = QStringLiteral("p4");
 	QString rateControl = QStringLiteral("quality");
 	int bitrate = 12000;
-	int audioMix = 0; // -1 means no audio; otherwise OBS mixer 1-6
+	// Bitmask of OBS audio mixes 1-6. Bit 0 = OBS mixer 1; zero = silent video.
+	// Legacy recording jobs containing "audioMix" are migrated when loaded.
+	int audioTracks = 1;
 	QString folder;
 	bool sessionFolder = true; // Put independent recordings in a dated session folder.
 	QString format = QStringLiteral("mkv");

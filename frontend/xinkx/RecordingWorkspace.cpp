@@ -10,6 +10,7 @@
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFormLayout>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -22,6 +23,7 @@
 #include <QTimer>
 #include <QSet>
 #include <algorithm>
+#include <array>
 #include <QVBoxLayout>
 #include <QUuid>
 
@@ -162,11 +164,30 @@ public:
 		fps->setRange(0, 120);
 		fps->setSpecialValueText(QStringLiteral("Как в OBS"));
 		form->addRow(QStringLiteral("FPS"), fps);
-		audio = new QComboBox(right);
-		for (int i = 0; i < 6; ++i)
-			audio->addItem(QStringLiteral("Микшер OBS · дорожка %1").arg(i + 1), i);
-		audio->addItem(QStringLiteral("Без звука"), -1);
-		form->addRow(QStringLiteral("Звук"), audio);
+		audioPanel = new QWidget(right);
+		auto *audioLayout = new QVBoxLayout(audioPanel);
+		audioLayout->setContentsMargins(0, 0, 0, 0);
+		auto *audioGrid = new QGridLayout();
+		for (int i = 0; i < 6; ++i) {
+			const auto label = QStringLiteral("Дорожка %1").arg(i + 1);
+			audioTracks[size_t(i)] = new QCheckBox(label, audioPanel);
+			audioGrid->addWidget(audioTracks[size_t(i)], i / 3, i % 3);
+		}
+		audioLayout->addLayout(audioGrid);
+		auto *audioPresets = new QHBoxLayout();
+		auto *montageAudio = new QPushButton(QStringLiteral("Для монтажа: 2 + 3 + 4"), audioPanel);
+		auto *noAudio = new QPushButton(QStringLiteral("Без звука"), audioPanel);
+		audioPresets->addWidget(montageAudio);
+		audioPresets->addWidget(noAudio);
+		audioLayout->addLayout(audioPresets);
+		form->addRow(QStringLiteral("Аудиодорожки OBS"), audioPanel);
+		connect(montageAudio, &QPushButton::clicked, this, [this] {
+			for (int i = 0; i < 6; ++i)
+				audioTracks[size_t(i)]->setChecked(i >= 1 && i <= 3);
+		});
+		connect(noAudio, &QPushButton::clicked, this, [this] {
+			for (auto *track : audioTracks) track->setChecked(false);
+		});
 		format = new QComboBox(right);
 		format->addItem(QStringLiteral("MKV (рекомендуется)"), QStringLiteral("mkv"));
 		format->addItem(QStringLiteral("MP4 (риск потери при сбое)"), QStringLiteral("mp4"));
@@ -183,9 +204,9 @@ public:
 		sessionFolder->setToolTip(QStringLiteral("Все одновременно запущенные задания с одной корневой папкой попадут в один каталог сеанса"));
 		form->addRow(sessionFolder);
 		auto *hint = new QLabel(QStringLiteral(
-			"Разрешение 0×0 — исходное. Для отдельного источника звук берётся из "
-			"выбранного микшера OBS, а не автоматически только из этого источника. "
-			"Индивидуальный видеокодировщик создаётся для каждого файла."), right);
+			"Разрешение 0×0 — исходное. Каждый отмеченный микшер OBS попадёт "
+			"в отдельную звуковую дорожку файла. Маршрутизация источников настраивается "
+			"в «Расширенных свойствах звука» OBS. Без галочек — видео без звука."), right);
 		hint->setWordWrap(true);
 		form->addRow(hint);
 		buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
@@ -301,7 +322,8 @@ private:
 	QComboBox *target{};
 	QComboBox *encoder{};
 	QComboBox *preset{};
-	QComboBox *audio{};
+	QWidget *audioPanel{};
+	std::array<QCheckBox *, 6> audioTracks{};
 	QComboBox *format{};
 	QComboBox *rateControl{};
 	QSpinBox *quality{};
@@ -341,7 +363,9 @@ private:
 		job.preset = preset->currentData().toString();
 		job.rateControl = rateControl->currentData().toString();
 		job.bitrate = bitrate->value();
-		job.audioMix = audio->currentData().toInt();
+		job.audioTracks = 0;
+		for (int i = 0; i < 6; ++i)
+			if (audioTracks[size_t(i)]->isChecked()) job.audioTracks |= (1 << i);
 		job.folder = folder->text().trimmed();
 		job.sessionFolder = sessionFolder->isChecked();
 		job.format = format->currentData().toString();
@@ -385,7 +409,8 @@ private:
 			preset->setCurrentIndex(std::max(0, preset->findData(job.preset)));
 			rateControl->setCurrentIndex(std::max(0, rateControl->findData(job.rateControl)));
 			bitrate->setValue(job.bitrate);
-			audio->setCurrentIndex(std::max(0, audio->findData(job.audioMix)));
+			for (int i = 0; i < 6; ++i)
+				audioTracks[size_t(i)]->setChecked((job.audioTracks & (1 << i)) != 0);
 			folder->setText(job.folder);
 			sessionFolder->setChecked(job.sessionFolder);
 			format->setCurrentIndex(std::max(0, format->findData(job.format)));
@@ -408,7 +433,7 @@ private:
 		preset->setEnabled(advanced && encoder->currentData().toString().startsWith(QStringLiteral("obs_nvenc_")));
 		quality->setEnabled(advanced && rateControl->currentData() != QStringLiteral("cbr"));
 		bitrate->setEnabled(advanced && rateControl->currentData() == QStringLiteral("cbr"));
-		audio->setEnabled(separate);
+		audioPanel->setEnabled(separate);
 		format->setEnabled(separate);
 		folder->setEnabled(separate);
 		sessionFolder->setEnabled(separate);
