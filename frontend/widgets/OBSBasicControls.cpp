@@ -8,6 +8,7 @@
 #include <QMenu>
 #include <QPushButton>
 #include <QSizePolicy>
+#include <QStyle>
 
 #include "moc_OBSBasicControls.cpp"
 
@@ -20,8 +21,10 @@ OBSBasicControls::OBSBasicControls(OBSBasic *main) : QFrame(nullptr), ui(new Ui:
 	// settings button. QToolButton used here previously had a different frame
 	// and height from OBS's regular controls.
 	const QSize auxiliaryButtonSize = ui->virtualCamConfigButton->sizeHint();
-	auto *accounts = new QPushButton(QStringLiteral("▾"), this);
+	auto *accounts = new QPushButton(this);
 	accounts->setObjectName(QStringLiteral("xinkxStreamSelection"));
+	accounts->setIcon(style()->standardIcon(QStyle::SP_ArrowDown));
+	accounts->setIconSize(QSize(14, 14));
 	accounts->setFixedSize(auxiliaryButtonSize);
 	accounts->setAccessibleName(QStringLiteral("Аккаунты трансляции"));
 	const QKeySequence accountsShortcut(QStringLiteral("Ctrl+Alt+S"));

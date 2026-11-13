@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <cmath>
 #include <memory>
 #include <vector>
 
@@ -288,10 +289,11 @@ private:
 				videoInfo.output_width = uint32_t(job.width);
 				videoInfo.output_height = uint32_t(job.height);
 			}
-			if (!job.inherit && job.fps > 0) {
-				videoInfo.fps_num = uint32_t(job.fps);
-				videoInfo.fps_den = 1;
-			}
+			// All OBS auxiliary views are driven by the main video thread. Do
+			// not change the view mix FPS: an independent 30 FPS video_t next
+			// to the 60 FPS render clock produces 30 encoded frames each second
+			// with 60 FPS timestamps (half-length video, full-length audio).
+			// The requested FPS is applied as an encoder frame-rate divisor below.
 			run->view = obs_view_create();
 			if (!run->view) {
 				errors << QStringLiteral("%1: не удалось создать OBS view").arg(job.name);
@@ -337,6 +339,26 @@ private:
 			return false;
 		}
 		obs_encoder_set_video(run->videoEncoder, mix);
+		if (!job.inherit && job.fps > 0) {
+			const auto *mixInfo = video_output_get_info(mix);
+			if (!mixInfo || !mixInfo->fps_num || !mixInfo->fps_den) {
+				errors << QStringLiteral("%1: нельзя определить FPS видеомикшера").arg(job.name);
+				return false;
+			}
+			const double sourceFps = double(mixInfo->fps_num) / double(mixInfo->fps_den);
+			const int divisor = std::max(1, int(std::lround(sourceFps / job.fps)));
+			const double actualFps = sourceFps / divisor;
+			if (std::abs(actualFps - job.fps) > 0.1) {
+				errors << QStringLiteral("%1: %2 FPS недоступно при частоте OBS %3 FPS; "
+					"выберите делитель основной частоты или «Как в OBS»")
+					.arg(job.name).arg(job.fps).arg(sourceFps, 0, 'f', 2);
+				return false;
+			}
+			if (divisor > 1 && !obs_encoder_set_frame_rate_divisor(run->videoEncoder, uint32_t(divisor))) {
+				errors << QStringLiteral("%1: не удалось установить FPS кодировщика").arg(job.name);
+				return false;
+			}
+		}
 		if (job.kind == QStringLiteral("portrait") && !job.inherit && job.width > 0 && job.height > 0)
 			obs_encoder_set_scaled_size(run->videoEncoder, uint32_t(job.width), uint32_t(job.height));
 		// Mixes are configured in OBS Advanced Audio Properties. A clean video

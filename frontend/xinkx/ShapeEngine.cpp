@@ -152,8 +152,18 @@ void renderShape(void *context, gs_effect_t *)
 		shape->texture = gs_texture_create(static_cast<uint32_t>(next.width()),
 			static_cast<uint32_t>(next.height()), GS_BGRA, 1, &pixels, 0);
 	}
-	if (shape->texture) obs_source_draw(shape->texture, 0, 0,
-		gs_texture_get_width(shape->texture), gs_texture_get_height(shape->texture), false);
+	if (shape->texture) {
+		// CUSTOM_DRAW inputs are not wrapped in a graphics effect by OBS.
+		// obs_source_draw() requires a current effect; without one the
+		// shape disappears and OBS logs "no active effect" every frame.
+		gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+		if (effect) {
+			while (gs_effect_loop(effect, "Draw"))
+				obs_source_draw(shape->texture, 0, 0,
+					gs_texture_get_width(shape->texture),
+					gs_texture_get_height(shape->texture), false);
+		}
+	}
 }
 
 uint32_t shapeWidth(void *context)

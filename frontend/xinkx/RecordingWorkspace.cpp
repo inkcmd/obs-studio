@@ -17,6 +17,9 @@
 #include <QLineEdit>
 #include <QListWidgetItem>
 #include <QMouseEvent>
+#include <QPainter>
+#include <QPixmap>
+#include <QIcon>
 #include <QSizePolicy>
 #include <QListWidget>
 #include <QMessageBox>
@@ -50,6 +53,25 @@ bool enumerateVideoSource(void *data, obs_source_t *source)
 	if (obs_source_get_type(source) != OBS_SOURCE_TYPE_INPUT ||
 	    !(obs_source_get_output_flags(source) & OBS_SOURCE_VIDEO)) return true;
 	return enumerateScene(data, source);
+}
+
+// Icons are painted explicitly: font glyphs such as "record" / "stop" vary
+// by Windows font and style and may become blank or oversized.
+QIcon recordingActionIcon(bool stopping)
+{
+	QPixmap pixmap(20, 20);
+	pixmap.fill(Qt::transparent);
+	QPainter painter(&pixmap);
+	painter.setRenderHint(QPainter::Antialiasing);
+	painter.setPen(Qt::NoPen);
+	if (stopping) {
+		painter.setBrush(QColor(245, 245, 245));
+		painter.drawRect(QRect(5, 5, 10, 10));
+	} else {
+		painter.setBrush(QColor(230, 50, 55));
+		painter.drawEllipse(QRect(4, 4, 12, 12));
+	}
+	return QIcon(pixmap);
 }
 
 // Each row selects its job on a click while leaving the embedded start/stop
@@ -165,6 +187,7 @@ public:
 		fps = new QSpinBox(right);
 		fps->setRange(0, 120);
 		fps->setSpecialValueText(QStringLiteral("Как в OBS"));
+		fps->setToolTip(QStringLiteral("Для отдельной записи доступны частоты, кратные FPS OBS: например, при 60 FPS — 60/30/20/15"));
 		form->addRow(QStringLiteral("FPS"), fps);
 		audioPanel = new QWidget(right);
 		auto *audioLayout = new QVBoxLayout(audioPanel);
@@ -247,7 +270,6 @@ public:
 		});
 		connect(name, &QLineEdit::textChanged, this, [this] {
 			if (changing || list->currentRow() < 0) return;
-			list->currentItem()->setText(name->text());
 			if (auto *rowLabel = rowLabels.at(list->currentRow()).data()) rowLabel->setText(name->text());
 		});
 		connect(kind, &QComboBox::currentIndexChanged, this, [this] {
@@ -346,9 +368,12 @@ private:
 			auto *button = rowButtons.at(index).data();
 			if (!button) continue;
 			const bool active = recordingJobActive(main, jobs.at(index).id);
-			button->setText(active ? QStringLiteral("■ Стоп") : QStringLiteral("▶ Запись"));
-			button->setToolTip(active ? QStringLiteral("Остановить эту запись")
-			                          : QStringLiteral("Запустить эту запись"));
+			static const QIcon recordIcon = recordingActionIcon(false);
+			static const QIcon stopIcon = recordingActionIcon(true);
+			button->setIcon(active ? stopIcon : recordIcon);
+			button->setToolTip(active ? QStringLiteral("Остановить запись")
+			                          : QStringLiteral("Начать запись"));
+			button->setAccessibleName(button->toolTip());
 		}
 	}
 
@@ -360,7 +385,8 @@ private:
 		rowButtons.clear();
 		for (const auto &job : jobs) {
 			auto *item = new QListWidgetItem(list);
-			item->setText(job.name);
+			// QListWidgetItem must not paint its own text behind our custom row.
+			// All visible text is owned by the QLabel below.
 			auto *row = new RecordingJobRow(list, item);
 			auto *layout = new QHBoxLayout(row);
 			layout->setContentsMargins(6, 1, 2, 1);
@@ -371,7 +397,9 @@ private:
 			layout->addWidget(title, 1);
 			auto *button = new QPushButton(row);
 			button->setObjectName(QStringLiteral("xinkxRecordingJobToggle"));
-			button->setFixedWidth(80);
+			button->setFixedSize(34, 26);
+			button->setIconSize(QSize(20, 20));
+			button->setFocusPolicy(Qt::NoFocus);
 			layout->addWidget(button);
 			const QString jobId = job.id;
 			connect(button, &QPushButton::clicked, this, [this, item, jobId] {
@@ -420,7 +448,8 @@ private:
 		job.folder = folder->text().trimmed();
 		job.sessionFolder = sessionFolder->isChecked();
 		job.format = format->currentData().toString();
-		if (auto *item = list->item(oldIndex)) item->setText(job.name);
+		if (oldIndex < rowLabels.size())
+			if (auto *label = rowLabels.at(oldIndex).data()) label->setText(job.name);
 	}
 
 	void populateSources(const QString &uuid)
