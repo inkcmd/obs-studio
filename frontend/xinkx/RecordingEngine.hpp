@@ -16,16 +16,19 @@ struct RecordingJob {
 	QString kind = QStringLiteral("source");
 	QString sourceUuid;
 	bool enabled = true;
-	bool inherit = true;
+	// Existing jobs retain their saved inherit flag; new independent jobs use CQP.
+	bool inherit = false;
 	QString encoder = QStringLiteral("obs_nvenc_h264_tex");
 	int width = 0;
 	int height = 0;
 	int fps = 0;
-	int quality = 20;
+	int quality = 27;
+	QString preset = QStringLiteral("p4");
 	QString rateControl = QStringLiteral("quality");
 	int bitrate = 12000;
 	int audioMix = 0; // -1 means no audio; otherwise OBS mixer 1-6
 	QString folder;
+	bool sessionFolder = true; // Put independent recordings in a dated session folder.
 	QString format = QStringLiteral("mkv");
 };
 

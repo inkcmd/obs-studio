@@ -240,9 +240,25 @@ public:
 private:
 	QPointer<OBSBasic> main;
 	std::vector<std::unique_ptr<Run>> runs;
+	QString currentSession;
+
+	void beginSessionIfNeeded()
+	{
+		// A new batch after all previous outputs stopped must not reuse its folder,
+		// even if the 300 ms reaper has not deleted the old Run objects yet.
+		const bool anyRunning = std::any_of(runs.begin(), runs.end(), [](const auto &run) {
+			return run->output && !run->stopping &&
+				(obs_output_active(run->output) ||
+				 (run->created.isValid() && run->created.elapsed() < 1000));
+		});
+		if (!anyRunning) currentSession.clear();
+		if (currentSession.isEmpty())
+			currentSession = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss-zzz"));
+	}
 
 	bool startJob(const RecordingJob &job, QStringList &errors)
 	{
+		beginSessionIfNeeded();
 		auto run = std::make_unique<Run>();
 		run->job = job;
 		obs_video_info videoInfo{};
@@ -308,7 +324,9 @@ private:
 			const bool cbr = job.rateControl == QStringLiteral("cbr");
 			obs_data_set_string(vSettings, "rate_control", cbr ? "CBR" : (x264 ? "CRF" : "CQP"));
 			if (cbr) obs_data_set_int(vSettings, "bitrate", job.bitrate);
-			else obs_data_set_int(vSettings, x264 ? "crf" : "cqp", job.quality);
+			else obs_data_set_int(vSettings, x264 ? "crf" : "cqp", std::clamp(job.quality, 12, 35));
+			if (encoderId.startsWith(QStringLiteral("obs_nvenc_")))
+				obs_data_set_string(vSettings, "preset", job.preset.toUtf8().constData());
 			obs_data_set_int(vSettings, "keyint_sec", 2);
 		}
 		run->videoEncoder = obs_video_encoder_create(encoderId.toUtf8().constData(),
@@ -332,14 +350,19 @@ private:
 			}
 			obs_encoder_set_audio(run->audioEncoder, obs_get_audio());
 		}
-		const QString directory = job.folder.isEmpty() ? defaultFolder() : job.folder;
+		const QString root = job.folder.isEmpty() ? defaultFolder() : job.folder;
+		const QString directory = job.sessionFolder ? QDir(root).filePath(currentSession) : root;
 		if (!QDir().mkpath(directory)) {
 			errors << QStringLiteral("%1: невозможно создать папку %2").arg(job.name, directory);
 			return false;
 		}
 		const QString ext = job.format == QStringLiteral("mp4") ? QStringLiteral("mp4") : QStringLiteral("mkv");
-		const QString filename = safeFileName(job.name) + QLatin1Char('_') +
-			QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss-zzz")) + QLatin1Char('.') + ext;
+		const QString basename = safeFileName(job.name) + QLatin1Char('_') +
+			QDateTime::currentDateTime().toString(QStringLiteral("HH-mm-ss-zzz"));
+		QString filename = basename + QLatin1Char('.') + ext;
+		// Never overwrite an earlier clip when a job is restarted in the same session.
+		for (int suffix = 2; QFileInfo::exists(QDir(directory).filePath(filename)); ++suffix)
+			filename = basename + QLatin1Char('_') + QString::number(suffix) + QLatin1Char('.') + ext;
 		OBSDataAutoRelease outputSettings = obs_data_create();
 		run->outputPath = QDir(directory).filePath(filename);
 		obs_data_set_string(outputSettings, "path", run->outputPath.toUtf8().constData());
@@ -405,16 +428,18 @@ QVector<RecordingJob> loadRecordingJobs()
 		job.kind = obj.value(QStringLiteral("kind")).toString();
 		job.sourceUuid = obj.value(QStringLiteral("source")).toString();
 		job.enabled = obj.value(QStringLiteral("enabled")).toBool(true);
-		job.inherit = obj.value(QStringLiteral("inherit")).toBool(true);
+		job.inherit = obj.value(QStringLiteral("inherit")).toBool(true); // Preserve old saved jobs.
 		job.encoder = obj.value(QStringLiteral("encoder")).toString(QStringLiteral("obs_nvenc_h264_tex"));
 		job.width = obj.value(QStringLiteral("width")).toInt();
 		job.height = obj.value(QStringLiteral("height")).toInt();
 		job.fps = obj.value(QStringLiteral("fps")).toInt();
 		job.quality = obj.value(QStringLiteral("quality")).toInt(20);
+		job.preset = obj.value(QStringLiteral("preset")).toString(QStringLiteral("p4"));
 		job.rateControl = obj.value(QStringLiteral("rateControl")).toString(QStringLiteral("quality"));
 		job.bitrate = obj.value(QStringLiteral("bitrate")).toInt(12000);
 		job.audioMix = obj.value(QStringLiteral("audioMix")).toInt(0);
 		job.folder = obj.value(QStringLiteral("folder")).toString();
+		job.sessionFolder = obj.value(QStringLiteral("sessionFolder")).toBool(true);
 		job.format = obj.value(QStringLiteral("format")).toString(QStringLiteral("mkv"));
 		if (job.id.isEmpty() || job.name.trimmed().isEmpty()) continue;
 		if (job.kind != QStringLiteral("obs") && job.kind != QStringLiteral("portrait") &&
@@ -440,10 +465,12 @@ bool saveRecordingJobs(const QVector<RecordingJob> &jobs, QString *error)
 		obj[QStringLiteral("height")] = job.height;
 		obj[QStringLiteral("fps")] = job.fps;
 		obj[QStringLiteral("quality")] = job.quality;
+		obj[QStringLiteral("preset")] = job.preset;
 		obj[QStringLiteral("rateControl")] = job.rateControl;
 		obj[QStringLiteral("bitrate")] = job.bitrate;
 		obj[QStringLiteral("audioMix")] = job.audioMix;
 		obj[QStringLiteral("folder")] = job.folder;
+		obj[QStringLiteral("sessionFolder")] = job.sessionFolder;
 		obj[QStringLiteral("format")] = job.format;
 		array.append(obj);
 	}

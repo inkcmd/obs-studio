@@ -52,8 +52,8 @@ public:
 	explicit RecordingDialog(OBSBasic *parent) : QDialog(parent), main(parent), jobs(loadRecordingJobs())
 	{
 		setWindowTitle(QStringLiteral("XINKX · Настройки записи"));
-		resize(850, 600);
-		setMinimumSize(740, 510);
+		resize(900, 650);
+		setMinimumSize(760, 560);
 		auto *outer = new QVBoxLayout(this);
 		auto *explanation = new QLabel(QStringLiteral(
 			"Кнопка «Запись» запускает только отмеченные задания. "
@@ -114,6 +114,9 @@ public:
 		form->addRow(QStringLiteral("Сцена / источник"), target);
 		inherit = new QCheckBox(QStringLiteral("Наследовать кодировщик и качество OBS"), right);
 		form->addRow(inherit);
+		auto *recommended = new QPushButton(QStringLiteral("Локальная запись: CQP + NVENC P4"), right);
+		recommended->setToolTip(QStringLiteral("Игра/сцена: CQP 21; отдельный источник (например камера): CQP 27"));
+		form->addRow(recommended);
 		encoder = new QComboBox(right);
 		const struct { const char *id; const char *title; } encoders[] = {
 			{"obs_nvenc_h264_tex", "NVIDIA NVENC H.264"},
@@ -126,6 +129,10 @@ public:
 				encoder->addItem(QString::fromUtf8(candidate.title), QString::fromUtf8(candidate.id));
 		}
 		form->addRow(QStringLiteral("Кодировщик"), encoder);
+		preset = new QComboBox(right);
+		for (int i = 1; i <= 7; ++i)
+			preset->addItem(QStringLiteral("P%1").arg(i), QStringLiteral("p%1").arg(i));
+		form->addRow(QStringLiteral("NVENC пресет"), preset);
 		rateControl = new QComboBox(right);
 		rateControl->addItem(QStringLiteral("По качеству (CQP / CRF)"), QStringLiteral("quality"));
 		rateControl->addItem(QStringLiteral("По битрейту (CBR)"), QStringLiteral("cbr"));
@@ -171,7 +178,10 @@ public:
 		auto *browse = new QPushButton(QStringLiteral("…"), right);
 		browse->setMaximumWidth(35);
 		folderRow->addWidget(browse);
-		form->addRow(QStringLiteral("Папка"), folderRow);
+		form->addRow(QStringLiteral("Корневая папка"), folderRow);
+		sessionFolder = new QCheckBox(QStringLiteral("Создавать папку по дате и времени запуска записей"), right);
+		sessionFolder->setToolTip(QStringLiteral("Все одновременно запущенные задания с одной корневой папкой попадут в один каталог сеанса"));
+		form->addRow(sessionFolder);
 		auto *hint = new QLabel(QStringLiteral(
 			"Разрешение 0×0 — исходное. Для отдельного источника звук берётся из "
 			"выбранного микшера OBS, а не автоматически только из этого источника. "
@@ -222,6 +232,23 @@ public:
 			updateEnabled();
 		});
 		connect(inherit, &QCheckBox::toggled, this, [this] { updateEnabled(); });
+		connect(recommended, &QPushButton::clicked, this, [this] {
+			if (kind->currentData() == QStringLiteral("obs")) return;
+			const bool cameraLike = kind->currentData() == QStringLiteral("source");
+			inherit->setChecked(false);
+			// Keep HEVC/AV1 if already selected; don't silently change a codec
+			// when the user only asks for better local recording quality.
+			if (!encoder->currentData().toString().startsWith(QStringLiteral("obs_nvenc_"))) {
+				const int nvencIndex = encoder->findData(QStringLiteral("obs_nvenc_h264_tex"));
+				if (nvencIndex >= 0) encoder->setCurrentIndex(nvencIndex);
+			}
+			rateControl->setCurrentIndex(std::max(0, rateControl->findData(QStringLiteral("quality"))));
+			preset->setCurrentIndex(std::max(0, preset->findData(QStringLiteral("p4"))));
+			quality->setValue(cameraLike ? 27 : 21);
+			if (cameraLike) fps->setValue(30);
+			updateEnabled();
+		});
+		connect(encoder, &QComboBox::currentIndexChanged, this, [this] { updateEnabled(); });
 		connect(rateControl, &QComboBox::currentIndexChanged, this, [this] { updateEnabled(); });
 		connect(browse, &QPushButton::clicked, this, [this] {
 			const QString dir = QFileDialog::getExistingDirectory(this, QStringLiteral("Папка записей"), folder->text());
@@ -269,9 +296,11 @@ private:
 	QLineEdit *folder{};
 	QCheckBox *enabled{};
 	QCheckBox *inherit{};
+	QCheckBox *sessionFolder{};
 	QComboBox *kind{};
 	QComboBox *target{};
 	QComboBox *encoder{};
+	QComboBox *preset{};
 	QComboBox *audio{};
 	QComboBox *format{};
 	QComboBox *rateControl{};
@@ -309,10 +338,12 @@ private:
 		job.height = height->value();
 		job.fps = fps->value();
 		job.quality = quality->value();
+		job.preset = preset->currentData().toString();
 		job.rateControl = rateControl->currentData().toString();
 		job.bitrate = bitrate->value();
 		job.audioMix = audio->currentData().toInt();
 		job.folder = folder->text().trimmed();
+		job.sessionFolder = sessionFolder->isChecked();
 		job.format = format->currentData().toString();
 		if (auto *item = list->item(oldIndex)) item->setText(job.name);
 	}
@@ -351,10 +382,12 @@ private:
 			height->setValue(job.height);
 			fps->setValue(job.fps);
 			quality->setValue(job.quality);
+			preset->setCurrentIndex(std::max(0, preset->findData(job.preset)));
 			rateControl->setCurrentIndex(std::max(0, rateControl->findData(job.rateControl)));
 			bitrate->setValue(job.bitrate);
 			audio->setCurrentIndex(std::max(0, audio->findData(job.audioMix)));
 			folder->setText(job.folder);
+			sessionFolder->setChecked(job.sessionFolder);
 			format->setCurrentIndex(std::max(0, format->findData(job.format)));
 		}
 		changing = false;
@@ -372,11 +405,13 @@ private:
 		for (auto *widget : {static_cast<QWidget *>(encoder), static_cast<QWidget *>(rateControl),
 			static_cast<QWidget *>(width), static_cast<QWidget *>(height), static_cast<QWidget *>(fps)})
 			widget->setEnabled(advanced);
+		preset->setEnabled(advanced && encoder->currentData().toString().startsWith(QStringLiteral("obs_nvenc_")));
 		quality->setEnabled(advanced && rateControl->currentData() != QStringLiteral("cbr"));
 		bitrate->setEnabled(advanced && rateControl->currentData() == QStringLiteral("cbr"));
 		audio->setEnabled(separate);
 		format->setEnabled(separate);
 		folder->setEnabled(separate);
+		sessionFolder->setEnabled(separate);
 	}
 };
 
