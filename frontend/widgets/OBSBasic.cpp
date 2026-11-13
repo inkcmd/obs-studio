@@ -49,6 +49,7 @@
 #include <xinkx/StudioWorkspace.hpp>
 #include <xinkx/RecordingEngine.hpp>
 #include <xinkx/EngineRegistry.hpp>
+#include <xinkx/NativeSources.hpp>
 #include <xinkx/MultiStreamManager.hpp>
 
 #include <OBSStudioAPI.hpp>
@@ -2084,6 +2085,9 @@ void OBSBasic::closeWindow()
 	xinkx::shutdownEngineServices(this);
 	xinkx::stopRecordingJobs(this);
 	xinkx::shutdownStudioOutputs(this);
+	// Private browser children must be released before the global scene
+	// destroy queue and the obs-browser/CefShutdown module unload phase.
+	xinkx::shutdownNativeBrowserSources();
 	ClearSceneData();
 
 	OnEvent(OBS_FRONTEND_EVENT_EXIT);

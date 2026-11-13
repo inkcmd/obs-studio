@@ -20,7 +20,9 @@
 #include <array>
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 #include <utility>
+#include <vector>
 
 namespace xinkx {
 namespace {
@@ -59,6 +61,8 @@ int preferredRenderQuality(const LayerType &type)
 }
 
 struct NativeSource {
+	std::mutex browserMutex;
+	bool shuttingDown = false;
 	obs_source_t *parent = nullptr;
 	obs_source_t *browser = nullptr;
 	const LayerType *type = nullptr;
@@ -66,6 +70,28 @@ struct NativeSource {
 	uint32_t height = 0;
 	uint32_t renderScale = 1;
 };
+
+// A private browser can still be rendering on the OBS graphics thread while
+// the UI thread starts its shutdown. Take a strong libobs reference under the
+// same lock used to detach it; never render a released browser pointer.
+obs_source_t *browserRef(NativeSource *source)
+{
+	std::lock_guard<std::mutex> lock(source->browserMutex);
+	return source->browser ? obs_source_get_ref(source->browser) : nullptr;
+}
+
+void releaseBrowser(NativeSource *source)
+{
+	obs_source_t *browser = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(source->browserMutex);
+		source->shuttingDown = true;
+		browser = std::exchange(source->browser, nullptr);
+	}
+	if (!browser) return;
+	obs_source_remove_active_child(source->parent, browser);
+	obs_source_release(browser);
+}
 
 QString userPresetId(const QJsonObject &entry)
 {
@@ -161,8 +187,17 @@ bool saveNativePreset(obs_properties_t *, obs_property_t *, void *data)
 void update(void *data, obs_data_t *settings)
 {
 	auto *source = static_cast<NativeSource *>(data);
-	if (!source || !source->browser)
+	if (!source) return;
+	if (obs_data_get_bool(settings, "xinkx_shutdown_browser")) {
+		releaseBrowser(source);
 		return;
+	}
+	{
+		std::lock_guard<std::mutex> lock(source->browserMutex);
+		if (source->shuttingDown) return;
+	}
+	obs_source_t *browser = browserRef(source);
+	if (!browser) return;
 	const auto width = static_cast<int>(obs_data_get_int(settings, "width"));
 	const auto height = static_cast<int>(obs_data_get_int(settings, "height"));
 	source->width = static_cast<uint32_t>(width > 0 ? width : source->type->width);
@@ -215,7 +250,8 @@ void update(void *data, obs_data_t *settings)
 	obs_data_set_int(browserSettings, "fps", 30);
 	obs_data_set_bool(browserSettings, "shutdown", false);
 	obs_data_set_bool(browserSettings, "restart_when_active", true);
-	obs_source_update(source->browser, browserSettings);
+	obs_source_update(browser, browserSettings);
+	obs_source_release(browser);
 }
 
 void *create(obs_data_t *settings, obs_source_t *parent)
@@ -240,10 +276,7 @@ void destroy(void *data)
 	auto *source = static_cast<NativeSource *>(data);
 	if (!source)
 		return;
-	if (source->browser) {
-		obs_source_remove_active_child(source->parent, source->browser);
-		obs_source_release(source->browser);
-	}
+	releaseBrowser(source);
 	delete source;
 }
 
@@ -253,20 +286,23 @@ uint32_t height(void *data) { return static_cast<NativeSource *>(data)->height; 
 void render(void *data, gs_effect_t *)
 {
 	auto *source = static_cast<NativeSource *>(data);
-	if (source->browser) {
-		gs_matrix_push();
-		const float scale = 1.f / float(std::max(1u, source->renderScale));
-		gs_matrix_scale3f(scale, scale, 1.f);
-		obs_source_video_render(source->browser);
-		gs_matrix_pop();
-	}
+	obs_source_t *browser = browserRef(source);
+	if (!browser) return;
+	gs_matrix_push();
+	const float scale = 1.f / float(std::max(1u, source->renderScale));
+	gs_matrix_scale3f(scale, scale, 1.f);
+	obs_source_video_render(browser);
+	gs_matrix_pop();
+	obs_source_release(browser);
 }
 
 void enumActiveSources(void *data, obs_source_enum_proc_t callback, void *param)
 {
 	auto *source = static_cast<NativeSource *>(data);
-	if (source->browser)
-		callback(source->parent, source->browser, param);
+	obs_source_t *browser = browserRef(source);
+	if (!browser) return;
+	callback(source->parent, browser, param);
+	obs_source_release(browser);
 }
 
 void defaults(obs_data_t *settings)
@@ -362,6 +398,37 @@ obs_properties_t *properties(void *data)
 }
 
 } // namespace
+
+void shutdownNativeBrowserSources()
+{
+	// First collect strong parent references. obs_enum_sources can hold OBS's
+	// internal source list lock, so do not update a source from its callback.
+	struct BrowserCensus {
+		std::vector<OBSSource> nativeParents;
+		size_t ordinaryBrowsers = 0;
+	} census;
+	obs_enum_sources([](void *param, obs_source_t *source) {
+		auto &state = *static_cast<BrowserCensus *>(param);
+		const char *id = obs_source_get_id(source);
+		if (!id) return true;
+		if (std::strcmp(id, "browser_source") == 0)
+			++state.ordinaryBrowsers;
+		for (const auto &type : layers) {
+			if (std::strcmp(type.id, id) == 0) {
+				state.nativeParents.emplace_back(source);
+				break;
+			}
+		}
+		return true;
+	}, &census);
+	for (auto &parent : census.nativeParents) {
+		OBSDataAutoRelease shutdown = obs_data_create();
+		obs_data_set_bool(shutdown, "xinkx_shutdown_browser", true);
+		obs_source_update(parent, shutdown);
+	}
+	blog(LOG_INFO, "XINKX: pre-shutdown closed %zu private browser children; %zu ordinary browser sources remain for OBS cleanup",
+	     census.nativeParents.size(), census.ordinaryBrowsers);
+}
 
 void registerNativeSources()
 {
