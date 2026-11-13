@@ -15,6 +15,9 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidgetItem>
+#include <QMouseEvent>
+#include <QSizePolicy>
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPointer>
@@ -49,6 +52,23 @@ bool enumerateVideoSource(void *data, obs_source_t *source)
 	return enumerateScene(data, source);
 }
 
+// Each row selects its job on a click while leaving the embedded start/stop
+// button independently clickable.
+class RecordingJobRow final : public QWidget {
+public:
+	RecordingJobRow(QListWidget *owner, QListWidgetItem *item)
+		: QWidget(owner), list(owner), entry(item) {}
+protected:
+	void mousePressEvent(QMouseEvent *event) override
+	{
+		list->setCurrentItem(entry);
+		QWidget::mousePressEvent(event);
+	}
+private:
+	QListWidget *list;
+	QListWidgetItem *entry;
+};
+
 class RecordingDialog final : public QDialog {
 public:
 	explicit RecordingDialog(OBSBasic *parent) : QDialog(parent), main(parent), jobs(loadRecordingJobs())
@@ -67,7 +87,7 @@ public:
 		auto *left = new QVBoxLayout();
 		body->addLayout(left, 0);
 		list = new QListWidget(this);
-		list->setMinimumWidth(230);
+		list->setMinimumWidth(280);
 		left->addWidget(list, 1);
 		auto *add = new QPushButton(QStringLiteral("Добавить"), this);
 		auto *duplicate = new QPushButton(QStringLiteral("Дублировать"), this);
@@ -75,28 +95,10 @@ public:
 		left->addWidget(add);
 		left->addWidget(duplicate);
 		left->addWidget(remove);
-		auto *toggle = new QPushButton(QStringLiteral("Запустить выбранное"), this);
-		left->addWidget(toggle);
-		connect(toggle, &QPushButton::clicked, this, [this] {
-			store();
-			const int index = list->currentRow();
-			if (index < 0) return;
-			QString error;
-			if (!saveRecordingJobs(jobs, &error)) {
-				QMessageBox::warning(this, QStringLiteral("Записи"), error);
-				return;
-			}
-			toggleRecordingJob(main, jobs.at(index).id);
-		});
+		// Controls live next to each recording title, not below the list.
 		auto *refresh = new QTimer(this);
 		refresh->setInterval(350);
-		connect(refresh, &QTimer::timeout, this, [this, toggle] {
-			const int index = list->currentRow();
-			const bool valid = index >= 0 && index < jobs.size();
-			toggle->setEnabled(valid);
-			if (valid) toggle->setText(recordingJobActive(main, jobs.at(index).id) ?
-				QStringLiteral("Остановить выбранное") : QStringLiteral("Запустить выбранное"));
-		});
+		connect(refresh, &QTimer::timeout, this, [this] { refreshJobButtons(); });
 		refresh->start();
 		auto *right = new QGroupBox(QStringLiteral("Параметры задания"), this);
 		body->addWidget(right, 1);
@@ -246,6 +248,7 @@ public:
 		connect(name, &QLineEdit::textChanged, this, [this] {
 			if (changing || list->currentRow() < 0) return;
 			list->currentItem()->setText(name->text());
+			if (auto *rowLabel = rowLabels.at(list->currentRow()).data()) rowLabel->setText(name->text());
 		});
 		connect(kind, &QComboBox::currentIndexChanged, this, [this] {
 			if (changing) return;
@@ -313,6 +316,8 @@ private:
 	QPointer<OBSBasic> main;
 	QVector<RecordingJob> jobs;
 	QListWidget *list{};
+	QVector<QPointer<QLabel>> rowLabels;
+	QVector<QPointer<QPushButton>> rowButtons;
 	QLineEdit *name{};
 	QLineEdit *folder{};
 	QCheckBox *enabled{};
@@ -335,15 +340,61 @@ private:
 	bool changing = false;
 	int oldIndex = -1;
 
+	void refreshJobButtons()
+	{
+		for (int index = 0; index < jobs.size() && index < rowButtons.size(); ++index) {
+			auto *button = rowButtons.at(index).data();
+			if (!button) continue;
+			const bool active = recordingJobActive(main, jobs.at(index).id);
+			button->setText(active ? QStringLiteral("■ Стоп") : QStringLiteral("▶ Запись"));
+			button->setToolTip(active ? QStringLiteral("Остановить эту запись")
+			                          : QStringLiteral("Запустить эту запись"));
+		}
+	}
+
 	void rebuild(int selection)
 	{
 		changing = true;
 		list->clear();
-		for (const auto &job : jobs) list->addItem(job.name);
+		rowLabels.clear();
+		rowButtons.clear();
+		for (const auto &job : jobs) {
+			auto *item = new QListWidgetItem(list);
+			item->setText(job.name);
+			auto *row = new RecordingJobRow(list, item);
+			auto *layout = new QHBoxLayout(row);
+			layout->setContentsMargins(6, 1, 2, 1);
+			layout->setSpacing(4);
+			auto *title = new QLabel(job.name, row);
+			title->setAttribute(Qt::WA_TransparentForMouseEvents);
+			title->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+			layout->addWidget(title, 1);
+			auto *button = new QPushButton(row);
+			button->setObjectName(QStringLiteral("xinkxRecordingJobToggle"));
+			button->setFixedWidth(80);
+			layout->addWidget(button);
+			const QString jobId = job.id;
+			connect(button, &QPushButton::clicked, this, [this, item, jobId] {
+				list->setCurrentItem(item);
+				store();
+				QString error;
+				if (!saveRecordingJobs(jobs, &error)) {
+					QMessageBox::warning(this, QStringLiteral("Записи"), error);
+					return;
+				}
+				toggleRecordingJob(main, jobId);
+				refreshJobButtons();
+			});
+			item->setSizeHint(QSize(0, std::max(32, row->sizeHint().height())));
+			list->setItemWidget(item, row);
+			rowLabels.append(title);
+			rowButtons.append(button);
+		}
 		changing = false;
 		oldIndex = -1;
 		list->setCurrentRow(selection);
 		showJob(selection);
+		refreshJobButtons();
 	}
 
 	void store()

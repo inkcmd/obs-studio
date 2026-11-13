@@ -30,7 +30,7 @@ assert.match(streams, /applyStreamResolution/);
 // resize handles, mouse transforms and independent persistent source choices.
 assert.match(portrait, /xinkxPortraitEditor/);
 assert.match(portrait, /obs_sceneitem_get_box_transform\(layers\.at\(row\)\.item, &box\)/);
-assert.match(portrait, /native->DrawSceneEditing\(\)/);
+assert.match(portrait, /native->DrawSceneEditingForScene\(/);
 assert.doesNotMatch(portrait, /preview->resized =/);
 assert.match(portrait, /new PortraitDisplay\(nativePreview, side\)/);
 assert.match(portrait, /extraKey\(sceneName\)/);

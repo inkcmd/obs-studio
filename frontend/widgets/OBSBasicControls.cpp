@@ -3,9 +3,11 @@
 #include "qt-wrappers.hpp"
 #include <xinkx/RecordingEngine.hpp>
 
+#include <QIcon>
 #include <QKeySequence>
+#include <QMenu>
+#include <QPushButton>
 #include <QSizePolicy>
-#include <QToolButton>
 
 #include "moc_OBSBasicControls.cpp"
 
@@ -14,31 +16,33 @@ OBSBasicControls::OBSBasicControls(OBSBasic *main) : QFrame(nullptr), ui(new Ui:
 	/* Create UI elements */
 	ui->setupUi(this);
 
-	auto *accounts = new QToolButton(this);
+	// Use the same widget class and dimensions as the stock virtual camera
+	// settings button. QToolButton used here previously had a different frame
+	// and height from OBS's regular controls.
+	const QSize auxiliaryButtonSize = ui->virtualCamConfigButton->sizeHint();
+	auto *accounts = new QPushButton(QStringLiteral("▾"), this);
 	accounts->setObjectName(QStringLiteral("xinkxStreamSelection"));
-	accounts->setText(QStringLiteral("▾"));
-	accounts->setMinimumSize(32, 28);
-	accounts->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	accounts->setFixedSize(auxiliaryButtonSize);
 	accounts->setAccessibleName(QStringLiteral("Аккаунты трансляции"));
 	const QKeySequence accountsShortcut(QStringLiteral("Ctrl+Alt+S"));
 	accounts->setShortcut(accountsShortcut);
 	accounts->setToolTip(QStringLiteral("%1 (%2)").arg(accounts->accessibleName(), accountsShortcut.toString()));
-	accounts->setPopupMode(QToolButton::InstantPopup);
 	auto *accountMenu = new QMenu(accounts);
-	accounts->setMenu(accountMenu);
+	connect(accounts, &QPushButton::clicked, this, [accounts, accountMenu] {
+		accountMenu->popup(accounts->mapToGlobal(QPoint(0, accounts->height())));
+	});
 	ui->horizontalLayout_7->insertWidget(1, accounts);
 
-	// Configuration belongs to the stock Record control, not to OBS source filters.
-	auto *recordOptions = new QToolButton(this);
+	// A stock-sized gear opens the recording editor directly; no intermediate
+	// menu with a single "Configure recordings" item.
+	auto *recordOptions = new QPushButton(this);
 	recordOptions->setObjectName(QStringLiteral("xinkxRecordingOptions"));
-	recordOptions->setText(QStringLiteral("▾"));
-	recordOptions->setToolTip(QStringLiteral("Настройки отдельных записей"));
-	recordOptions->setMinimumSize(32, 28);
-	recordOptions->setPopupMode(QToolButton::InstantPopup);
-	auto *recordMenu = new QMenu(recordOptions);
-	auto *editRecording = recordMenu->addAction(QStringLiteral("Настроить записи…"));
-	connect(editRecording, &QAction::triggered, this, [main] { xinkx::showRecordingSettings(main); });
-	recordOptions->setMenu(recordMenu);
+	recordOptions->setIcon(ui->virtualCamConfigButton->icon());
+	recordOptions->setProperty("class", ui->virtualCamConfigButton->property("class"));
+	recordOptions->setFixedSize(auxiliaryButtonSize);
+	recordOptions->setAccessibleName(QStringLiteral("Настройки отдельных записей"));
+	recordOptions->setToolTip(recordOptions->accessibleName());
+	connect(recordOptions, &QPushButton::clicked, this, [main] { xinkx::showRecordingSettings(main); });
 	ui->recordingLayout->insertWidget(1, recordOptions);
 	connect(accountMenu, &QMenu::aboutToShow, this, [main, accountMenu] { main->ShowStreamAccountsMenu(accountMenu); });
 

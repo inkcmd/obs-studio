@@ -8,7 +8,7 @@ const studio = read('StudioWorkspace.cpp');
 
 for (const term of [
   'obs_canvas_scene_create(canvas',
-  'native->DrawSceneEditing()',
+  'native->DrawSceneEditingForScene(',
   'obs_sceneitem_set_info2(item, &info)',
   'matrix4_inv(&inverse, &box)',
   'contextRequested(float(point.x()), float(point.y()), mouse->globalPosition().toPoint())',

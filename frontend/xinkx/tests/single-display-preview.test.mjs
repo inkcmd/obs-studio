@@ -6,7 +6,7 @@ const portrait = read('../PortraitCanvas.cpp');
 const main = read('../../widgets/OBSBasic_Preview.cpp');
 const header = read('../PortraitCanvas.hpp');
 
-assert.match(main, /PortraitCanvas::instance\(\)\.renderPreview\(width, height\)/);
+assert.match(main, /PortraitCanvas::instance\(\)\.renderPreview\(width, height, window->drawSpacingHelpers\)/);
 assert.match(main, /PortraitCanvas::instance\(\)\.previewVisible\(\)/);
 assert.match(main, /workspaceWidth\(int\(cx\)\)/);
 assert.match(main, /workspaceHeight\(int\(cy\)\)/);

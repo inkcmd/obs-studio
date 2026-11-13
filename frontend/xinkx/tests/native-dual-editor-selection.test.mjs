@@ -11,7 +11,7 @@ assert.match(preview, /OBSScene OBSBasicPreview::EditingScene\(\) const/);
 assert.match(preview, /OBSScene scene = Get\(\)->EditingScene\(\)/);
 assert.match(preview, /GetStretchHandleData\(startPos, false\)/);
 assert.match(preview, /DrawSelectedItem/);
-assert.match(canvas, /native->DrawSceneEditing\(\)/);
+assert.match(canvas, /native->DrawSceneEditingForScene\(/);
 assert.doesNotMatch(canvas, /preview->pressed =/);
 assert.doesNotMatch(canvas, /preview->resized =/);
 assert.doesNotMatch(canvas, /previewState\.hasSelection/);

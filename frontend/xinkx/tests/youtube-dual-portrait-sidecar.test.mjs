@@ -18,7 +18,7 @@ for (const text of [
 for (const text of [
   'xinkxPortraitEditor',
   'PortraitCanvas::renderPreview',
-  'native->DrawSceneEditing()',
+  'native->DrawSceneEditingForScene(',
   'obs_sceneitem_get_box_transform',
   'obs_sceneitem_set_visible',
   'obs_save_source(source)',

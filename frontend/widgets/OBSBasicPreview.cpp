@@ -641,7 +641,25 @@ void OBSBasicPreview::mousePressEvent(QMouseEvent *event)
 	    (event->button() == Qt::LeftButton || event->button() == Qt::RightButton)) {
 		const auto region = xinkx::PortraitCanvas::portraitPreviewRegion(width(), height());
 		const float ratio = float(devicePixelRatioF());
-		SetPortraitEditing(region.contains(float(pos.x()) * ratio, float(pos.y()) * ratio));
+		bool portraitHit = region.contains(float(pos.x()) * ratio, float(pos.y()) * ratio);
+		if (!portraitHit && IsPortraitEditing() && event->button() == Qt::LeftButton) {
+			// Selected portrait handles (or their source bounds) can extend past
+			// the 9:16 output rectangle. Do not switch editing canvases before
+			// OBS has had a chance to hit-test those handles.
+			float ox, oy;
+			EditingOrigin(ox, oy);
+			vec2 relativePos;
+			vec2_set(&relativePos, float(pos.x()) - ox / ratio, float(pos.y()) - oy / ratio);
+			GetStretchHandleData(relativePos, true);
+			portraitHit = stretchHandle != ItemHandle::None && stretchItem &&
+				!obs_sceneitem_locked(stretchItem);
+			if (!portraitHit) {
+				vec2 scenePos = relativePos;
+				vec2_divf(&scenePos, &scenePos, EditingScale() / ratio);
+				portraitHit = SelectedAtPos(scenePos);
+			}
+		}
+		SetPortraitEditing(portraitHit);
 	}
 
 	if (xinkx::PortraitCanvas::instance().previewVisible() && event->button() == Qt::MiddleButton) {
