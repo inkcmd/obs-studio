@@ -1,6 +1,6 @@
 #include "EventAutomation.hpp"
 
-#include "StudioAutomation.hpp"
+#include "EngineRegistry.hpp"
 #include "StreamAccounts.hpp"
 #include "StudioWorkspace.hpp"
 
@@ -29,10 +29,6 @@
 namespace xinkx {
 
 namespace {
-
-const QStringList allowedCommands{QStringLiteral("scene.activate"), QStringLiteral("effect.trigger"),
-	QStringLiteral("timer.start"), QStringLiteral("timer.pause"), QStringLiteral("timer.hide"),
-	QStringLiteral("source.visible")};
 
 QString ruleLabel(const QJsonObject &rule)
 {
@@ -68,13 +64,15 @@ EventAutomation::EventAutomation(OBSBasic *mainWindow) : QObject(mainWindow), wi
 		connect(core, &EventCore::delivered, this, &EventAutomation::onEvent);
 }
 
-bool EventAutomation::validRule(const QJsonObject &rule, QString *error)
+bool EventAutomation::validRule(const QJsonObject &rule, QString *error) const
 {
 	const QString event = rule.value(QStringLiteral("event")).toString();
 	const QString platform = rule.value(QStringLiteral("platform")).toString();
 	const QJsonObject action = rule.value(QStringLiteral("action")).toObject();
 	const QString command = action.value(QStringLiteral("command")).toString();
 	const int cooldown = rule.value(QStringLiteral("cooldownMs")).toInt();
+	const auto *registry = window->findChild<EngineRegistry *>(QStringLiteral("xinkxEngineRegistry"));
+	const QStringList allowed = registry ? registry->automatableActions() : QStringList{};
 	const bool valid = !rule.value(QStringLiteral("id")).toString().isEmpty() &&
 		rule.value(QStringLiteral("name")).toString().size() <= 100 &&
 		(QStringList{QStringLiteral("chat"), QStringLiteral("follow"), QStringLiteral("sub"),
@@ -82,7 +80,7 @@ bool EventAutomation::validRule(const QJsonObject &rule, QString *error)
 		(platform == QStringLiteral("*") ||
 		 (QStringList{QStringLiteral("twitch"), QStringLiteral("youtube"), QStringLiteral("kick"),
 			QStringLiteral("donationalerts"), QStringLiteral("custom")}).contains(platform)) &&
-		allowedCommands.contains(command) && cooldown >= 0 && cooldown <= 3600000 &&
+		allowed.contains(command) && cooldown >= 0 && cooldown <= 3600000 &&
 		rule.value(QStringLiteral("contains")).toString().size() <= 120 &&
 		rule.value(QStringLiteral("enabled")).isBool();
 	if (!valid && error) *error = QStringLiteral("Недопустимое условие, команда или интервал правила");
@@ -122,10 +120,11 @@ void EventAutomation::onEvent(const StudioEvent &event)
 		const QString id = rule.value(QStringLiteral("id")).toString();
 		if (nextAllowed.value(id) > now) continue;
 		const auto command = rule.value(QStringLiteral("action")).toObject();
-		if (!allowedCommands.contains(command.value(QStringLiteral("command")).toString())) continue;
-		nextAllowed[id] = now + rule.value(QStringLiteral("cooldownMs")).toInt();
-		if (auto *engine = window->findChild<StudioAutomation *>(QStringLiteral("xinkxStudioAutomation"))) {
-			const auto result = engine->execute(command);
+		if (auto *registry = window->findChild<EngineRegistry *>(QStringLiteral("xinkxEngineRegistry"))) {
+			if (!registry->automatableActions().contains(command.value(QStringLiteral("command")).toString()))
+				continue;
+			nextAllowed[id] = now + rule.value(QStringLiteral("cooldownMs")).toInt();
+			const auto result = registry->executeAction(command, true);
 			emit executed(rule.value(QStringLiteral("name")).toString(),
 				result.value(QStringLiteral("message")).toString(), result.value(QStringLiteral("ok")).toBool());
 		}
@@ -174,9 +173,19 @@ void installEventAutomationWorkspace(OBSBasic *window)
 		auto *contains = new QLineEdit(&dialog);
 		contains->setPlaceholderText(QStringLiteral("Необязательно; текст события"));
 		auto *action = new QComboBox(&dialog);
-		for (const auto &command : allowedCommands) action->addItem(command);
+		QHash<QString, QJsonObject> actionSpecs;
+		if (auto *registry = window->findChild<EngineRegistry *>(QStringLiteral("xinkxEngineRegistry"))) {
+			for (const auto &entry : registry->actionCatalog()) {
+				const auto spec = entry.toObject();
+				if (!spec.value(QStringLiteral("automatable")).toBool()) continue;
+				const QString id = spec.value(QStringLiteral("id")).toString();
+				actionSpecs.insert(id, spec);
+				action->addItem(spec.value(QStringLiteral("title")).toString() +
+					QStringLiteral(" · ") + id, id);
+			}
+		}
 		auto *value = new QLineEdit(&dialog);
-		value->setPlaceholderText(QStringLiteral("Имя сцены / источник / gg / boom"));
+		value->setPlaceholderText(QStringLiteral("Имя сцены / источник / gg / текст маркера"));
 		auto *seconds = new QSpinBox(&dialog);
 		seconds->setRange(1, 3600);
 		seconds->setValue(60);
@@ -191,18 +200,28 @@ void installEventAutomationWorkspace(OBSBasic *window)
 		form->addRow(QStringLiteral("Команда"), action);
 		form->addRow(QStringLiteral("Аргумент"), value);
 		form->addRow(QStringLiteral("Таймер (сек)"), seconds);
+		const auto refreshArgument = [action, actionSpecs, value, seconds] {
+			const auto spec = actionSpecs.value(action->currentData().toString());
+			const auto kind = spec.value(QStringLiteral("argumentType")).toString();
+			value->setEnabled(kind == QStringLiteral("text"));
+			seconds->setEnabled(kind == QStringLiteral("seconds"));
+			value->setPlaceholderText(spec.value(QStringLiteral("argumentKey")).toString());
+		};
+		QObject::connect(action, &QComboBox::currentIndexChanged, &dialog,
+			[refreshArgument](int) { refreshArgument(); });
+		refreshArgument();
 		form->addRow(QStringLiteral("Задержка повторов"), cooldown);
 		auto *save = new QPushButton(QStringLiteral("Сохранить правило"), &dialog);
 		form->addRow(save);
 		QObject::connect(save, &QPushButton::clicked, &dialog, [&] {
-			QJsonObject command{{QStringLiteral("command"), action->currentText()}};
-			if (action->currentText() == QStringLiteral("effect.trigger"))
-				command.insert(QStringLiteral("effect"), value->text());
-			else if (action->currentText() == QStringLiteral("timer.start"))
-				command.insert(QStringLiteral("seconds"), seconds->value());
-			else command.insert(QStringLiteral("name"), value->text());
-			if (action->currentText() == QStringLiteral("source.visible"))
-				command.insert(QStringLiteral("visible"), true);
+			const QString id = action->currentData().toString();
+			const auto spec = actionSpecs.value(id);
+			QJsonObject command = spec.value(QStringLiteral("defaults")).toObject();
+			command.insert(QStringLiteral("command"), id);
+			const QString key = spec.value(QStringLiteral("argumentKey")).toString();
+			const QString kind = spec.value(QStringLiteral("argumentType")).toString();
+			if (kind == QStringLiteral("text")) command.insert(key, value->text());
+			else if (kind == QStringLiteral("seconds")) command.insert(key, seconds->value());
 			QJsonObject rule{{QStringLiteral("id"), QUuid::createUuid().toString(QUuid::WithoutBraces)},
 				{QStringLiteral("name"), name->text().left(100)},
 				{QStringLiteral("platform"), platform->currentText()},

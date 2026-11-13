@@ -20,7 +20,7 @@ public:
 	explicit EventAutomation(OBSBasic *window);
 	QJsonArray rules() const { return savedRules; }
 	bool replaceRules(const QJsonArray &rules, QString *error = nullptr);
-	static bool validRule(const QJsonObject &rule, QString *error = nullptr);
+	bool validRule(const QJsonObject &rule, QString *error = nullptr) const;
 
 signals:
 	void executed(const QString &ruleName, const QString &result, bool success);

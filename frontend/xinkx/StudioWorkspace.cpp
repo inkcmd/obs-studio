@@ -14,6 +14,7 @@
 #include "EventAutomation.hpp"
 #include "LocalAssistants.hpp"
 #include "EngineRegistry.hpp"
+#include "MarkerEngine.hpp"
 #include "WheelFocusGuard.hpp"
 #include "PortraitCanvas.hpp"
 #include "StreamAccounts.hpp"
@@ -550,6 +551,7 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	const QString eventsFile = settingsFile.isEmpty() ? QString{} :
 		QFileInfo(settingsFile).absoluteDir().filePath(QStringLiteral("events.jsonl"));
 	new EventCore(eventsFile, mainWindow);
+	installEngineServices(mainWindow); // Before rules: extension actions must exist on load.
 	new ModerationEngine(mainWindow); // Must exist before ChatGateway can publish live chat.
 	new AlertEngine(mainWindow);
 	installOverlayWorkspace(mainWindow, inspector);
@@ -562,6 +564,7 @@ void installStudioWorkspace(OBSBasic *mainWindow)
 	// JSON scene export remains available in source for diagnostics. Native source and
 	// scene editing in OBS is the default; no separate raw JSON dock is opened.
 	installDonationWorkspace(mainWindow);
+	installMarkerWorkspace(mainWindow);
 	installEngineHub(mainWindow);
 	QTimer::singleShot(0, mainWindow, [mainWindow, inspector, studio, studioPages] {
 		studio->setFloating(false);
