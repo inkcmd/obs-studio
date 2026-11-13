@@ -51,6 +51,7 @@
 #include <atomic>
 #include <climits>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -959,6 +960,27 @@ void PortraitCanvas::edit(QWidget *parent)
 			obs_frontend_open_source_properties(created);
 			obs_source_release(created);
 		});
+		// OBS game_capture has OBS_SOURCE_DO_NOT_DUPLICATE, so the generic
+		// duplicate API cannot be used.  Creating a fresh input with a copy
+		// of its settings gives this portrait scene an independent window
+		// selector instead of mutating the shared horizontal capture.
+		if (selected.source && !strcmp(obs_source_get_id(selected.source), "game_capture")) {
+			auto *copyGame = menu.addAction(
+				QStringLiteral("Создать независимый захват игры из выделенного 16:9"));
+			QObject::connect(copyGame, &QAction::triggered, side, [=] {
+				OBSSourceAutoRelease original = obs_get_source_by_uuid(selectedSourceUuid.toUtf8().constData());
+				if (!original) return;
+				OBSDataAutoRelease settings = obs_source_get_settings(original);
+				const QString name = QStringLiteral("9:16 · Захват игры · %1")
+					.arg(QUuid::createUuid().toString(QUuid::WithoutBraces).left(6));
+				obs_source_t *created = obs_source_create("game_capture", name.toUtf8().constData(),
+					settings, nullptr);
+				if (!created) return;
+				addSource(created, true);
+				obs_frontend_open_source_properties(created);
+				obs_source_release(created);
+			});
+		}
 		menu.addSeparator();
 		const std::array<std::pair<const char *, const char *>, 6> nativeTypes = {{
 			{"xinkx_chat", "Чат"}, {"xinkx_reactions", "Реакции"},

@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+const read = name => readFileSync(new URL(`../${name}`, import.meta.url), 'utf8');
+const preview = read('../widgets/OBSBasicPreview.cpp');
+const portrait = read('PortraitCanvas.cpp');
+const dialog = read('RecordingWorkspace.cpp');
+const resize = preview.slice(preview.indexOf('void OBSBasicPreview::StretchItem('), preview.indexOf('void OBSBasicPreview::RotateItem(', preview.indexOf('void OBSBasicPreview::StretchItem(')));
+assert.match(resize, /boundsType == OBS_BOUNDS_NONE/);
+assert.match(resize, /source_cx \? float\(source_cx\) : stretchItemSize\.x/);
+assert.match(resize, /obs_sceneitem_set_bounds\(stretchItem, &size\)/);
+assert.match(portrait, /Создать независимый захват игры из выделенного 16:9/);
+assert.match(portrait, /obs_source_get_settings\(original\)/);
+assert.match(portrait, /obs_source_create\("game_capture", name\.toUtf8\(\)\.constData\(\),/);
+assert.match(dialog, /QPushButton#xinkxRecordingJobToggle:hover/);
+assert.match(dialog, /Параметры записи/);
+assert.match(dialog, /CQP\/CRF %1 \(битрейт переменный\)/);
+console.log('Offline capture resizing, independent portrait game capture, and button hover PASS');

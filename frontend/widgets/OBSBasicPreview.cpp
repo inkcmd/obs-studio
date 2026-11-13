@@ -1619,15 +1619,18 @@ void OBSBasicPreview::StretchItem(const vec2 &pos)
 	uint32_t source_cx = obs_source_get_width(source);
 	uint32_t source_cy = obs_source_get_height(source);
 
-	/* if the source's internal size has been set to 0 for whatever reason
-	 * while resizing, do not update transform, otherwise source will be
-	 * stuck invisible until a complete transform reset */
-	if (!source_cx || !source_cy) {
+	/* Game Capture can report 0x0 while its target game is closed or
+	 * temporarily being re-hooked.  A scene item with bounds still has
+	 * an editable rectangle; changing those bounds must not depend on a
+	 * decoded frame.  Only free-scale (OBS_BOUNDS_NONE) requires source
+	 * dimensions to calculate a new scale. */
+	if ((!source_cx || !source_cy) && boundsType == OBS_BOUNDS_NONE) {
 		return;
 	}
 
 	vec2 baseSize;
-	vec2_set(&baseSize, float(source_cx), float(source_cy));
+	vec2_set(&baseSize, source_cx ? float(source_cx) : stretchItemSize.x,
+	         source_cy ? float(source_cy) : stretchItemSize.y);
 
 	vec2 size;
 	vec2_set(&size, br.x - tl.x, br.y - tl.y);

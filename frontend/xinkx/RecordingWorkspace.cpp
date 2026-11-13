@@ -189,6 +189,12 @@ public:
 		fps->setSpecialValueText(QStringLiteral("Как в OBS"));
 		fps->setToolTip(QStringLiteral("Для отдельной записи доступны частоты, кратные FPS OBS: например, при 60 FPS — 60/30/20/15"));
 		form->addRow(QStringLiteral("FPS"), fps);
+		outputSummary = new QLabel(right);
+		outputSummary->setWordWrap(true);
+		outputSummary->setTextInteractionFlags(Qt::TextSelectableByMouse);
+		outputSummary->setToolTip(QStringLiteral("Параметры задания; CQP не задаёт постоянный битрейт. "
+			"Реальные параметры записанного MKV можно проверить через ffprobe или MediaInfo."));
+		form->addRow(QStringLiteral("Параметры записи"), outputSummary);
 		audioPanel = new QWidget(right);
 		auto *audioLayout = new QVBoxLayout(audioPanel);
 		audioLayout->setContentsMargins(0, 0, 0, 0);
@@ -294,6 +300,23 @@ public:
 			if (cameraLike) fps->setValue(30);
 			updateEnabled();
 		});
+		// One technical summary for all named outputs: resolution, requested FPS,
+		// codec, quality mode and audio-track count.  Show configured parameters,
+		// not an invented measured bitrate for variable-quality CQP jobs.
+		const auto refreshSummary = [this] { updateSummary(); };
+		connect(encoder, &QComboBox::currentIndexChanged, this, refreshSummary);
+		connect(preset, &QComboBox::currentIndexChanged, this, refreshSummary);
+		connect(rateControl, &QComboBox::currentIndexChanged, this, refreshSummary);
+		connect(format, &QComboBox::currentIndexChanged, this, refreshSummary);
+		connect(width, &QSpinBox::valueChanged, this, refreshSummary);
+		connect(height, &QSpinBox::valueChanged, this, refreshSummary);
+		connect(fps, &QSpinBox::valueChanged, this, refreshSummary);
+		connect(quality, &QSpinBox::valueChanged, this, refreshSummary);
+		connect(bitrate, &QSpinBox::valueChanged, this, refreshSummary);
+		for (auto *track : audioTracks)
+			connect(track, &QCheckBox::toggled, this, refreshSummary);
+		connect(kind, &QComboBox::currentIndexChanged, this, refreshSummary);
+		connect(inherit, &QCheckBox::toggled, this, refreshSummary);
 		connect(encoder, &QComboBox::currentIndexChanged, this, [this] { updateEnabled(); });
 		connect(rateControl, &QComboBox::currentIndexChanged, this, [this] { updateEnabled(); });
 		connect(browse, &QPushButton::clicked, this, [this] {
@@ -358,6 +381,7 @@ private:
 	QSpinBox *width{};
 	QSpinBox *height{};
 	QSpinBox *fps{};
+	QLabel *outputSummary{};
 	QDialogButtonBox *buttons{};
 	bool changing = false;
 	int oldIndex = -1;
@@ -397,6 +421,15 @@ private:
 			layout->addWidget(title, 1);
 			auto *button = new QPushButton(row);
 			button->setObjectName(QStringLiteral("xinkxRecordingJobToggle"));
+			// QListWidget's hover/selection palette otherwise paints this button
+			// almost the same color as the selected row (the icon vanishes).
+			// Use a stable button surface for both states, not text glyphs.
+			button->setStyleSheet(QStringLiteral(
+				"QPushButton#xinkxRecordingJobToggle {background-color: #444a5a; "
+				"border: 1px solid #646b7e; border-radius: 4px;}"
+				"QPushButton#xinkxRecordingJobToggle:hover {background-color: #68748f; "
+				"border-color: #a5aec1;}"
+				"QPushButton#xinkxRecordingJobToggle:pressed {background-color: #283348;}"));
 			button->setFixedSize(34, 26);
 			button->setIconSize(QSize(20, 20));
 			button->setFocusPolicy(Qt::NoFocus);
@@ -497,6 +530,38 @@ private:
 		}
 		changing = false;
 		updateEnabled();
+		updateSummary();
+	}
+
+	void updateSummary()
+	{
+		if (!outputSummary) return;
+		if (kind->currentData() == QStringLiteral("obs")) {
+			outputSummary->setText(QStringLiteral("Штатная запись OBS — параметры в «Настройки → Вывод → Запись»."));
+			return;
+		}
+		if (inherit->isChecked()) {
+			outputSummary->setText(QStringLiteral("Наследуются параметры штатной записи OBS; "
+				"фактические параметры MKV проверяются после записи."));
+			return;
+		}
+		obs_video_info vi{};
+		const bool hasVideo = obs_get_video_info(&vi);
+		const QString resolution = width->value() && height->value()
+			? QStringLiteral("%1×%2").arg(width->value()).arg(height->value())
+			: QStringLiteral("исходное разрешение источника");
+		const QString frameRate = fps->value() > 0
+			? QString::number(fps->value())
+			: hasVideo && vi.fps_den ? QString::number(double(vi.fps_num) / vi.fps_den, 'f', 2)
+				: QStringLiteral("как в OBS");
+		const QString qualityText = rateControl->currentData() == QStringLiteral("cbr")
+			? QStringLiteral("CBR %1 кбит/с").arg(bitrate->value())
+			: QStringLiteral("CQP/CRF %1 (битрейт переменный)").arg(quality->value());
+		int tracks = 0;
+		for (auto *track : audioTracks) tracks += track->isChecked() ? 1 : 0;
+		outputSummary->setText(QStringLiteral("%1 · %2 FPS · %3 · %4 · %5 · аудио: %6")
+			.arg(resolution, frameRate, encoder->currentText(), qualityText,
+				format->currentData().toString().toUpper(), QString::number(tracks)));
 	}
 
 	void updateEnabled()
