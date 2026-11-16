@@ -882,20 +882,21 @@ static void obs_free_graphics(void)
 	}
 }
 
-void set_monitoring_duplication_source(void *param)
-{
-	obs_source_t *src = param;
-	struct obs_core_audio *audio = &obs->audio;
-
-	audio->monitoring_duplicating_source = src;
-}
-
 static void apply_monitoring_deduplication(void *ignored, calldata_t *cd)
 {
 	UNUSED_PARAMETER(ignored);
 	obs_source_t *src = calldata_ptr(cd, "source");
+	struct obs_core_audio *audio = &obs->audio;
 
-	obs_queue_task(OBS_TASK_AUDIO, set_monitoring_duplication_source, src, false);
+	/* The signal owns src only for the duration of this callback.  Keep a
+	 * weak reference instead of queuing a borrowed pointer to the audio
+	 * thread, where src may already have been destroyed. */
+	obs_weak_source_t *next = obs_source_get_weak_source(src);
+	pthread_mutex_lock(&audio->monitoring_mutex);
+	obs_weak_source_t *previous = audio->monitoring_duplicating_source;
+	audio->monitoring_duplicating_source = next;
+	pthread_mutex_unlock(&audio->monitoring_mutex);
+	obs_weak_source_release(previous);
 }
 
 static void set_audio_thread(void *unused);
@@ -948,6 +949,11 @@ static void obs_free_audio(void)
 	struct obs_core_audio *audio = &obs->audio;
 	if (audio->audio)
 		audio_output_close(audio->audio);
+
+	/* The audio callback has stopped; release the last weak monitoring
+	 * source reference before destroying its synchronization primitives. */
+	obs_weak_source_release(audio->monitoring_duplicating_source);
+	audio->monitoring_duplicating_source = NULL;
 
 	deque_free(&audio->buffered_timestamps);
 	da_free(audio->render_order);
