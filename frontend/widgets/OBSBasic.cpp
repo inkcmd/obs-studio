@@ -55,6 +55,7 @@
 #include <OBSStudioAPI.hpp>
 #ifdef BROWSER_AVAILABLE
 #include <browser-panel.hpp>
+#include <docks/BrowserDock.hpp>
 #endif
 #ifdef ENABLE_WAYLAND
 #include <obs-nix-platform.h>
@@ -2062,6 +2063,22 @@ void OBSBasic::closeWindow()
 	delete extraBrowsers;
 
 	saveAll();
+
+#ifdef BROWSER_AVAILABLE
+	// Request CEF browser closure while all browser docks and the CEF message
+	// loop still exist. Merely dropping the Qt dock owners below can leave
+	// asynchronous browser-close work pending until obs-browser unloads.
+	if (cef && obs_browser_qcef_version() >= 2) {
+		size_t browserDocksClosed = 0;
+		for (BrowserDock *dock : findChildren<BrowserDock *>()) {
+			if (!dock->cefWidget)
+				continue;
+			dock->cefWidget->closeBrowser();
+			++browserDocksClosed;
+		}
+		blog(LOG_INFO, "XINKX: requested early close for %zu CEF browser docks", browserDocksClosed);
+	}
+#endif
 
 	auth.reset();
 

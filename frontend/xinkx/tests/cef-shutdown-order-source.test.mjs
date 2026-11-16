@@ -27,3 +27,17 @@ test('private CEF browser is detached once, and rendering holds a libobs referen
   assert.match(native, /if \(source->shuttingDown\) return;/);
   assert.match(native, /obs_source_update\(browser, browserSettings\)/);
 });
+
+
+test('frontend browser docks request asynchronous CEF close before Qt owner teardown', () => {
+  const start = basic.indexOf('void OBSBasic::closeWindow()');
+  const closeBrowser = basic.indexOf('dock->cefWidget->closeBrowser();', start);
+  const auth = basic.indexOf('auth.reset();', start);
+  const clearDocks = basic.indexOf('ClearExtraBrowserDocks();', start);
+  const clearScenes = basic.indexOf('ClearSceneData();', start);
+  assert.ok(start >= 0 && closeBrowser > start);
+  assert.ok(closeBrowser < auth && auth < clearDocks && clearDocks < clearScenes);
+  assert.match(basic, /findChildren<BrowserDock \*>\(\)/);
+  assert.match(basic, /cef && obs_browser_qcef_version\(\) >= 2/);
+  assert.match(basic, /#include <docks\/BrowserDock\.hpp>/);
+});
