@@ -134,3 +134,30 @@ but its actual file path/timecode are not tracked by this patch.
 This elapsed time is computed at marker creation after an output start request;
 it is **not** a sample-accurate or frame-accurate muxer PTS. Timeline alignment
 requires verification against the recorded media before frame-precise editing.
+
+## Stage 1 / StudioState v1 (read-only integration slice)
+
+`xinkxStudioState` is a single QObject parented to OBSBasic and installed when
+Engine Hub starts. `snapshot()` returns a new JSON object (schemaVersion 1)
+from existing runtime components; it neither owns nor starts them. The Overview
+cards and engine catalog read the **same snapshot** once per existing 2-second
+poll. The command panel and event rules continue to use the existing
+EngineRegistry validation/dispatch path unchanged.
+
+Snapshot sections: `engines`, `events`, `alerts`, `stream`, `chat`, `moderation`,
+`shapes`, `ai`, `speech`. Unavailable components explicitly report
+`available: false`. Chat `configuredAccounts` is not the number of live chat
+connections; counters are local. The snapshot contains no stream keys, OAuth
+secrets, chat messages or unfiltered platform events. The QObject must be read
+from the GUI thread; off-thread calls return `available: false`.
+
+This is the **first integration slice**, not the completed Stage 1. Next work:
+engine lifecycle state transitions for adapters, a shared command bus and
+account registry, event-driven state notifications, accurate status for
+on-demand recording/native-source components, and integration tests on Windows.
+
+Windows acceptance: build RelWithDebInfo, open Overview with Twitch/YouTube/Kick
+accounts configured, verify the same event/alert/stream counters as previously;
+start/stop one output and check the overview updates within 2 seconds; test the
+engine action panel and one automation rule; close and reopen OBS with a capture
+and camera active. Native MSVC build remains required beyond source-contract tests.

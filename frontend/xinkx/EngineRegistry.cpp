@@ -13,6 +13,7 @@
 #include "MultiStreamManager.hpp"
 #include "OverlayRuntime.hpp"
 #include "StudioWorkspace.hpp"
+#include "StudioState.hpp"
 
 #include <widgets/OBSBasic.hpp>
 
@@ -370,6 +371,9 @@ QJsonArray EngineRegistry::inventory() const
 				entry.insert(QStringLiteral("lifecycle"),
 					runningExtensions.contains(module.id) ? QStringLiteral("running") : QStringLiteral("stopped"));
 				entry.insert(QStringLiteral("actions"), static_cast<int>(extension->actions().size()));
+					QJsonArray commandIds;
+					for (const auto &action : extension->actions()) commandIds.append(action.id);
+					entry.insert(QStringLiteral("commandIds"), commandIds);
 				QJsonArray subscriptions;
 				for (const auto &type : extension->eventTypes()) subscriptions.append(type);
 				entry.insert(QStringLiteral("subscriptions"), subscriptions);
@@ -403,6 +407,9 @@ void installEngineHub(OBSBasic *window)
 		registry = window->findChild<EngineRegistry *>(QStringLiteral("xinkxEngineRegistry"));
 	}
 	if (!registry) return;
+	// Install once; the snapshot never owns or restarts existing engines.
+	if (!window->findChild<StudioState *>(QStringLiteral("xinkxStudioState")))
+		new StudioState(window);
 	registry->registerModule(QStringLiteral("events"), QStringLiteral("Event Core"),
 		{QStringLiteral("dedup"), QStringLiteral("journal"), QStringLiteral("queued-delivery")},
 		window->findChild<EventCore *>(QStringLiteral("xinkxEventCore")));
@@ -501,6 +508,8 @@ void installEngineHub(OBSBasic *window)
 	commandsPageLayout->addStretch(1);
 	tabs->addTab(commandsPage, QStringLiteral("Действия"));
 	const QPointer<EngineRegistry> safeRegistry(registry);
+	const QPointer<StudioState> safeState(
+		window->findChild<StudioState *>(QStringLiteral("xinkxStudioState")));
 	const auto updateAction = [safeRegistry, actionSelect, actionForm, actionButton] {
 		if (!safeRegistry) return;
 		const QString id = actionSelect->currentData().toString();
@@ -554,72 +563,88 @@ void installEngineHub(OBSBasic *window)
 		});
 	QObject::connect(registry, &EngineRegistry::catalogChanged, commandsGroup, refreshActions);
 	refreshActions();
-	const auto refreshCatalog = [safeRegistry, catalog] {
-		if (!safeRegistry) return;
+	// Overview cards and the engine table consume the same immutable snapshot.
+	// Keep the existing two-second refresh until change notifications are unified.
+	const auto refresh = [safeState, catalog, badges] {
+		if (!safeState) return;
+		const QJsonObject snapshot = safeState->snapshot();
+		if (!snapshot.value(QStringLiteral("available")).toBool()) return;
 		catalog->clear();
-		for (const auto &value : safeRegistry->inventory()) {
+		for (const auto &value : snapshot.value(QStringLiteral("engines")).toArray()) {
 			const auto item = value.toObject();
 			QStringList caps;
 			for (const auto &cap : item.value(QStringLiteral("capabilities")).toArray())
 				caps << cap.toString();
 			const auto health = item.value(QStringLiteral("health")).toObject();
 			auto *row = new QTreeWidgetItem(catalog, QStringList{
-			item.value(QStringLiteral("name")).toString(),
-			!item.value(QStringLiteral("available")).toBool() ? QStringLiteral("Недоступен") :
-				health.value(QStringLiteral("status")).toString(QStringLiteral("Готов")),
-			caps.join(QStringLiteral(", ")),
-			QString::number(item.value(QStringLiteral("actions")).toInt())});
+				item.value(QStringLiteral("name")).toString(),
+				!item.value(QStringLiteral("available")).toBool() ? QStringLiteral("Недоступен") :
+					health.value(QStringLiteral("status")).toString(QStringLiteral("Готов")),
+				caps.join(QStringLiteral(", ")),
+				QString::number(item.value(QStringLiteral("actions")).toInt())});
 			row->setToolTip(0, item.value(QStringLiteral("id")).toString());
 			QStringList commands;
-			for (const auto &value : safeRegistry->actionCatalog()) {
-				const auto action = value.toObject();
-				if (action.value(QStringLiteral("engine")) == item.value(QStringLiteral("id")))
-					commands.append(action.value(QStringLiteral("id")).toString());
-			}
+			for (const auto &command : item.value(QStringLiteral("commandIds")).toArray())
+				commands << command.toString();
 			row->setToolTip(3, commands.join(QLatin1Char('\n')));
 		}
-	};
-	refreshCatalog();
-	layout->addStretch(1);
-	const auto refresh = [window, badges] {
-		if (auto *events = window->findChild<EventCore *>(QStringLiteral("xinkxEventCore"))) {
-			const auto stats = events->metrics();
-			badges.at(0)->setText(QStringLiteral("%1 принято · %2 повторов · %3 потерь")
-				.arg(stats.accepted).arg(stats.duplicates).arg(stats.overflow));
-		}
-		if (auto *alerts = window->findChild<AlertEngine *>(QStringLiteral("xinkxAlertEngine"))) {
-			QString text = QStringLiteral("%1 бесплатных · %2 платных")
-				.arg(alerts->freeAlerts()).arg(alerts->paidAlerts());
-			if (auto *runtime = window->findChild<OverlayRuntime *>(QStringLiteral("xinkxOverlayRuntime")))
-				text += QStringLiteral("\n") + runtime->alertSourceHealth(window);
-			badges.at(1)->setText(text);
-		}
-		if (auto *outputs = window->findChild<MultiStreamManager *>()) {
-			badges.at(2)->setText(QStringLiteral("%1 активных выходов · %2 настроено")
-				.arg(outputs->activeCount()).arg(outputs->configuredCount()));
-		}
-		if (auto *chat = window->findChild<ChatGateway *>(QStringLiteral("xinkxChatGateway"))) {
-			QString status = QStringLiteral("%1 подключённых аккаунтов в конфигурации\n"
+
+		const auto events = snapshot.value(QStringLiteral("events")).toObject();
+		badges.at(0)->setText(!events.value(QStringLiteral("available")).toBool()
+			? QStringLiteral("Event Core недоступен")
+			: QStringLiteral("%1 принято · %2 повторов · %3 потерь")
+				.arg(events.value(QStringLiteral("accepted")).toInteger())
+				.arg(events.value(QStringLiteral("duplicates")).toInteger())
+				.arg(events.value(QStringLiteral("dropped")).toInteger()));
+
+		const auto alerts = snapshot.value(QStringLiteral("alerts")).toObject();
+		QString alertText = !alerts.value(QStringLiteral("available")).toBool()
+			? QStringLiteral("Alert Engine недоступен")
+			: QStringLiteral("%1 бесплатных · %2 платных")
+				.arg(alerts.value(QStringLiteral("free")).toInteger())
+				.arg(alerts.value(QStringLiteral("paid")).toInteger());
+		if (alerts.contains(QStringLiteral("sourceHealth")))
+			alertText += QLatin1Char('\n') + alerts.value(QStringLiteral("sourceHealth")).toString();
+		badges.at(1)->setText(alertText);
+
+		const auto stream = snapshot.value(QStringLiteral("stream")).toObject();
+		badges.at(2)->setText(!stream.value(QStringLiteral("available")).toBool()
+			? QStringLiteral("Stream Engine недоступен")
+			: QStringLiteral("%1 активных выходов · %2 настроено")
+				.arg(stream.value(QStringLiteral("active")).toInt())
+				.arg(stream.value(QStringLiteral("configured")).toInt()));
+
+		const auto chat = snapshot.value(QStringLiteral("chat")).toObject();
+		QString chatText = !chat.value(QStringLiteral("available")).toBool()
+			? QStringLiteral("Chat Gateway недоступен")
+			: QStringLiteral("%1 подключённых аккаунтов в конфигурации\n"
 				"Проверяй состояние соединений на вкладке Чат")
-				.arg(chat->chatAccounts().size());
-			if (auto *moderation = window->findChild<ModerationEngine *>(QStringLiteral("xinkxModerationEngine"))) {
-				status += moderation->configuration().enabled
-					? QStringLiteral("\nЛокальный фильтр: %1 скрыто").arg(moderation->counters().suppressed())
-					: QStringLiteral("\nЛокальный фильтр: выключен");
-			}
-			badges.at(3)->setText(status);
-		}
-		badges.at(4)->setText(obs_get_latest_input_type_id("xinkx_shape")
+				.arg(chat.value(QStringLiteral("configuredAccounts")).toInt());
+		const auto moderation = snapshot.value(QStringLiteral("moderation")).toObject();
+		if (moderation.value(QStringLiteral("available")).toBool())
+			chatText += moderation.value(QStringLiteral("enabled")).toBool()
+				? QStringLiteral("\nЛокальный фильтр: %1 скрыто")
+					.arg(moderation.value(QStringLiteral("suppressed")).toInteger())
+				: QStringLiteral("\nЛокальный фильтр: выключен");
+		badges.at(3)->setText(chatText);
+
+		badges.at(4)->setText(snapshot.value(QStringLiteral("shapes")).toObject()
+			.value(QStringLiteral("registered")).toBool()
 			? QStringLiteral("Нативные фигуры и градиенты зарегистрированы в OBS")
 			: QStringLiteral("Движок фигур не зарегистрирован"));
-		badges.at(5)->setText(QStringLiteral("Ollama: только localhost, по запросу\n"
-			"Голос: Windows SAPI, отдельная настройка"));
+		badges.at(5)->setText(QStringLiteral("Ollama: %1\nГолос: %2")
+			.arg(snapshot.value(QStringLiteral("ai")).toObject()
+				.value(QStringLiteral("available")).toBool()
+				? QStringLiteral("локальная модель по запросу") : QStringLiteral("недоступен"),
+				snapshot.value(QStringLiteral("speech")).toObject()
+				.value(QStringLiteral("available")).toBool()
+				? QStringLiteral("Windows SAPI, отдельная настройка") : QStringLiteral("недоступен")));
 	};
 	refresh();
+	layout->addStretch(1);
 	auto *poll = new QTimer(page);
 	poll->setInterval(2000);
 	QObject::connect(poll, &QTimer::timeout, page, refresh);
-	QObject::connect(poll, &QTimer::timeout, page, refreshCatalog);
 	poll->start();
 	tabs->insertTab(0, page, QStringLiteral("Обзор"));
 }

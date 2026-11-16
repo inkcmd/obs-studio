@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 const read = name => readFileSync(new URL(`../${name}`, import.meta.url), 'utf8');
 const header = read('EngineRegistry.hpp');
 const registry = read('EngineRegistry.cpp');
+const state = read('StudioState.cpp');
 const workspace = read('StudioWorkspace.cpp');
 const build = read('../cmake/feature-xinkx-studio.cmake');
 const upstream = read('tools/sync-obs-upstream.ps1');
@@ -15,7 +16,7 @@ for (const module of ['events', 'chat', 'alerts', 'donations', 'automation', 'ov
 }
 assert.match(registry, /tabs->insertTab\(0, page, QStringLiteral\("Обзор"\)\)/);
 assert.match(registry, /obs_get_latest_input_type_id\("xinkx_shape"\)/);
-assert.match(registry, /outputs->activeCount\(\)/);
+assert.match(state, /outputs->activeCount\(\)/);
 assert.match(workspace, /installEngineHub\(mainWindow\)/);
 assert.match(upstream, /\[switch\]\$Integrate/);
 assert.match(upstream, /status --porcelain/);

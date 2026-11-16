@@ -22,6 +22,8 @@ target_sources(
     xinkx/LocalAssistants.hpp
     xinkx/EngineRegistry.cpp
     xinkx/EngineRegistry.hpp
+    xinkx/StudioState.cpp
+    xinkx/StudioState.hpp
     xinkx/EngineExtension.hpp
     xinkx/EngineActionForm.cpp
     xinkx/EngineActionForm.hpp
