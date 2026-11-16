@@ -129,23 +129,59 @@ EngineRegistry::~EngineRegistry()
 	shutdownExtensions();
 }
 
+QString EngineRegistry::phaseName(RuntimePhase phase)
+{
+	switch (phase) {
+	case RuntimePhase::Registered: return QStringLiteral("registered");
+	case RuntimePhase::Starting: return QStringLiteral("starting");
+	case RuntimePhase::Running: return QStringLiteral("running");
+	case RuntimePhase::Stopping: return QStringLiteral("stopping");
+	case RuntimePhase::Stopped: return QStringLiteral("stopped");
+	case RuntimePhase::Failed: return QStringLiteral("failed");
+	}
+	return QStringLiteral("unknown");
+}
+
+bool EngineRegistry::isRunning(const QString &id) const
+{
+	return extensionPhases.value(id, RuntimePhase::Stopped) == RuntimePhase::Running;
+}
+
+void EngineRegistry::transition(const QString &id, RuntimePhase phase)
+{
+	if (extensionPhases.contains(id) && extensionPhases.value(id) == phase) return;
+	extensionPhases.insert(id, phase);
+	emit lifecycleChanged(id, phaseName(phase));
+	emit catalogChanged();
+}
+
 void EngineRegistry::shutdownExtensions()
 {
 	if (shuttingDown) return;
 	shuttingDown = true;
 	for (auto it = extensions.crbegin(); it != extensions.crend(); ++it) {
-		if (*it && runningExtensions.contains((*it)->moduleId())) (*it)->stop();
+		if (!*it) continue;
+		const QString id = (*it)->moduleId();
+		if (!isRunning(id)) continue;
+		transition(id, RuntimePhase::Stopping);
+		// stop() belongs to the adapter, never to the legacy OBS-owned engine.
+		(*it)->stop();
+		transition(id, RuntimePhase::Stopped);
 	}
-	runningExtensions.clear();
 }
 
 void EngineRegistry::registerModule(const QString &id, const QString &name,
-				    const QStringList &capabilities, QObject *object)
+				    const QStringList &capabilities, QObject *object, ModuleMode mode)
 {
-	if (!object || id.isEmpty()) return;
+	if (!object || id.isEmpty() || shuttingDown || QThread::currentThread() != thread() ||
+	    object->thread() != thread()) return;
 	for (const auto &module : modules)
 		if (module.id == id) return;
-	modules.push_back({id, name, capabilities, object});
+	modules.push_back({id, name, capabilities, object, mode});
+	// A legacy QObject can disappear independently of the registry. QPointer
+	// prevents a stale dereference and this signal lets clients refresh status.
+	if (object != this)
+		connect(object, &QObject::destroyed, this, [this] { emit catalogChanged(); });
 	emit catalogChanged();
 }
 
@@ -159,7 +195,7 @@ bool EngineRegistry::registerExtension(EngineExtension *extension, QString *erro
 		return false;
 	};
 	if (shuttingDown) return reject(QStringLiteral("Реестр движков уже останавливается"));
-	if (!extension || extension->thread() != thread())
+	if (!extension || QThread::currentThread() != thread() || extension->thread() != thread())
 		return reject(QStringLiteral("Движок должен выполняться в UI-потоке"));
 	const QString id = extension->moduleId();
 	if (!idFormat.match(id).hasMatch())
@@ -207,14 +243,21 @@ bool EngineRegistry::registerExtension(EngineExtension *extension, QString *erro
 				if (used.id == action.id) return reject(QStringLiteral("Команда уже зарегистрирована"));
 		}
 	}
+	// Register before start() so observers can see Starting/Failed. Unlike
+	// legacy modules, the registry owns this extension's start/stop contract.
+	const QPointer<EngineExtension> tracked(extension);
+	extensions.append(tracked);
+	transition(id, RuntimePhase::Registered);
+	registerModule(id, extension->moduleTitle(), extension->capabilities(), extension);
+	transition(id, RuntimePhase::Starting);
 	QString startError;
-	if (!extension->start(&startError)) {
-		extension->stop(); // A partially initialized extension must release its resources.
+	const bool started = extension->start(&startError);
+	if (!started || !tracked || shuttingDown) {
+		if (tracked) tracked->stop(); // Release resources after partial initialization.
+		transition(id, shuttingDown ? RuntimePhase::Stopped : RuntimePhase::Failed);
 		return reject(startError.isEmpty() ? QStringLiteral("Движок не смог запуститься") : startError);
 	}
-	extensions.append(extension);
-	runningExtensions.insert(id);
-	registerModule(id, extension->moduleTitle(), extension->capabilities(), extension);
+	transition(id, RuntimePhase::Running);
 	return true;
 }
 
@@ -223,13 +266,14 @@ void EngineRegistry::deliverToExtensions(const StudioEvent &event)
 	// EventCore already bounded, deduplicated and delivered on the GUI thread.
 	if (shuttingDown) return;
 	for (const auto &extension : extensions)
-		if (extension && runningExtensions.contains(extension->moduleId()) &&
+		if (!shuttingDown && extension && isRunning(extension->moduleId()) &&
 		    extension->eventTypes().contains(event.type)) extension->onEvent(event);
 }
 
 QJsonArray EngineRegistry::actionCatalog() const
 {
 	QJsonArray result;
+	if (QThread::currentThread() != thread()) return result;
 	for (const auto &extension : extensions) {
 		if (!extension) continue;
 		for (const auto &action : extension->actions()) {
@@ -287,7 +331,7 @@ bool EngineRegistry::prepareAction(const QJsonObject &command, bool fromRule,
 		if (!extension) continue;
 		for (const auto &action : extension->actions()) {
 			if (action.id != id) continue;
-			if (!runningExtensions.contains(extension->moduleId()))
+			if (!isRunning(extension->moduleId()))
 				return reject(QStringLiteral("Движок не запущен"));
 			if (fromRule && !action.automatable)
 				return reject(QStringLiteral("Команда запрещена в правилах"));
@@ -358,27 +402,54 @@ QJsonObject EngineRegistry::executeAction(const QJsonObject &command, bool fromR
 QJsonArray EngineRegistry::inventory() const
 {
 	QJsonArray entries;
+	if (QThread::currentThread() != thread()) return entries;
 	for (const auto &module : modules) {
+		const bool alive = !module.object.isNull();
 		QJsonArray capabilities;
 		for (const auto &capability : module.capabilities) capabilities.append(capability);
 		QJsonObject entry{{QStringLiteral("id"), module.id},
 			{QStringLiteral("name"), module.name},
-			{QStringLiteral("available"), !module.object.isNull()},
+			{QStringLiteral("available"), alive},
 			{QStringLiteral("capabilities"), capabilities}};
+		// Do not claim that a compiled capability or an OBS-owned QObject is
+		// running as an EngineExtension. In particular, recording is lazy.
+		QString mode = QStringLiteral("observed");
+		QString phase = alive ? QStringLiteral("observed") : QStringLiteral("unavailable");
+		if (module.mode == ModuleMode::OnDemand) {
+			mode = QStringLiteral("on-demand");
+			phase = alive ? QStringLiteral("idle") : QStringLiteral("unavailable");
+		} else if (module.mode == ModuleMode::Capability) {
+			mode = QStringLiteral("capability");
+			phase = alive ? QStringLiteral("available") : QStringLiteral("unavailable");
+		}
 		for (const auto &extension : extensions)
 			if (extension && extension->moduleId() == module.id) {
-				entry.insert(QStringLiteral("health"), extension->health());
-				entry.insert(QStringLiteral("lifecycle"),
-					runningExtensions.contains(module.id) ? QStringLiteral("running") : QStringLiteral("stopped"));
+				mode = QStringLiteral("managed");
+				phase = alive ? phaseName(extensionPhases.value(module.id, RuntimePhase::Stopped))
+					: QStringLiteral("unavailable");
+				// Health callbacks may assume initialized resources. Only read
+				// them while the extension is running and still alive.
+				if (alive && isRunning(module.id))
+					entry.insert(QStringLiteral("health"), extension->health());
 				entry.insert(QStringLiteral("actions"), static_cast<int>(extension->actions().size()));
-					QJsonArray commandIds;
-					for (const auto &action : extension->actions()) commandIds.append(action.id);
-					entry.insert(QStringLiteral("commandIds"), commandIds);
+				QJsonArray commandIds;
+				for (const auto &action : extension->actions()) commandIds.append(action.id);
+				entry.insert(QStringLiteral("commandIds"), commandIds);
 				QJsonArray subscriptions;
 				for (const auto &type : extension->eventTypes()) subscriptions.append(type);
 				entry.insert(QStringLiteral("subscriptions"), subscriptions);
 				break;
 			}
+		// Preserve a failed/stopped managed state if its QObject was deleted.
+		if (extensionPhases.contains(module.id)) {
+			mode = QStringLiteral("managed");
+			phase = alive ? phaseName(extensionPhases.value(module.id))
+				: QStringLiteral("unavailable");
+		}
+		entry.insert(QStringLiteral("mode"), mode);
+		entry.insert(QStringLiteral("lifecycle"), phase);
+		if (!entry.contains(QStringLiteral("health")))
+			entry.insert(QStringLiteral("health"), QJsonObject{{QStringLiteral("status"), phase}});
 		entries.append(entry);
 	}
 	return entries;
@@ -438,10 +509,11 @@ void installEngineHub(OBSBasic *window)
 	// the compiled feature itself is nevertheless present and discoverable.
 	registry->registerModule(QStringLiteral("recording"), QStringLiteral("Record Engine"),
 		{QStringLiteral("source-jobs"), QStringLiteral("scene-jobs"), QStringLiteral("independent-files")},
-		registry);
+		registry, EngineRegistry::ModuleMode::OnDemand);
 	if (obs_get_latest_input_type_id("xinkx_shape"))
 		registry->registerModule(QStringLiteral("shapes"), QStringLiteral("Native Shapes"),
-			{QStringLiteral("obs-source"), QStringLiteral("gpu-texture")}, registry);
+			{QStringLiteral("obs-source"), QStringLiteral("gpu-texture")}, registry,
+			EngineRegistry::ModuleMode::Capability);
 	registry->registerModule(QStringLiteral("ai"), QStringLiteral("Local LLM"),
 		{QStringLiteral("ollama-local"), QStringLiteral("manual-tools")},
 		window->findChild<LocalLLM *>(QStringLiteral("xinkxLocalLLM")));
@@ -576,10 +648,25 @@ void installEngineHub(OBSBasic *window)
 			for (const auto &cap : item.value(QStringLiteral("capabilities")).toArray())
 				caps << cap.toString();
 			const auto health = item.value(QStringLiteral("health")).toObject();
+			const QString phase = item.value(QStringLiteral("lifecycle")).toString();
+			QString status;
+			if (!item.value(QStringLiteral("available")).toBool())
+				status = QStringLiteral("Недоступен");
+			else if (phase == QStringLiteral("running")) {
+				status = health.value(QStringLiteral("status")).toString();
+				if (status == QStringLiteral("ready")) status = QStringLiteral("Готов");
+			} else if (phase == QStringLiteral("observed")) status = QStringLiteral("Наблюдается");
+			else if (phase == QStringLiteral("idle")) status = QStringLiteral("По запросу");
+			else if (phase == QStringLiteral("available")) status = QStringLiteral("Зарегистрирован");
+			else if (phase == QStringLiteral("starting")) status = QStringLiteral("Запуск");
+			else if (phase == QStringLiteral("stopping")) status = QStringLiteral("Остановка");
+			else if (phase == QStringLiteral("stopped")) status = QStringLiteral("Остановлен");
+			else if (phase == QStringLiteral("failed")) status = QStringLiteral("Ошибка запуска");
+			else status = phase;
+			if (status.isEmpty()) status = QStringLiteral("Без состояния");
 			auto *row = new QTreeWidgetItem(catalog, QStringList{
 				item.value(QStringLiteral("name")).toString(),
-				!item.value(QStringLiteral("available")).toBool() ? QStringLiteral("Недоступен") :
-					health.value(QStringLiteral("status")).toString(QStringLiteral("Готов")),
+				status,
 				caps.join(QStringLiteral(", ")),
 				QString::number(item.value(QStringLiteral("actions")).toInt())});
 			row->setToolTip(0, item.value(QStringLiteral("id")).toString());

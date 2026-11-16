@@ -19,8 +19,8 @@ for (const token of ['struct EngineArgument', 'QList<EngineArgument> arguments;'
   'virtual bool start(', 'virtual void stop()']) assert.ok(extension.includes(token), token);
 for (const token of ['shutdownExtensions()', 'void shutdownEngineServices(',
   'bool validateAction(', 'signals:', 'catalogChanged()']) assert.ok(registryH.includes(token), token);
-for (const token of ['if (!extension->start(&startError))', 'shuttingDown = true;',
-  'runningExtensions.clear();', 'extension->eventTypes().contains(event.type)',
+for (const token of ['extension->start(&startError)', 'shuttingDown = true;',
+  'transition(id, RuntimePhase::Stopped)', 'extension->eventTypes().contains(event.type)',
   'argument.choices.contains(value.toString())', 'if (!declared) return reject(',
   'if (fromRule && !action.automatable)', 'EngineActionForm(commandsGroup)',
   'tabs->addTab(commandsPage, QStringLiteral("Действия"))']) assert.ok(registry.includes(token), token);

@@ -2,11 +2,11 @@
 
 #include "EngineExtension.hpp"
 
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QObject>
 #include <QPointer>
-#include <QSet>
 #include <QStringList>
 #include <QVector>
 
@@ -20,10 +20,15 @@ namespace xinkx {
 class EngineRegistry final : public QObject {
 	Q_OBJECT
 public:
+	// Existing OBS-owned services are observed, never started/stopped by the
+	// registry. On-demand and compiled capabilities are explicitly distinct
+	// from a live, managed EngineExtension instance.
+	enum class ModuleMode { Observed, OnDemand, Capability };
+
 	explicit EngineRegistry(OBSBasic *window);
 	~EngineRegistry() override;
 	void registerModule(const QString &id, const QString &name, const QStringList &capabilities,
-			    QObject *object);
+			    QObject *object, ModuleMode mode = ModuleMode::Observed);
 	// Extension registration rejects duplicate engine/action IDs and invalid names.
 	// Ownership remains with the extension's QObject parent.
 	bool registerExtension(EngineExtension *extension, QString *error = nullptr);
@@ -39,18 +44,26 @@ public:
 
 signals:
 	void catalogChanged();
+	// Emitted only for extensions whose lifecycle the registry owns. The
+	// phases are stable, lowercase identifiers (not translated UI strings).
+	void lifecycleChanged(const QString &id, const QString &phase);
 
 private:
+	enum class RuntimePhase { Registered, Starting, Running, Stopping, Stopped, Failed };
 	struct Module {
 		QString id;
 		QString name;
 		QStringList capabilities;
 		QPointer<QObject> object;
+		ModuleMode mode = ModuleMode::Observed;
 	};
 	QVector<Module> modules;
 	QVector<QPointer<EngineExtension>> extensions;
-	QSet<QString> runningExtensions;
+	QHash<QString, RuntimePhase> extensionPhases;
 	bool shuttingDown = false;
+	bool isRunning(const QString &id) const;
+	void transition(const QString &id, RuntimePhase phase);
+	static QString phaseName(RuntimePhase phase);
 	bool prepareAction(const QJsonObject &command, bool fromRule,
 		EngineExtension **target, QJsonObject *normalized, QString *error) const;
 	void deliverToExtensions(const StudioEvent &event);

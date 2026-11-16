@@ -161,3 +161,45 @@ accounts configured, verify the same event/alert/stream counters as previously;
 start/stop one output and check the overview updates within 2 seconds; test the
 engine action panel and one automation rule; close and reopen OBS with a capture
 and camera active. Native MSVC build remains required beyond source-contract tests.
+
+## Stage 1 / Engine Registry v3 — lifecycle observability slice
+
+This increment adds **explicit lifecycle transitions for registry-managed
+`EngineExtension` adapters**, while keeping all OBS-owned services on their
+existing startup/shutdown paths. It is not the finished universal lifecycle.
+The six managed phases are `registered → starting → running → stopping →
+stopped`, or `failed` on start failure. `lifecycleChanged(id, phase)` is emitted
+on transitions, and `catalogChanged()` keeps the existing inventory consumer
+up to date. Engine commands and EventCore callbacks are accepted only in the
+`running` phase. Shutdown is idempotent and stops running adapters in reverse
+registration order.
+
+`inventory()` now provides an additive `mode` field, without changing the
+existing StudioState schema version 1 or command IDs. Interpret the pair:
+
+| Mode | Lifecycle | Meaning |
+| --- | --- | --- |
+| `managed` | `registered/starting/running/stopping/stopped/failed` | Registry calls `start`/`stop` for this adapter |
+| `observed` | `observed` or `unavailable` | OBS/XINKX component owns its lifetime; registration is **not proof of live connectivity** |
+| `on-demand` | `idle` | A feature is installed but activated separately (independent recordings) |
+| `capability` | `available` | A built-in libobs source type is registered (native shapes) |
+
+If an extension passes declaration validation but fails `start()`, the registry
+calls `stop()` to release partially allocated resources, retains its entry as
+`failed` for diagnostics, and returns failure to the installer. Its actions
+remain inaccessible. The reported phase never contains OAuth tokens, command
+payloads or private event data. Invalid declaration IDs and duplicate actions
+are still rejected before any engine is started.
+
+**Windows acceptance:** compile with MSVC, open the Overview and confirm OBS
+Actions and Markers show `Готов`; existing Event Core/Chat/Stream show
+`Наблюдается`, independent recording shows `По запросу`, and shapes show
+`Зарегистрирован`. Trigger one marker and one safe rule, ensure no command
+works after shutdown begins, and close the program repeatedly. The known
+sporadic `libcef.dll` `0x80000003` on closing is tracked separately and is not
+claimed fixed by this registry patch.
+
+**Remaining Stage 1:** adapter lifecycle for legacy engines when a safe
+shutdown contract can be introduced, Command Bus, Account Registry, and
+event-driven StudioState notifications. Do not add duplicate start/stop calls
+to the existing gateways or libobs outputs.
