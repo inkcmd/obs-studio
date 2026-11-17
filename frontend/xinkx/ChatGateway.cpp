@@ -814,15 +814,19 @@ void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
 		if (!heading.isEmpty()) body.insert(QStringLiteral("title"), heading);
 		if (!category.isEmpty()) body.insert(QStringLiteral("game_id"), category);
 		if (applyTags) body.insert(QStringLiteral("tags"), QJsonArray::fromStringList(tags));
-		const auto finish = [this, id, description](bool changed, const QString &error) {
+		const auto finish = [this, id, description, applyTags](bool changed, const QString &error) {
 			if (!changed || description.isEmpty()) {
-				emit broadcastResult(id, changed ? QStringLiteral("Twitch: данные сохранены") : error, changed);
+				emit broadcastResult(id, changed
+					? (applyTags ? QStringLiteral("Twitch: эфир и теги проверены")
+						: QStringLiteral("Twitch: данные сохранены")) : error, changed);
 				return;
 			}
 			const auto userUrl = apiUrl(QStringLiteral("https://api.twitch.tv/helix/users"),
 				{{QStringLiteral("description"), description.left(300)}});
-			jsonApi(id, userUrl, QByteArray("PUT"), {}, [this, id](const HttpResult &reply) {
-				emit broadcastResult(id, reply.ok ? QStringLiteral("Twitch: эфир и описание канала сохранены")
+			jsonApi(id, userUrl, QByteArray("PUT"), {}, [this, id, applyTags](const HttpResult &reply) {
+				emit broadcastResult(id, reply.ok
+					? (applyTags ? QStringLiteral("Twitch: эфир, теги и описание канала сохранены")
+						: QStringLiteral("Twitch: эфир и описание канала сохранены"))
 					: QStringLiteral("Twitch: описание не сохранено (нужно user:edit): ") + reply.error, reply.ok);
 			});
 		};
@@ -830,7 +834,30 @@ void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
 			finish(!description.isEmpty(), QStringLiteral("Twitch: укажи название, категорию или описание"));
 			return;
 		}
-		jsonApi(id, url, method, body, [finish](const HttpResult &result) { finish(result.ok, result.error); });
+		jsonApi(id, url, method, body, [this, id, account, tags, applyTags, finish](const HttpResult &result) {
+			if (!result.ok || !applyTags) {
+				finish(result.ok, result.error);
+				return;
+			}
+			// A 204 from Twitch confirms the PATCH was accepted, not that the
+			// channel displays the requested tag list. Read the channel back.
+			const auto readUrl = apiUrl(QStringLiteral("https://api.twitch.tv/helix/channels"),
+				{{QStringLiteral("broadcaster_id"), account.providerId}});
+			authorized(id, readUrl, {}, [this, id, tags, finish](const HttpResult &check) {
+				const auto channels = check.json.value(QStringLiteral("data")).toArray();
+				if (!check.ok || channels.isEmpty()) {
+					emit broadcastResult(id, QStringLiteral("Twitch: эфир отправлен, но теги не удалось проверить: ")
+						+ (check.error.isEmpty() ? QStringLiteral("нет данных канала") : check.error), false);
+					return;
+				}
+				const QJsonValue remote = channels.first().toObject().value(QStringLiteral("tags"));
+				if (!remote.isArray() || !tagsMatch(remote.toArray(), tags)) {
+					emit broadcastResult(id, QStringLiteral("Twitch: эфир отправлен, но теги канала не совпадают с профилем"), false);
+					return;
+				}
+				finish(true, {});
+			});
+		});
 		return;
 	} else if (account.platform == QStringLiteral("kick")) {
 		url = QStringLiteral("https://api.kick.com/public/v1/channels");
@@ -844,70 +871,15 @@ void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
 		if (applyTags) body.insert(QStringLiteral("custom_tags"), QJsonArray::fromStringList(tags));
 	} else if (account.platform == QStringLiteral("youtube")) {
 		if (broadcastId.isEmpty()) {
-			emit broadcastResult(id, QStringLiteral("YouTube: выбери эфир"), false); return;
+			emit broadcastResult(id, QStringLiteral("YouTube: выбери эфир"), false);
+			return;
 		}
-		const auto readUrl = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts"),
-			{{QStringLiteral("part"), QStringLiteral("snippet,contentDetails")}, {QStringLiteral("id"), broadcastId}});
-		authorized(id, readUrl, {}, [this, id, broadcastId, heading, description, category, tags, applyTags](const HttpResult &result) {
-			if (!result.ok || result.json.value(QStringLiteral("items")).toArray().isEmpty()) {
-				emit broadcastResult(id, QStringLiteral("YouTube: не удалось прочитать эфир: ") + result.error, false);
-				return;
-			}
-			const QJsonObject existing = result.json.value(QStringLiteral("items")).toArray().first().toObject();
-			const auto originalSnippet = existing.value(QStringLiteral("snippet")).toObject();
-			const auto originalDetails = existing.value(QStringLiteral("contentDetails")).toObject();
-			const bool metadataUnchanged =
-				(heading.isEmpty() || originalSnippet.value(QStringLiteral("title")).toString() == heading) &&
-				originalSnippet.value(QStringLiteral("description")).toString() == description.left(5000) &&
-				(category.isEmpty() || originalSnippet.value(QStringLiteral("categoryId")).toString() == category);
-			if (metadataUnchanged) {
-				if (applyTags) updateYouTubeVideoTags(id, broadcastId, heading, description, category, tags);
-				else emit broadcastResult(id, QStringLiteral("YouTube: данные эфира уже актуальны"), true);
-				return;
-			}
-			QJsonObject monitor = originalDetails.value(QStringLiteral("monitorStream")).toObject();
-			// liveBroadcasts.update also requires scheduledStartTime and monitorStream
-			// settings even when only the snippet part is being changed.
-			if (originalSnippet.value(QStringLiteral("scheduledStartTime")).toString().isEmpty()) {
-				emit broadcastResult(id, QStringLiteral("YouTube: API не вернул обязательные настройки эфира"), false);
-				return;
-			}
-			// JSON API may omit default false/zero values from the read response.
-			if (!monitor.contains(QStringLiteral("enableMonitorStream")))
-				monitor.insert(QStringLiteral("enableMonitorStream"), false);
-			if (!monitor.contains(QStringLiteral("broadcastStreamDelayMs")))
-				monitor.insert(QStringLiteral("broadcastStreamDelayMs"), 0);
-			// Only send mutable snippet properties; Google also returns read-only
-			// fields such as liveChatId, publishedAt and thumbnails.
-			QJsonObject snippet{{QStringLiteral("title"), originalSnippet.value(QStringLiteral("title"))},
-				{QStringLiteral("scheduledStartTime"), originalSnippet.value(QStringLiteral("scheduledStartTime"))}};
-			for (const QString &field : {QStringLiteral("scheduledEndTime"), QStringLiteral("categoryId")})
-				if (originalSnippet.contains(field)) snippet.insert(field, originalSnippet.value(field));
-			if (!heading.isEmpty()) snippet.insert(QStringLiteral("title"), heading);
-			// Empty text intentionally clears the existing video description.
-			snippet.insert(QStringLiteral("description"), description.left(5000));
-			if (!category.isEmpty()) snippet.insert(QStringLiteral("categoryId"), category);
-			const auto endpoint = QStringLiteral("https://www.googleapis.com/youtube/v3/liveBroadcasts?part=snippet");
-			const auto body = QJsonObject{{QStringLiteral("id"), broadcastId},
-				{QStringLiteral("snippet"), snippet},
-				{QStringLiteral("contentDetails"), QJsonObject{{QStringLiteral("monitorStream"), monitor}}}};
-			jsonApi(id, endpoint, QByteArray("PUT"), body, [this, id, broadcastId, heading, description, category, tags, applyTags](const HttpResult &reply) {
-				if (!reply.ok) {
-					emit broadcastResult(id, QStringLiteral("YouTube: ") + reply.error, false);
-					return;
-				}
-				const auto saved = reply.json.value(QStringLiteral("snippet")).toObject();
-				const bool verified = (heading.isEmpty() || saved.value(QStringLiteral("title")).toString() == heading) &&
-					saved.value(QStringLiteral("description")).toString() == description.left(5000) &&
-					(category.isEmpty() || saved.value(QStringLiteral("categoryId")).toString() == category);
-				if (!verified || !applyTags) {
-					emit broadcastResult(id, verified ? QStringLiteral("YouTube: название и описание эфира обновлены")
-						: QStringLiteral("YouTube: ответ API не подтвердил обновление названия, описания или категории"), verified);
-					return;
-				}
-				updateYouTubeVideoTags(id, broadcastId, heading, description, category, tags);
-			});
-		});
+		// The liveBroadcasts.update endpoint requires a scheduledStartTime that
+		// unscheduled/persistent Studio broadcasts may not expose. A broadcast
+		// is also a video: its writable title, description, category and tags
+		// are updated together through videos.update(part=snippet) instead.
+		// Do not touch the live broadcast lifecycle, stream binding or status.
+		updateYouTubeVideoDetails(id, broadcastId, heading, description, category, tags, applyTags);
 		return;
 	} else return;
 	if (body.isEmpty()) { emit broadcastResult(id, QStringLiteral("Для этой площадки укажи название или категорию"), false); return; }
@@ -946,55 +918,77 @@ void ChatGateway::updateBroadcast(const QString &id, const QString &broadcastId,
 	});
 }
 
-void ChatGateway::updateYouTubeVideoTags(const QString &id, const QString &broadcastId,
-					 const QString &heading, const QString &description,
-					 const QString &category, const QStringList &tags)
+void ChatGateway::updateYouTubeVideoDetails(const QString &id, const QString &broadcastId,
+					const QString &heading, const QString &description,
+					const QString &category, const QStringList &tags,
+					bool applyTags)
 {
-	// The broadcast endpoint cannot change video tags. Fetch current metadata
-	// first: no videos.update request or its quota cost if tags already match.
+	// Each liveBroadcast id is also its video id. Reading the current snippet
+	// is essential: videos.update replaces omitted mutable fields in that part.
 	const auto videoUrl = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/videos"),
 		{{QStringLiteral("part"), QStringLiteral("snippet")}, {QStringLiteral("id"), broadcastId}});
-	authorized(id, videoUrl, {}, [this, id, broadcastId, tags, heading, description, category](const HttpResult &result) {
+	authorized(id, videoUrl, {}, [this, id, broadcastId, videoUrl, tags, heading, description, category, applyTags](const HttpResult &result) {
 		const QJsonArray items = result.json.value(QStringLiteral("items")).toArray();
 		if (!result.ok || items.isEmpty()) {
-			emit broadcastResult(id, QStringLiteral("YouTube: теги не прочитаны: ") + result.error, false);
+			emit broadcastResult(id, QStringLiteral("YouTube: метаданные видео не прочитаны: ") +
+				(result.error.isEmpty() ? QStringLiteral("видео не найдено") : result.error), false);
 			return;
 		}
 		const QJsonObject existing = items.first().toObject().value(QStringLiteral("snippet")).toObject();
 		QStringList current;
 		for (const QJsonValue &tag : existing.value(QStringLiteral("tags")).toArray())
 			if (tag.isString()) current << tag.toString();
-		if (current == tags) {
-			emit broadcastResult(id, QStringLiteral("YouTube: эфир и теги актуальны"), true);
+		const QString wantedTitle = heading.isEmpty() ? existing.value(QStringLiteral("title")).toString() : heading;
+		const QString wantedDescription = description.left(5000);
+		const QString wantedCategory = category.isEmpty()
+			? existing.value(QStringLiteral("categoryId")).toString() : category;
+		const QStringList wantedTags = applyTags ? tags : current;
+		if (wantedTitle.isEmpty() || wantedCategory.isEmpty()) {
+			emit broadcastResult(id, QStringLiteral("YouTube: для обновления нужны название и категория видео"), false);
 			return;
 		}
-		QJsonObject snippet{
-			{QStringLiteral("title"), heading.isEmpty() ? existing.value(QStringLiteral("title")) : QJsonValue(heading)},
-			{QStringLiteral("description"), description.left(5000)},
-			{QStringLiteral("categoryId"), category.isEmpty() ? existing.value(QStringLiteral("categoryId")) : QJsonValue(category)},
-			{QStringLiteral("tags"), QJsonArray::fromStringList(tags)}};
+		const auto matches = [wantedTitle, wantedDescription, wantedCategory, wantedTags](const QJsonObject &saved) {
+			QStringList actualTags;
+			for (const QJsonValue &tag : saved.value(QStringLiteral("tags")).toArray())
+				if (tag.isString()) actualTags << tag.toString();
+			return saved.value(QStringLiteral("title")).toString() == wantedTitle &&
+				saved.value(QStringLiteral("description")).toString() == wantedDescription &&
+				saved.value(QStringLiteral("categoryId")).toString() == wantedCategory &&
+				(!saved.contains(QStringLiteral("tags")) && wantedTags.isEmpty() || actualTags == wantedTags);
+		};
+		if (matches(existing)) {
+			emit broadcastResult(id, QStringLiteral("YouTube: название, описание, категория и теги уже актуальны"), true);
+			return;
+		}
+		QJsonObject snippet{{QStringLiteral("title"), wantedTitle},
+			{QStringLiteral("description"), wantedDescription},
+			{QStringLiteral("categoryId"), wantedCategory},
+			{QStringLiteral("tags"), QJsonArray::fromStringList(wantedTags)}};
 		for (const QString &field : {QStringLiteral("defaultLanguage"), QStringLiteral("defaultAudioLanguage")})
 			if (existing.contains(field)) snippet.insert(field, existing.value(field));
-		if (snippet.value(QStringLiteral("title")).toString().isEmpty() ||
-		    snippet.value(QStringLiteral("categoryId")).toString().isEmpty()) {
-			emit broadcastResult(id, QStringLiteral("YouTube: нельзя обновить теги без названия и категории видео"), false);
-			return;
-		}
 		const QJsonObject request{{QStringLiteral("id"), broadcastId}, {QStringLiteral("snippet"), snippet}};
 		const auto updateUrl = QStringLiteral("https://www.googleapis.com/youtube/v3/videos?part=snippet");
-		jsonApi(id, updateUrl, QByteArray("PUT"), request, [this, id, tags](const HttpResult &updated) {
-			if (!updated.ok) {
-				emit broadcastResult(id, QStringLiteral("YouTube: теги не сохранены: ") + updated.error, false);
-				return;
-			}
-			QStringList confirmed;
-			for (const QJsonValue &tag : updated.json.value(QStringLiteral("snippet")).toObject()
-					.value(QStringLiteral("tags")).toArray())
-				if (tag.isString()) confirmed << tag.toString();
-			const bool matches = confirmed == tags;
-			emit broadcastResult(id, matches ? QStringLiteral("YouTube: эфир и теги обновлены")
-				: QStringLiteral("YouTube: API не подтвердил новые теги"), matches);
-		});
+		jsonApi(id, updateUrl, QByteArray("PUT"), request,
+			[this, id, videoUrl, matches](const HttpResult &updated) {
+				if (!updated.ok) {
+					emit broadcastResult(id, QStringLiteral("YouTube: обновление видео отклонено: ") + updated.error, false);
+					return;
+				}
+				if (!matches(updated.json.value(QStringLiteral("snippet")).toObject())) {
+					emit broadcastResult(id, QStringLiteral("YouTube: ответ API не подтвердил название, описание, категорию или теги"), false);
+					return;
+				}
+				// Independently read back the persisted data; a successful PUT is
+				// not sufficient to claim that the YouTube video is updated.
+				authorized(id, videoUrl, {}, [this, id, matches](const HttpResult &check) {
+					const auto items = check.json.value(QStringLiteral("items")).toArray();
+					const bool confirmed = check.ok && !items.isEmpty() &&
+						matches(items.first().toObject().value(QStringLiteral("snippet")).toObject());
+					emit broadcastResult(id, confirmed
+						? QStringLiteral("YouTube: название, описание, категория и теги проверены")
+						: QStringLiteral("YouTube: обновление отправлено, но повторное чтение не подтвердило изменения"), confirmed);
+				});
+			});
 	});
 }
 

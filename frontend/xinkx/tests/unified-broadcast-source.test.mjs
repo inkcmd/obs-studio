@@ -22,10 +22,10 @@ assert.doesNotMatch(broadcast, /xinkxBroadcastThumbnail|pendingThumbnail|pending
 assert.doesNotMatch(profiles, /xinkxBroadcastThumbnail|thumbnail->text\(\)/);
 assert.match(api, /videoCategories.*\n.*regionCode/);
 assert.doesNotMatch(api, /thumbnails\/set|youtubeMetadataUpdated|thumbnailUpdated/);
-assert.match(api, /liveBroadcasts\?part=snippet/);
-assert.match(api, /snippet\.insert\(QStringLiteral\("description"\), description\.left\(5000\)\)/);
-assert.match(api, /snippet\.insert\(QStringLiteral\("title"\), heading\)/);
-assert.match(api, /"contentDetails"\), QJsonObject\{\{QStringLiteral\("monitorStream"\), monitor\}\}/);
+assert.match(api, /www\.googleapis\.com\/youtube\/v3\/videos\?part=snippet/);
+assert.match(api, /\{QStringLiteral\("description"\), wantedDescription\}/);
+assert.match(api, /\{QStringLiteral\("title"\), wantedTitle\}/);
+assert.doesNotMatch(api, /API не вернул обязательные настройки эфира/);
 assert.match(api, /nextYoutubeQuotaReset/);
 assert.match(api, /quotaExceeded/);
 assert.doesNotMatch(broadcast, /if \(success\) gateway->inspectBroadcast/);

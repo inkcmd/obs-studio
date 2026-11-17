@@ -36,7 +36,8 @@ assert.match(profiles, /lastSelectedProfile/);
 assert.match(profiles, /storeProfiles\(\*root\)/);
 assert.doesNotMatch(broadcast, /youtubeEvent->addItem\(QStringLiteral\("Недоступен \/ завершён/);
 assert.match(broadcast, /gateway->inspectBroadcast\(account.id, broadcastId\)/);
-assert.match(broadcast, /if \(activeIndex > 0\) youtubeEvent->setCurrentIndex\(activeIndex\)/);
+assert.match(broadcast, /if \(previousIndex > 0\) youtubeEvent->setCurrentIndex\(previousIndex\)/);
+assert.doesNotMatch(broadcast, /if \(activeIndex > 0\)/);
 
 assert.match(catalog, /Готовые примеры XINKX/);
 assert.match(catalog, /Мои сохранённые пресеты/);

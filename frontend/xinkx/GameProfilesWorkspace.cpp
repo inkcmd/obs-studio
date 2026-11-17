@@ -258,6 +258,7 @@ void installGameProfilesWorkspace(OBSBasic *mainWindow)
 		// options. Only the API-verified list can offer a selectable ID.
 		const QString wantedBroadcast = profile.value(QStringLiteral("youtubeBroadcast")).toString();
 		youtubeEvent->setProperty("xinkxPendingBroadcastId", wantedBroadcast);
+		youtubeEvent->setProperty("xinkxProfileBroadcastSelection", true);
 		const int broadcastIndex = youtubeEvent->findData(wantedBroadcast);
 		youtubeEvent->setCurrentIndex(broadcastIndex > 0 ? broadcastIndex : 0);
 	};

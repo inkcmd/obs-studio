@@ -143,7 +143,6 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 	layout->addStretch();
 
 	auto catalogs = std::make_shared<QHash<QString, QJsonArray>>();
-	auto youtubeIds = std::make_shared<QHash<QString, QString>>();
 	auto submittedTitles = std::make_shared<QHash<QString, QPair<QString, QString>>>();
 	auto youtubeGaming = std::make_shared<QHash<QString, QString>>();
 	auto report = std::make_shared<QHash<QString, QString>>();
@@ -174,11 +173,6 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 			: QStringLiteral("YouTube: проверяем привязку и приём сигнала…"));
 		gateway->inspectBroadcast(account.id, broadcastId);
 	});
-	const auto resolveVideo = [=](const QString &accountId) {
-		const QString explicitId = youtubeEvent->currentData().toString();
-		if (!explicitId.isEmpty()) return explicitId;
-		return youtubeIds->value(accountId);
-	};
 	const auto useGamingCategory = [=] {
 		const QString label = youtubeGaming->value(youtubeAccount().id);
 		// Never overwrite a category explicitly chosen by the streamer.
@@ -392,15 +386,20 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 			return;
 		}
 		const QString selectedId = info.value(QStringLiteral("id")).toString();
-		if (selectedId.isEmpty()) youtubeIds->remove(id);
-		else (*youtubeIds)[id] = selectedId;
 		const QSignalBlocker blocked(youtubeEvent);
+		const bool profileSelection = youtubeEvent->property("xinkxProfileBroadcastSelection").toBool();
 		const QString pending = youtubeEvent->property("xinkxPendingBroadcastId").toString();
-		const QString previously = !pending.isEmpty() ? pending :
+		const QString previously = profileSelection ? pending :
 			!youtubeEvent->currentData().toString().isEmpty()
 			? youtubeEvent->currentData().toString()
 			: local->value(key(QStringLiteral("youtubeBroadcast"))).toString();
 		youtubeEvent->setProperty("xinkxPendingBroadcastId", QString{});
+		youtubeEvent->setProperty("xinkxProfileBroadcastSelection", false);
+		if (profileSelection && pending.isEmpty()) {
+			local->remove(key(QStringLiteral("youtubeBroadcast")));
+			local->remove(key(QStringLiteral("youtubeBroadcastName")));
+			flush->start();
+		}
 		youtubeEvent->clear();
 		youtubeEvent->addItem(QStringLiteral("Выберите эфир YouTube"), QString{});
 		for (const auto &entry : info.value(QStringLiteral("broadcasts")).toArray()) {
@@ -422,11 +421,9 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 		// may still explicitly name another upcoming event, and it remains
 		// available in the list for deliberate manual selection.
 		const int previousIndex = youtubeEvent->findData(previously);
-		const int activeIndex = youtubeEvent->findData(selectedId);
-		// Preserve an explicitly chosen scheduled broadcast; otherwise use
-		// the sole unambiguous live or configured event reported by the API.
+		// Never silently map an unrelated game profile to the current live
+		// YouTube event. Only an explicitly selected or saved ID is writable.
 		if (previousIndex > 0) youtubeEvent->setCurrentIndex(previousIndex);
-		else if (activeIndex > 0) youtubeEvent->setCurrentIndex(activeIndex);
 		else if (!previously.isEmpty()) {
 			youtubeHealth->setText(info.contains(QStringLiteral("lookupWarnings"))
 				? QStringLiteral("Не удалось проверить все эфиры YouTube: %1")
@@ -441,6 +438,9 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 		} else if (youtubeEvent->count() == 1) {
 			youtubeHealth->setText(QStringLiteral("На подключённом YouTube-канале нет активных "
 				"или запланированных эфиров. Создай эфир в YouTube Studio."));
+		} else {
+			youtubeHealth->setText(QStringLiteral("Выбери конкретный эфир YouTube для этого профиля. "
+					"Автоматически другой эфир не изменяем."));
 		}
 		if (info.contains(QStringLiteral("lookupWarnings")) && youtubeEvent->currentIndex() > 0)
 			youtubeHealth->setText(QStringLiteral("YouTube: часть списка недоступна: %1")
@@ -529,12 +529,11 @@ void installBroadcastWorkspace(OBSBasic *mainWindow)
 					const QString channel = !entry.providerId.isEmpty() ? entry.providerId : entry.id;
 					if (processedYouTube.contains(channel)) continue;
 					processedYouTube.insert(channel);
-					eventId = resolveVideo(entry.id);
+					eventId = youtubeEvent->currentData().toString();
 					if (eventId.isEmpty()) {
-						(*report)[entry.id] = QStringLiteral("YouTube: нет однозначного эфира — данные не изменены");
+						(*report)[entry.id] = QStringLiteral("YouTube: выбери эфир в списке — данные YouTube не изменены");
 						continue;
 					}
-					(*youtubeIds)[entry.id] = eventId;
 					(*submittedTitles)[entry.id] = {eventId, title->text().trimmed().left(100)};
 				}
 				QString category = categories->value(entry.platform)->currentData().toString();

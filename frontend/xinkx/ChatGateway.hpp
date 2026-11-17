@@ -160,9 +160,9 @@ private:
 	void jsonApi(const QString &id, const QString &url, const QByteArray &verb,
 		     const QJsonObject &body, const RequestDone &done, bool retry = false);
 	void saveYouTubeStream(const QString &id, const QString &streamId, const QString &broadcastId);
-	void updateYouTubeVideoTags(const QString &accountId, const QString &broadcastId,
+	void updateYouTubeVideoDetails(const QString &accountId, const QString &broadcastId,
 				    const QString &title, const QString &description,
-				    const QString &categoryId, const QStringList &tags);
+				    const QString &categoryId, const QStringList &tags, bool applyTags);
 	void saveRefreshed(const QString &id, const QJsonObject &json);
 	void status(const QString &id, const QString &message);
 	QString canonicalChatId(const QString &accountId) const;

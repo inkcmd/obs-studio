@@ -29,10 +29,10 @@ assert.match(api, /Kick не вернул список тегов для про�
 
 // A YouTube tag change is a video update, never part of liveBroadcasts.update.
 assert.match(api, /www\.googleapis\.com\/youtube\/v3\/videos\?part=snippet/);
-assert.match(api, /if \(!verified \|\| !applyTags\)/);
-assert.match(api, /if \(current == tags\)/);
+assert.match(api, /const QStringList wantedTags = applyTags \? tags : current/);
+assert.match(api, /if \(matches\(existing\)\)/);
 assert.match(api, /snippet\.insert\(field, existing\.value\(field\)\)/);
-assert.match(api, /if \(metadataUnchanged\)/);
+assert.match(api, /updateYouTubeVideoDetails\(id, broadcastId, heading, description, category, tags, applyTags\)/);
 
 // Tags are stored in each game profile and restored on switching profiles.
 assert.match(profiles, /profile\.contains\(QStringLiteral\("tags"\)\)/);
