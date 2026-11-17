@@ -36,7 +36,7 @@ for (const f of ['EngineActionForm.cpp', 'EngineActionForm.hpp'])
 assert.match(recordingH, /QJsonArray activeRecordingSessions\(OBSBasic \*main\)/);
 assert.match(recording, /QString outputPath;/);
 assert.match(recording, /run->created.elapsed\(\)/);
-assert.match(marker, /recordings = activeRecordingSessions\(window\)/);
+assert.match(marker, /recordings = captureRecordingMarker\(window, value, category, sidecarCsv\)/);
 assert.match(marker, /recording_elapsed_ms/);
 assert.match(marker, /QStringLiteral\("version"\), 2/);
 assert.doesNotMatch(marker, /event\.(name|message|amount|accountId)\b/);

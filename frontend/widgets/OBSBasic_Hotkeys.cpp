@@ -18,6 +18,7 @@
 ******************************************************************************/
 
 #include "OBSBasic.hpp"
+#include <xinkx/MarkerEngine.hpp>
 
 #include <widgets/OBSBasicStats.hpp>
 
@@ -200,6 +201,15 @@ void OBSBasic::CreateHotkeys()
 		this);
 	LoadHotkey(addChapterHotkey, "OBSBasic.AddChapterMarker");
 
+	xinkxMarkMomentHotkey = obs_hotkey_register_frontend(
+		"xinkx.MarkMoment", "INK Studio: Отметить момент",
+		[](void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed) {
+			if (!pressed) return;
+			auto *basic = static_cast<OBSBasic *>(data);
+			if (auto *markers = basic->findChild<xinkx::MarkerEngine *>()) markers->markMoment();
+		}, this);
+	LoadHotkey(xinkxMarkMomentHotkey, "xinkx.MarkMoment");
+
 	replayBufHotkeys =
 		obs_hotkey_pair_register_frontend("OBSBasic.StartReplayBuffer", Str("Basic.Main.StartReplayBuffer"),
 						  "OBSBasic.StopReplayBuffer", Str("Basic.Main.StopReplayBuffer"),
@@ -296,6 +306,7 @@ void OBSBasic::ClearHotkeys()
 	obs_hotkey_pair_unregister(pauseHotkeys);
 	obs_hotkey_unregister(splitFileHotkey);
 	obs_hotkey_unregister(addChapterHotkey);
+	obs_hotkey_unregister(xinkxMarkMomentHotkey);
 	obs_hotkey_pair_unregister(replayBufHotkeys);
 	obs_hotkey_pair_unregister(vcamHotkeys);
 	obs_hotkey_pair_unregister(togglePreviewHotkeys);

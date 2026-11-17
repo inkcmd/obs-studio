@@ -11,6 +11,7 @@
 #include <obs-frontend-api.h>
 #include <obs.h>
 #include <util/bmem.h>
+#include <util/platform.h>
 
 #include <QDateTime>
 #include <QElapsedTimer>
@@ -33,6 +34,8 @@
 #include <cstring>
 #include <cmath>
 #include <memory>
+#include <mutex>
+#include <limits>
 #include <vector>
 
 namespace xinkx {
@@ -86,6 +89,189 @@ QString safeFileName(QString text)
 	return text.left(100);
 }
 
+// Each output has a different clock, even when several outputs encode the same
+// OBS video mix. PTS is taken from packets headed to that output's muxer, not
+// from QElapsedTimer or the GUI's start/stop timestamps.
+struct MarkerOutput {
+	obs_output_t *output = nullptr; // Borrowed; the owning Run/native output outlives this object.
+	QString filePath;
+	QString jobId;
+	QString name;
+	QJsonArray markers;
+	std::mutex packetMutex;
+	int64_t firstPts = std::numeric_limits<int64_t>::max();
+	int64_t lastPts = std::numeric_limits<int64_t>::min();
+	uint64_t lastCaptureNs = 0;
+	int32_t timebaseNum = 1;
+	int32_t timebaseDen = 1;
+	uint32_t fpsNum = 60;
+	uint32_t fpsDen = 1;
+	bool wantCsv = false;
+	bool subscribed = false;
+	struct Pending {
+		int index;
+		uint64_t requestedNs;
+		qint64 actualFrame = 0;
+		bool resolved = false;
+	};
+	std::vector<Pending> pending;
+
+	static void packet(obs_output_t *, encoder_packet *pkt, encoder_packet_time *time, void *param)
+	{
+		if (!pkt || pkt->type != OBS_ENCODER_VIDEO || pkt->timebase_den <= 0 || pkt->timebase_num <= 0)
+			return;
+		auto *self = static_cast<MarkerOutput *>(param);
+		std::lock_guard<std::mutex> lock(self->packetMutex);
+		self->firstPts = std::min(self->firstPts, pkt->pts);
+		if (pkt->pts >= self->lastPts) {
+			self->lastPts = pkt->pts;
+			self->lastCaptureNs = time ? time->cts : 0;
+			self->timebaseNum = pkt->timebase_num;
+			self->timebaseDen = pkt->timebase_den;
+		}
+		if (time && time->cts) {
+			const double frame = double(pkt->pts - self->firstPts) * pkt->timebase_num /
+				pkt->timebase_den * self->fpsNum / self->fpsDen;
+			for (auto &request : self->pending) {
+				if (!request.resolved && time->cts >= request.requestedNs) {
+					request.actualFrame = std::max<qint64>(0, static_cast<qint64>(std::llround(frame)));
+					request.resolved = true;
+				}
+			}
+		}
+	}
+
+	MarkerOutput(obs_output_t *out, const RecordingJob &job, const QString &path)
+		: output(out), filePath(path), jobId(job.id), name(job.name)
+	{
+		if (auto *encoder = obs_output_get_video_encoder(output)) {
+			if (auto *video = obs_encoder_video(encoder)) {
+				if (const auto *info = video_output_get_info(video)) {
+					fpsNum = info->fps_num ? info->fps_num : 60;
+					fpsDen = (info->fps_den ? info->fps_den : 1) *
+						std::max(1u, obs_encoder_get_frame_rate_divisor(encoder));
+				}
+			}
+		}
+		obs_output_add_packet_callback(output, packet, this);
+		subscribed = true;
+	}
+
+	~MarkerOutput()
+	{
+		// remove waits for an in-flight packet callback; the clock then cannot
+		// be accessed from the encoding thread while its storage is destroyed.
+		if (subscribed) obs_output_remove_packet_callback(output, packet, this);
+		reconcile();
+		finalize();
+	}
+
+	bool running() const { return output && obs_output_active(output) && !obs_output_paused(output); }
+
+	bool writeJson() const
+	{
+		if (markers.isEmpty()) return true; // Never create empty sidecars.
+		const QByteArray bytes = QJsonDocument(markers).toJson(QJsonDocument::Indented);
+		QSaveFile file(filePath + QStringLiteral(".markers.json"));
+		return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size() && file.commit();
+	}
+
+	bool writeCsv() const
+	{
+		if (markers.isEmpty() || !wantCsv) return true;
+		QByteArray bytes("\xef\xbb\xbfpos,comment,type\n");
+		for (const auto &value : markers) {
+			const auto obj = value.toObject();
+			QString comment = obj.value(QStringLiteral("comment")).toString();
+			comment.replace(QLatin1Char('"'), QStringLiteral("\"\""));
+			if (!comment.isEmpty() && QStringLiteral("=+-@").contains(comment.at(0)))
+				comment.prepend(QLatin1Char('\''));
+			bytes += QStringLiteral("%1,\"%2\",%3\n")
+				.arg(obj.value(QStringLiteral("pos")).toVariant().toLongLong())
+				.arg(comment).arg(obj.value(QStringLiteral("type")).toInt()).toUtf8();
+		}
+		QSaveFile file(filePath + QStringLiteral(".markers.csv"));
+		return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size() && file.commit();
+	}
+
+	void finalize() const
+	{
+		if (!writeJson() || !writeCsv())
+			writeDiagnostic(QStringLiteral("markers"), QStringLiteral("Cannot finalize marker sidecar for %1").arg(filePath));
+	}
+
+	void reconcile()
+	{
+		std::vector<std::pair<int, qint64>> completed;
+		{
+			std::lock_guard<std::mutex> lock(packetMutex);
+			for (const auto &request : pending)
+				if (request.resolved) completed.emplace_back(request.index, request.actualFrame);
+			pending.erase(std::remove_if(pending.begin(), pending.end(),
+				[](const Pending &request) { return request.resolved; }), pending.end());
+		}
+		if (completed.empty()) return;
+		bool changed = false;
+		for (const auto &[index, frame] : completed) {
+			if (index < 0 || index >= markers.size()) continue;
+			auto marker = markers.at(index).toObject();
+			if (marker.value(QStringLiteral("pos")).toDouble() == frame) continue;
+			marker[QStringLiteral("pos")] = static_cast<double>(frame);
+			markers.replace(index, marker);
+			changed = true;
+		}
+		if (changed && (!writeJson() || !writeCsv()))
+			writeDiagnostic(QStringLiteral("markers"), QStringLiteral("Cannot reconcile marker PTS for %1").arg(filePath));
+	}
+
+	bool append(const QString &label, int type, bool csv, QJsonObject &session)
+	{
+		if (!running()) return false;
+		int64_t first, last;
+		uint64_t cts;
+		int32_t num, den;
+		{
+			std::lock_guard<std::mutex> lock(packetMutex);
+			first = firstPts;
+			last = lastPts;
+			cts = lastCaptureNs;
+			num = timebaseNum;
+			den = timebaseDen;
+		}
+		if (!fpsNum || !fpsDen) return false;
+		// B-frames can arrive in DTS order; PTS is the presentation position.
+		const bool hasVideo = first != std::numeric_limits<int64_t>::max() && last >= first;
+		const double ptsSeconds = hasVideo ? double(last - first) * num / den : 0.0;
+		const double frames = ptsSeconds * fpsNum / fpsDen;
+		const uint64_t now = os_gettime_ns();
+		// Use the last encoded PTS as a crash-safe provisional position.
+		// When the first frame captured after the hotkey arrives, its actual
+		// PTS replaces this value. Never extrapolate from wall-clock time.
+		const qint64 pos = std::max<qint64>(0, static_cast<qint64>(std::llround(frames)));
+		const QJsonObject marker{{QStringLiteral("pos"), static_cast<double>(pos)},
+			{QStringLiteral("comment"), label}, {QStringLiteral("type"), type}};
+		markers.append(marker);
+		wantCsv = wantCsv || csv;
+		// Atomic write after EVERY marker: a crash leaves the last committed
+		// importable Kdenlive JSON intact. No separate journal recovery needed.
+		if (!writeJson()) {
+			markers.removeLast();
+			writeDiagnostic(QStringLiteral("markers"), QStringLiteral("Cannot save marker sidecar for %1").arg(filePath));
+			return false;
+		}
+		if (!writeCsv())
+			writeDiagnostic(QStringLiteral("markers"), QStringLiteral("Cannot save optional marker CSV for %1").arg(filePath));
+		if (cts || !hasVideo) {
+			std::lock_guard<std::mutex> lock(packetMutex);
+			pending.push_back({markers.size() - 1, now});
+		}
+		session = QJsonObject{{QStringLiteral("jobId"), jobId}, {QStringLiteral("name"), name},
+			{QStringLiteral("file"), filePath.left(1024)}, {QStringLiteral("frame"), static_cast<double>(pos)},
+			{QStringLiteral("elapsedMs"), double(pos) * 1000 * fpsDen / fpsNum}};
+		return true;
+	}
+};
+
 struct Run {
 	RecordingJob job;
 	OBSOutputAutoRelease output;
@@ -97,9 +283,11 @@ struct Run {
 	bool started = false;
 	bool stopping = false;
 	QElapsedTimer created;
+	std::unique_ptr<MarkerOutput> marker;
 
 	~Run()
 	{
+		marker.reset();
 		if (output && obs_output_active(output)) obs_output_force_stop(output);
 		output = nullptr;
 		videoEncoder = nullptr;
@@ -180,6 +368,47 @@ public:
 		});
 	}
 
+	bool markedRecordingActive() const
+	{
+		if (nativeMarker && nativeMarker->running()) return true;
+		return std::any_of(runs.begin(), runs.end(), [](const auto &run) {
+			return run->marker && run->marker->running() && !run->stopping;
+		});
+	}
+
+	QJsonArray captureMarker(const QString &label, int type, bool alsoCsv)
+	{
+		QJsonArray sessions;
+		for (const auto &run : runs) {
+			if (!run->marker || run->stopping) continue;
+			QJsonObject item;
+			if (run->marker->append(label, type, alsoCsv, item)) sessions.append(item);
+		}
+		if (nativeMarker) {
+			QJsonObject item;
+			if (nativeMarker->append(label, type, alsoCsv, item)) sessions.append(item);
+		}
+		return sessions;
+	}
+
+	void nativeStarted(obs_output_t *output, const QString &path)
+	{
+		nativeStopped();
+		if (!output || path.isEmpty()) return;
+		for (const auto &job : loadRecordingJobs()) {
+			if (job.kind != QStringLiteral("obs") || !job.recordMarkers) continue;
+			nativeOutput = obs_output_get_ref(output);
+			nativeMarker = std::make_unique<MarkerOutput>(nativeOutput, job, path);
+			break;
+		}
+	}
+
+	void nativeStopped()
+	{
+		nativeMarker.reset();
+		nativeOutput = nullptr;
+	}
+
 	QJsonArray sessions() const
 	{
 		QJsonArray result;
@@ -220,6 +449,7 @@ public:
 
 	void shutdown()
 	{
+		nativeStopped();
 		for (auto &run : runs) {
 			if (!run->output || !obs_output_active(run->output)) continue;
 			obs_output_force_stop(run->output);
@@ -242,6 +472,8 @@ public:
 private:
 	QPointer<OBSBasic> main;
 	std::vector<std::unique_ptr<Run>> runs;
+	OBSOutputAutoRelease nativeOutput;
+	std::unique_ptr<MarkerOutput> nativeMarker;
 	QString currentSession;
 
 	void beginSessionIfNeeded()
@@ -398,7 +630,8 @@ private:
 			QDateTime::currentDateTime().toString(QStringLiteral("HH-mm-ss-zzz"));
 		QString filename = basename + QLatin1Char('.') + ext;
 		// Never overwrite an earlier clip when a job is restarted in the same session.
-		for (int suffix = 2; QFileInfo::exists(QDir(directory).filePath(filename)); ++suffix)
+		for (int suffix = 2; QFileInfo::exists(QDir(directory).filePath(filename)) ||
+			QFileInfo::exists(QDir(directory).filePath(filename + QStringLiteral(".markers.json"))); ++suffix)
 			filename = basename + QLatin1Char('_') + QString::number(suffix) + QLatin1Char('.') + ext;
 		OBSDataAutoRelease outputSettings = obs_data_create();
 		run->outputPath = QDir(directory).filePath(filename);
@@ -415,6 +648,8 @@ private:
 		for (int fileIndex = 0; fileIndex < fileTrack; ++fileIndex)
 			obs_output_set_audio_encoder(run->output, run->audioEncoders[size_t(fileIndex)],
 				size_t(fileIndex));
+		if (job.recordMarkers)
+			run->marker = std::make_unique<MarkerOutput>(run->output, job, run->outputPath);
 		if (!obs_output_start(run->output)) {
 			errors << QStringLiteral("%1: %2").arg(job.name,
 				QString::fromUtf8(obs_output_get_last_error(run->output) ? obs_output_get_last_error(run->output) : "Ошибка запуска"));
@@ -429,8 +664,10 @@ private:
 
 	void reap()
 	{
+		if (nativeMarker) nativeMarker->reconcile();
 		const auto before = runs.size();
 		for (auto it = runs.begin(); it != runs.end();) {
+			if ((*it)->marker) (*it)->marker->reconcile();
 			if (!(*it)->output || (!obs_output_active((*it)->output) && (*it)->created.isValid() &&
 			    (*it)->created.elapsed() > 2000)) {
 				if ((*it)->started) writeDiagnostic(QStringLiteral("recording"),
@@ -470,6 +707,7 @@ QVector<RecordingJob> loadRecordingJobs()
 		job.kind = obj.value(QStringLiteral("kind")).toString();
 		job.sourceUuid = obj.value(QStringLiteral("source")).toString();
 		job.enabled = obj.value(QStringLiteral("enabled")).toBool(true);
+		job.recordMarkers = obj.value(QStringLiteral("recordMarkers")).toBool(false);
 		job.inherit = obj.value(QStringLiteral("inherit")).toBool(true); // Preserve old saved jobs.
 		job.encoder = obj.value(QStringLiteral("encoder")).toString(QStringLiteral("obs_nvenc_h264_tex"));
 		job.width = obj.value(QStringLiteral("width")).toInt();
@@ -508,6 +746,7 @@ bool saveRecordingJobs(const QVector<RecordingJob> &jobs, QString *error)
 		obj[QStringLiteral("kind")] = job.kind;
 		obj[QStringLiteral("source")] = job.sourceUuid;
 		obj[QStringLiteral("enabled")] = job.enabled;
+		obj[QStringLiteral("recordMarkers")] = job.recordMarkers;
 		obj[QStringLiteral("inherit")] = job.inherit;
 		obj[QStringLiteral("encoder")] = job.encoder;
 		obj[QStringLiteral("width")] = job.width;
@@ -581,6 +820,32 @@ QJsonArray activeRecordingSessions(OBSBasic *main)
 			{QStringLiteral("elapsedMs"), -1}});
 	}
 	return sessions;
+}
+
+QJsonArray captureRecordingMarker(OBSBasic *main, const QString &label, int type, bool alsoCsv)
+{
+	if (!main) return {};
+	return engine(main)->captureMarker(label, type, alsoCsv);
+}
+
+bool hasMarkedRecording(OBSBasic *main)
+{
+	if (!main) return false;
+	auto *instance = static_cast<RecordingEngine *>(main->findChild<QObject *>(
+		QStringLiteral("xinkxRecordingEngine"), Qt::FindDirectChildrenOnly));
+	return instance && instance->markedRecordingActive();
+}
+
+void nativeRecordingStarted(OBSBasic *main, obs_output_t *output, const QString &filePath)
+{
+	if (auto *instance = engine(main)) instance->nativeStarted(output, filePath);
+}
+
+void nativeRecordingStopped(OBSBasic *main)
+{
+	if (!main) return;
+	if (auto *instance = static_cast<RecordingEngine *>(main->findChild<QObject *>(
+		QStringLiteral("xinkxRecordingEngine"), Qt::FindDirectChildrenOnly))) instance->nativeStopped();
 }
 
 void toggleRecordingJob(OBSBasic *main, const QString &id)

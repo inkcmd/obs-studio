@@ -2309,11 +2309,20 @@ static void interleave_packets(void *data, struct encoder_packet *packet, struct
 static void default_encoded_callback(void *param, struct encoder_packet *packet,
 				     struct encoder_packet_time *packet_time)
 {
-	UNUSED_PARAMETER(packet_time);
 	struct obs_output *output = param;
 
 	if (data_active(output)) {
 		packet->track_idx = get_encoder_index(output, packet);
+
+		/* Video-only encoded outputs bypass send_interleaved(). Notify
+		 * packet observers here too so file PTS tracking also works for
+		 * silent, independently recorded sources. */
+		pthread_mutex_lock(&output->pkt_callbacks_mutex);
+		for (size_t i = 0; i < output->pkt_callbacks.num; ++i) {
+			struct packet_callback *const cb = &output->pkt_callbacks.array[i];
+			cb->packet_cb(output, packet, packet_time, cb->param);
+		}
+		pthread_mutex_unlock(&output->pkt_callbacks_mutex);
 
 		output->info.encoded_packet(output->context.data, packet);
 

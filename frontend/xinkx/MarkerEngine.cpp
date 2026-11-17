@@ -27,6 +27,8 @@
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 namespace xinkx {
 
 namespace {
@@ -86,6 +88,11 @@ void MarkerEngine::load()
 	const auto doc = QJsonDocument::fromJson(file.readAll(), &error);
 	if (error.error != QJsonParseError::NoError || !doc.isObject()) return;
 	const auto config = doc.object();
+	prefix = sanitizedLabel(config.value(QStringLiteral("momentPrefix")).toString(QStringLiteral("Момент")));
+	if (prefix.isEmpty()) prefix = QStringLiteral("Момент");
+	category = std::clamp(config.value(QStringLiteral("kdenliveType")).toInt(), 0, 4);
+	sidecarCsv = config.value(QStringLiteral("sidecarCsv")).toBool(false);
+	momentCounter = std::max(0, config.value(QStringLiteral("momentCounter")).toInt());
 	for (const auto &value : config.value(QStringLiteral("autoTypes")).toArray()) {
 		const auto type = value.toString();
 		if (kAutoTypes.contains(type)) autoTypes.insert(type);
@@ -109,6 +116,7 @@ void MarkerEngine::load()
 				{QStringLiteral("jobId"), jobId},
 				{QStringLiteral("name"), recording.value(QStringLiteral("name")).toString().left(120)},
 				{QStringLiteral("file"), recording.value(QStringLiteral("file")).toString().left(1024)},
+				{QStringLiteral("frame"), recording.value(QStringLiteral("frame")).toDouble(-1)},
 				{QStringLiteral("elapsedMs"), recording.value(QStringLiteral("elapsedMs")).toDouble(-1)}});
 		}
 		entries.append(QJsonObject{
@@ -139,7 +147,9 @@ bool MarkerEngine::flush(QString *error)
 	for (const auto &type : kAutoTypes)
 		if (autoTypes.contains(type)) automatic.append(type);
 	const QJsonDocument doc(QJsonObject{{QStringLiteral("version"), 2},
-		{QStringLiteral("autoTypes"), automatic}, {QStringLiteral("markers"), entries}});
+		{QStringLiteral("autoTypes"), automatic}, {QStringLiteral("markers"), entries},
+		{QStringLiteral("momentPrefix"), prefix}, {QStringLiteral("momentCounter"), momentCounter},
+		{QStringLiteral("kdenliveType"), category}, {QStringLiteral("sidecarCsv"), sidecarCsv}});
 	const auto bytes = doc.toJson(QJsonDocument::Indented);
 	QSaveFile file(path);
 	if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit()) {
@@ -151,15 +161,16 @@ bool MarkerEngine::flush(QString *error)
 	return true;
 }
 
-bool MarkerEngine::add(const QString &label, const QString &type, const QString &platform)
+bool MarkerEngine::add(const QString &label, const QString &type, const QString &platform, bool requireRecording)
 {
 	const auto value = sanitizedLabel(label);
 	if (value.isEmpty()) return false;
-	// Capture all active recording jobs at the moment of the marker. The
-	// timestamps are approximate elapsed time, not encoded frame timestamps.
+	// One marker command fans out to each running opted-in output. Every output
+	// uses its own encoded PTS and atomically persists its own Kdenlive JSON.
 	QJsonArray recordings;
 	if (auto *window = qobject_cast<OBSBasic *>(parent() ? parent()->parent() : nullptr))
-		recordings = activeRecordingSessions(window);
+		recordings = captureRecordingMarker(window, value, category, sidecarCsv);
+	if (requireRecording && recordings.isEmpty()) return false;
 	while (recordings.size() > 16) recordings.removeAt(recordings.size() - 1);
 	entries.append(QJsonObject{{QStringLiteral("time"), QDateTime::currentDateTime().toString(Qt::ISODateWithMs)},
 		{QStringLiteral("label"), value}, {QStringLiteral("type"), type.left(32)},
@@ -170,6 +181,37 @@ bool MarkerEngine::add(const QString &label, const QString &type, const QString 
 	saveTimer.start();
 	emit changed();
 	return true;
+}
+
+bool MarkerEngine::markMoment()
+{
+	auto *window = qobject_cast<OBSBasic *>(parent() ? parent()->parent() : nullptr);
+	if (!window || !hasMarkedRecording(window)) return false;
+	const auto label = QStringLiteral("%1 %2").arg(prefix).arg(momentCounter + 1);
+	if (!add(label, QStringLiteral("moment"), QStringLiteral("local"), true)) return false;
+	++momentCounter;
+	flush();
+	return true;
+}
+
+bool MarkerEngine::setMomentOptions(const QString &newPrefix, int newType, bool newCsv, QString *error)
+{
+	const auto clean = sanitizedLabel(newPrefix);
+	if (clean.isEmpty() || newType < 0 || newType > 4) {
+		if (error) *error = QStringLiteral("Название и тип маркера указаны неверно");
+		return false;
+	}
+	const auto oldPrefix = prefix;
+	const auto oldType = category;
+	const auto oldCsv = sidecarCsv;
+	prefix = clean;
+	category = newType;
+	sidecarCsv = newCsv;
+	if (flush(error)) { emit changed(); return true; }
+	prefix = oldPrefix;
+	category = oldType;
+	sidecarCsv = oldCsv;
+	return false;
 }
 
 QJsonObject MarkerEngine::execute(const QString &actionId, const QJsonObject &arguments)
@@ -281,9 +323,9 @@ void installMarkerWorkspace(OBSBasic *mainWindow)
 	auto *page = new QWidget(tabs);
 	auto *layout = new QVBoxLayout(page);
 	auto *description = new QLabel(QStringLiteral(
-		"Метки важных моментов для монтажа. Сохраняются локально с системным временем. "
-		"Активные записи добавляются к маркеру вместе с именем файла и примерным временем. "
-		"Это не точный таймкод видео; для штатной записи OBS путь может быть неизвестен."), page);
+		"Метки важных моментов для монтажа. «Отметить момент» настраивается в «Настройки → "
+		"Горячие клавиши». Для записей с галочкой «Вести метки» рядом с видео сразу "
+		"сохраняется Kdenlive JSON. Позиция вычисляется из PTS видеопакетов каждого выхода."), page);
 	description->setWordWrap(true);
 	layout->addWidget(description);
 	auto *list = new QTreeWidget(page);
@@ -299,8 +341,9 @@ void installMarkerWorkspace(OBSBasic *mainWindow)
 			QStringList paths;
 			for (const auto &value : marker.value(QStringLiteral("recordings")).toArray()) {
 				const auto recording = value.toObject();
+				const double frame = recording.value(QStringLiteral("frame")).toDouble(-1);
 				const double elapsed = recording.value(QStringLiteral("elapsedMs")).toDouble(-1);
-				const QString at = elapsed < 0 ? QStringLiteral("?") :
+				const QString at = frame >= 0 ? QStringLiteral("кадр %1").arg(frame, 0, 'f', 0) : elapsed < 0 ? QStringLiteral("?") :
 					QStringLiteral("%1:%2").arg(static_cast<qint64>(elapsed) / 60000)
 						.arg((static_cast<qint64>(elapsed) / 1000) % 60, 2, 10, QLatin1Char('0'));
 				files.append(recording.value(QStringLiteral("name")).toString() +

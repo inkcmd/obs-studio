@@ -1,7 +1,9 @@
 #include "StudioSettingsPages.hpp"
 
 #include "DonationGateway.hpp"
+#include "MarkerEngine.hpp"
 #include "PresentationSettings.hpp"
+#include "RecordingEngine.hpp"
 #include "StudioAutomation.hpp"
 #include "StudioDiagnostics.hpp"
 #include "WheelFocusGuard.hpp"
@@ -574,6 +576,60 @@ QWidget *diagnosticsPage(QWidget *parent)
 	return page;
 }
 
+QWidget *markerSettingsPage(QWidget *parent, OBSBasic *mainWindow)
+{
+	QVBoxLayout *layout;
+	auto *page = section(parent, QStringLiteral("Метки для монтажа"),
+		QStringLiteral("Каждое задание записи самостоятельно решает, вести ли метки. "
+			"Метки всегда привязаны к видеокадрам конкретного файла, а не ко времени запуска программы."), &layout);
+	auto *engine = mainWindow->findChild<MarkerEngine *>(QStringLiteral("xinkxMarkerEngine"));
+	if (!engine) return page;
+	auto *form = new QFormLayout();
+	auto *prefix = new QLineEdit(engine->momentPrefix(), page);
+	prefix->setMaxLength(80);
+	form->addRow(QStringLiteral("Название по горячей клавише"), prefix);
+	auto *category = new QComboBox(page);
+	for (int i = 0; i < 5; ++i) {
+		category->addItem(i == 0 ? QStringLiteral("0 · стандартный маркер")
+			: QStringLiteral("%1 · категория Kdenlive").arg(i), i);
+	}
+	category->setCurrentIndex(engine->kdenliveType());
+	form->addRow(QStringLiteral("Тип / цвет в Kdenlive"), category);
+	auto *format = new QComboBox(page);
+	format->addItem(QStringLiteral("Kdenlive JSON (*.markers.json)"), false);
+	format->addItem(QStringLiteral("Kdenlive JSON + CSV (*.markers.csv)"), true);
+	format->setCurrentIndex(engine->alsoExportCsv() ? 1 : 0);
+	form->addRow(QStringLiteral("Формат файла меток"), format);
+	layout->addLayout(form);
+	auto *hint = new QLabel(QStringLiteral("Имя рядом с видео: <b>имя_видео.mkv.markers.json</b> "
+		"(или .mp4.markers.json). Поле <b>pos</b> — номер кадра записи с учётом FPS. "
+		"Файл обновляется при каждой метке и завершается при остановке. "
+		"Для записей без галочки файлы не создаются."), page);
+	hint->setWordWrap(true);
+	layout->addWidget(hint);
+	auto *save = new QPushButton(QStringLiteral("Сохранить настройки меток"), page);
+	layout->addWidget(save);
+	QObject::connect(save, &QPushButton::clicked, page, [=] {
+		QString error;
+		if (!engine->setMomentOptions(prefix->text(), category->currentData().toInt(),
+			format->currentData().toBool(), &error))
+			QMessageBox::warning(page, QStringLiteral("Метки"), error);
+	});
+	auto *jobs = new QPushButton(QStringLiteral("Настроить задания записи и галочки «Вести метки»"), page);
+	layout->addWidget(jobs);
+	QObject::connect(jobs, &QPushButton::clicked, page, [mainWindow] {
+		showRecordingSettings(mainWindow);
+	});
+	auto *hotkey = new QLabel(QStringLiteral("Глобальная клавиша «Отметить момент»: "
+		"Настройки OBS → Горячие клавиши → INK Studio: Отметить момент. "
+		"Клавиша срабатывает во время игры и отмечает только активные записи "
+		"с включённой галочкой. Во время паузы метки не ставятся."), page);
+	hotkey->setWordWrap(true);
+	layout->addWidget(hotkey);
+	layout->addStretch();
+	return page;
+}
+
 } // namespace
 
 void installStudioSettingsPages(QWidget *settingsDialog)
@@ -609,6 +665,8 @@ void installStudioSettingsPages(QWidget *settingsDialog)
 		QStringLiteral(":/settings/images/settings/hotkeys.svg"));
 	add(QStringLiteral("Автоматизация"), automationPage(stack, mainWindow),
 		QStringLiteral(":/settings/images/settings/advanced.svg"));
+	add(QStringLiteral("Метки"), markerSettingsPage(stack, mainWindow),
+		QStringLiteral(":/settings/images/settings/hotkeys.svg"));
 	add(QStringLiteral("Диагностика"), diagnosticsPage(stack),
 		QStringLiteral(":/settings/images/settings/advanced.svg"));
 }

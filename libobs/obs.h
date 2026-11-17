@@ -2152,8 +2152,8 @@ EXPORT const char *obs_get_output_supported_video_codecs(const char *id);
 
 EXPORT const char *obs_get_output_supported_audio_codecs(const char *id);
 
-/* Add/remove packet-processing callbacks that are invoked in
- * send_interleaved(), before forwarding packets to the output service.
+/* Add/remove packet-processing callbacks that are invoked for encoded
+ * output packets, before forwarding packets to the output service.
  * This provides a mechanism to perform packet processing outside of
  * libobs, however any callback function registering with this API should keep
  * keep code to a minimum and understand it is running synchronously with the

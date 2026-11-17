@@ -25,7 +25,7 @@ public:
 	QStringList capabilities() const override
 	{
 		return {QStringLiteral("manual-markers"), QStringLiteral("event-markers"),
-			QStringLiteral("csv-export")};
+			QStringLiteral("csv-export"), QStringLiteral("kdenlive-sidecars")};
 	}
 	QList<EngineAction> actions() const override
 	{
@@ -49,6 +49,11 @@ public:
 	bool setAutomaticTypes(const QStringList &types, QString *error = nullptr);
 	bool exportCsv(const QString &fileName, QString *error = nullptr) const;
 	bool clear(QString *error = nullptr);
+	bool markMoment(); // OBS global hotkey: only active opted-in recording outputs.
+	QString momentPrefix() const { return prefix; }
+	int kdenliveType() const { return category; }
+	bool alsoExportCsv() const { return sidecarCsv; }
+	bool setMomentOptions(const QString &newPrefix, int newType, bool newCsv, QString *error = nullptr);
 
 signals:
 	void changed();
@@ -60,10 +65,14 @@ private:
 	QElapsedTimer session;
 	QTimer saveTimer;
 	QString storageError;
+	QString prefix = QStringLiteral("Момент");
+	int category = 0;
+	bool sidecarCsv = false;
+	int momentCounter = 0;
 
 	void load();
 	bool flush(QString *error = nullptr);
-	bool add(const QString &label, const QString &type, const QString &platform);
+	bool add(const QString &label, const QString &type, const QString &platform, bool requireRecording = false);
 };
 
 void installMarkerWorkspace(OBSBasic *mainWindow);

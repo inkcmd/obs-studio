@@ -163,6 +163,8 @@ void OBSBasic::StopRecording()
 void OBSBasic::RecordingStart()
 {
 	ui->statusbar->RecordingStarted(outputHandler->fileOutput);
+	xinkx::nativeRecordingStarted(this, outputHandler->fileOutput,
+		QString::fromUtf8(outputHandler->lastRecordingPath.c_str()));
 	emit RecordingStarted(isRecordingPausable);
 
 	if (sysTrayRecord) {
@@ -183,6 +185,7 @@ void OBSBasic::RecordingStart()
 
 void OBSBasic::RecordingStop(int code, QString last_error)
 {
+	xinkx::nativeRecordingStopped(this);
 	ui->statusbar->RecordingStopped();
 	emit RecordingStopped();
 
@@ -249,6 +252,10 @@ void OBSBasic::RecordingStop(int code, QString last_error)
 
 void OBSBasic::RecordingFileChanged(QString lastRecordingPath)
 {
+	// A native OBS split starts a new file without stopping the output.
+	// Finalize the old file and attach a fresh per-file PTS observer.
+	xinkx::nativeRecordingStarted(this, outputHandler->fileOutput,
+		QString::fromUtf8(outputHandler->lastRecordingPath.c_str()));
 	QString str = QTStr("Basic.StatusBar.RecordingSavedTo");
 	ShowStatusBarMessage(str.arg(lastRecordingPath));
 

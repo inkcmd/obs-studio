@@ -195,6 +195,10 @@ public:
 		outputSummary->setToolTip(QStringLiteral("Параметры задания; CQP не задаёт постоянный битрейт. "
 			"Реальные параметры записанного MKV можно проверить через ffprobe или MediaInfo."));
 		form->addRow(QStringLiteral("Параметры записи"), outputSummary);
+		recordMarkers = new QCheckBox(QStringLiteral("Вести метки"), right);
+		recordMarkers->setToolTip(QStringLiteral("Метки «Отметить момент» и включённых событий сохраняются "
+			"рядом с файлом как *.markers.json для Kdenlive. По умолчанию выключено."));
+		form->addRow(recordMarkers);
 		audioPanel = new QWidget(right);
 		auto *audioLayout = new QVBoxLayout(audioPanel);
 		audioLayout->setContentsMargins(0, 0, 0, 0);
@@ -249,6 +253,7 @@ public:
 			job.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
 			job.name = QStringLiteral("Новая запись");
 			job.enabled = false;
+			job.recordMarkers = false;
 			jobs.append(job);
 			rebuild(jobs.size() - 1);
 		});
@@ -260,6 +265,7 @@ public:
 			job.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
 			job.name += QStringLiteral(" (копия)");
 			job.enabled = false;
+			job.recordMarkers = false;
 			jobs.append(job);
 			rebuild(jobs.size() - 1);
 		});
@@ -366,6 +372,7 @@ private:
 	QLineEdit *name{};
 	QLineEdit *folder{};
 	QCheckBox *enabled{};
+	QCheckBox *recordMarkers{};
 	QCheckBox *inherit{};
 	QCheckBox *sessionFolder{};
 	QComboBox *kind{};
@@ -464,6 +471,7 @@ private:
 		auto &job = jobs[oldIndex];
 		job.name = name->text().trimmed();
 		job.enabled = enabled->isChecked();
+		job.recordMarkers = recordMarkers->isChecked();
 		job.kind = kind->currentData().toString();
 		job.sourceUuid = target->currentData().toString();
 		job.inherit = inherit->isChecked();
@@ -511,6 +519,7 @@ private:
 			const auto &job = jobs.at(index);
 			name->setText(job.name);
 			enabled->setChecked(job.enabled);
+			recordMarkers->setChecked(job.recordMarkers);
 			kind->setCurrentIndex(std::max(0, kind->findData(job.kind)));
 			populateSources(job.sourceUuid);
 			inherit->setChecked(job.inherit);
