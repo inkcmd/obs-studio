@@ -88,6 +88,7 @@ private:
 		bool baseline = false;
 		bool pending = false;
 		bool forceTokenRefresh = false;
+		bool restFallback = false; // This build of libcurl cannot negotiate HTTP/2.
 		qint64 nextAt = 0;
 		int attempts = 0;
 	};
@@ -95,6 +96,7 @@ private:
 		QString roomId;
 		QString slug;
 		QString guestId;
+		quint64 lookupVersion = 0; // Invalidate stale responses after rename/manual override.
 		QString guestToken;
 		QUrl socketUrl;
 		qint64 tokenExpiresAt = 0;
@@ -138,6 +140,7 @@ private:
 	void schedule();
 	void pollYouTube(const QString &id);
 	void startYouTubeStream(const QString &id);
+	void pollYouTubeMessages(const QString &id);
 	void handleYouTubePage(const QString &id, const QJsonObject &page);
 	void subscribeTwitch(const QString &id, const QString &sessionId);
 	void handleTwitchFrame(const QString &id, const QByteArray &frame);

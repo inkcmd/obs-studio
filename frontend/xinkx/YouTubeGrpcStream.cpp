@@ -326,7 +326,13 @@ YouTubeGrpcStream::YouTubeGrpcStream(QObject *receiver, const QString &accessTok
 			if (multiCode != CURLM_OK) message = QStringLiteral("gRPC multi: %1")
 				.arg(QString::fromLatin1(curl_multi_strerror(multiCode)));
 			else if (transfer.malformed) message = QStringLiteral("Некорректный gRPC-пакет");
-			else if (httpVersion != CURL_HTTP_VERSION_2_0) message = QStringLiteral("Требуется HTTP/2 (libcurl/nghttp2)");
+			else if (!(curl_version_info(CURLVERSION_NOW)->features & CURL_VERSION_HTTP2) ||
+				 (http && httpVersion != CURL_HTTP_VERSION_2_0)) {
+				// -2 is an internal transport capability signal, not a gRPC
+				// response. ChatGateway switches to REST list on this signal.
+				grpcStatus = -2;
+				message = QStringLiteral("Требуется HTTP/2 (libcurl/nghttp2)");
+			}
 			else if (http != 200) message = QStringLiteral("YouTube HTTP %1").arg(http);
 			else if (grpcStatus > 0) message = QStringLiteral("gRPC %1: %2").arg(grpcStatus)
 				.arg(transfer.grpcMessage.left(150));

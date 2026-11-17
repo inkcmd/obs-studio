@@ -6,7 +6,7 @@ const gateway = read('ChatGateway.cpp');
 const stream = read('YouTubeGrpcStream.cpp');
 const build = read('../cmake/feature-xinkx-studio.cmake');
 
-// YouTube's documented server-streaming RPC replaces repeated REST chat polling.
+// YouTube prefers server-streaming RPC and falls back to REST on HTTP/2 incompatibility.
 for (const term of [
   'youtube.googleapis.com/youtube.api.v3.V3DataLiveChatMessageService/StreamList',
   'CURL_HTTP_VERSION_2_0',
@@ -23,8 +23,9 @@ for (const term of [
 }
 assert.match(stream, /readString\(content, 103, name\)/);
 assert.match(build, /xinkx\/YouTubeGrpcStream\.cpp/);
-assert.doesNotMatch(gateway, /pollYouTubeMessages\(/);
-assert.doesNotMatch(gateway, /pollingIntervalMillis/);
+assert.match(gateway, /pollYouTubeMessages\(/);
+assert.match(gateway, /pollingIntervalMillis/);
+assert.match(gateway, /state\.restFallback = true/);
 assert.match(gateway, /startYouTubeStream\(id\)/);
 assert.match(gateway, /state\.nextPage = page\.value\(QStringLiteral\("nextPageToken"\)\)/);
 assert.match(gateway, /state\.forceTokenRefresh = true/);
@@ -46,4 +47,4 @@ assert.match(gateway, /state\.attempts = std::min\(6, state\.attempts \+ 1\)/);
 assert.match(gateway, /if \(seenEvents\.contains\(key\)\) return/);
 assert.match(gateway, /line\.accountId = canonicalChatId\(line\.accountId\)/);
 
-console.log('XINKX realtime chat: gRPC/HTTP2 YouTube, EventSub handoff Twitch, WSS Kick and dedup guards OK');
+console.log('XINKX realtime chat: YouTube gRPC/REST fallback, Twitch EventSub, Kick WSS and dedup guards OK');

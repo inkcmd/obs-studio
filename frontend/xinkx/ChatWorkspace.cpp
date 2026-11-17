@@ -18,6 +18,7 @@
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QIcon>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -31,6 +32,8 @@
 #include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
+
+#include <algorithm>
 
 namespace xinkx {
 
@@ -66,6 +69,36 @@ void installChatWorkspace(OBSBasic *mainWindow)
 	auto *refresh = new QPushButton(QStringLiteral("Обновить"), panel);
 	refresh->setToolTip(QStringLiteral("Перечитать аккаунты и повторно подключить недоступные чаты"));
 	toolbar->addWidget(refresh);
+	auto *kickRoomButton = new QPushButton(QStringLiteral("Kick ID"), panel);
+	kickRoomButton->setToolTip(QStringLiteral("Если Kick блокирует автоопределение: открой в браузере "
+		"kick.com/api/v2/channels/<новый_ник> и найди chatroom.id"));
+	toolbar->addWidget(kickRoomButton);
+	QObject::connect(kickRoomButton, &QPushButton::clicked, panel, [gateway, panel] {
+		QVector<StreamAccount> channels;
+		for (const auto &account : gateway->chatAccounts())
+			if (account.platform == QStringLiteral("kick")) channels.append(account);
+		if (channels.isEmpty()) return;
+		int selected = 0;
+		if (channels.size() > 1) {
+			QStringList labels;
+			for (const auto &account : channels) labels << account.displayName();
+			bool ok = false;
+			const QString choice = QInputDialog::getItem(panel, QStringLiteral("Kick"),
+				QStringLiteral("Канал:"), labels, 0, false, &ok);
+			if (!ok) return;
+			selected = labels.indexOf(choice);
+			if (selected < 0) return;
+		}
+		const auto id = channels[selected].id;
+		bool ok = false;
+		const QString room = QInputDialog::getText(panel, QStringLiteral("Kick chatroom ID"),
+			QStringLiteral("Числовой chatroom.id (не broadcaster_user_id):"),
+			QLineEdit::Normal, gateway->kickRoomId(id), &ok);
+		if (ok) {
+			gateway->setKickRoomId(id, room);
+			gateway->retryDisconnectedChats();
+		}
+	});
 	// A small editor in the existing Chat page; no extra dock or duplicated feed.
 	if (auto *moderation = mainWindow->findChild<ModerationEngine *>(QStringLiteral("xinkxModerationEngine"))) {
 		auto *editModeration = new QPushButton(panel);
@@ -169,6 +202,9 @@ void installChatWorkspace(OBSBasic *mainWindow)
 		view->statuses.clear();
 		view->viewers.clear();
 		const auto accounts = gateway->chatAccounts();
+		kickRoomButton->setVisible(std::any_of(accounts.cbegin(), accounts.cend(), [](const StreamAccount &account) {
+			return account.platform == QStringLiteral("kick");
+		}));
 		for (const auto &account : accounts) {
 			auto *column = new QWidget(selector);
 			auto *stack = new QHBoxLayout(column);

@@ -245,14 +245,29 @@ void ChatGateway::reloadAccounts()
 	}
 	for (auto it = kickSockets.begin(); it != kickSockets.end();) {
 		if (!updated.contains(it.key()) ||
-		    updated[it.key()].providerName != known.value(it.key()).providerName) {
+		    updated[it.key()].providerId != known.value(it.key()).providerId) {
 			delete it.value();
 			it = kickSockets.erase(it);
 		} else ++it;
 	}
 	for (auto it = kick.begin(); it != kick.end();) {
-		if (!updated.contains(it.key())) it = kick.erase(it);
-		else ++it;
+		const auto next = updated.value(it.key());
+		const auto previous = known.value(it.key());
+		if (next.id.isEmpty() || next.providerId != previous.providerId) {
+			it = kick.erase(it);
+		} else {
+			const QString newSlug = next.providerName.toLower().trimmed();
+			if (it->slug != newSlug) {
+				// A Kick rename does not change the chatroom ID. Do not
+				// discard a working socket/room when only the slug changes.
+				it->slug = newSlug;
+				++it->lookupVersion;
+				if (!kickSockets.contains(it.key())) it->pending = false;
+				it->nextAt = 0;
+				it->attempts = 0;
+			}
+			++it;
+		}
 	}
 	known = updated;
 	for (auto it = viewerSnapshot.begin(); it != viewerSnapshot.end();) {
@@ -280,7 +295,14 @@ void ChatGateway::reloadAccounts()
 			const auto config = studioSettingsPath();
 			if (!config.isEmpty()) {
 				QSettings settings(config, QSettings::IniFormat);
-				state.roomId = settings.value(QStringLiteral("chat/kickRoom-%1").arg(account.id)).toString();
+				const QString owner = settings.value(QStringLiteral("chat/kickRoomOwner-%1").arg(account.id)).toString();
+				if (owner.isEmpty() || owner == account.providerId)
+					state.roomId = settings.value(QStringLiteral("chat/kickRoom-%1").arg(account.id)).toString();
+				if (state.roomId.isEmpty() && !account.providerId.isEmpty())
+					state.roomId = settings.value(QStringLiteral("chat/kickRoomForUser-%1")
+						.arg(account.providerId)).toString();
+				if (!QRegularExpression(QStringLiteral("^[0-9]{1,15}$")).match(state.roomId).hasMatch())
+					state.roomId.clear();
 			}
 			kick.insert(account.id, state);
 		}
@@ -1086,7 +1108,8 @@ void ChatGateway::pollYouTube(const QString &id)
 	auto &state = youtube[id];
 	if (state.pending) return;
 	if (!state.chatId.isEmpty()) {
-		startYouTubeStream(id);
+		if (state.restFallback) pollYouTubeMessages(id);
+		else startYouTubeStream(id);
 		return;
 	}
 	state.pending = true;
@@ -1136,6 +1159,10 @@ void ChatGateway::startYouTubeStream(const QString &id)
 	if (!youtube.contains(id) || youtube[id].pending || youtubeStreams.contains(id)) return;
 	auto &state = youtube[id];
 	if (state.chatId.isEmpty()) return;
+	if (state.restFallback) {
+		pollYouTubeMessages(id);
+		return;
+	}
 	state.pending = true;
 	const QString chatId = state.chatId;
 	const QString pageToken = state.nextPage;
@@ -1184,6 +1211,16 @@ void ChatGateway::startYouTubeStream(const QString &id)
 				state.attempts = std::min(state.attempts + 1, 6);
 				const int delay = std::min(120000, 2000 * (1 << state.attempts));
 				state.nextAt = QDateTime::currentMSecsSinceEpoch() + delay;
+				if (grpcStatus == -2) {
+					// gRPC requires HTTP/2, but the bundled libcurl negotiated
+					// HTTP/1.1 (or was compiled without nghttp2). Use the
+					// documented REST list endpoint without losing the chat ID.
+					state.restFallback = true;
+					state.attempts = 0;
+					state.nextAt = QDateTime::currentMSecsSinceEpoch();
+					status(id, QStringLiteral("YouTube: HTTP/2 недоступен · резервный REST-чат"));
+					return;
+				}
 				if (grpcStatus == 5 || grpcStatus == 9) {
 					state.chatId.clear(); state.nextPage.clear(); state.baseline = false;
 					state.nextAt = QDateTime::currentMSecsSinceEpoch() + 60000;
@@ -1200,6 +1237,59 @@ void ChatGateway::startYouTubeStream(const QString &id)
 			});
 		youtubeStreams[id] = *identity;
 	}, refreshToken);
+}
+
+void ChatGateway::pollYouTubeMessages(const QString &id)
+{
+	if (!youtube.contains(id) || youtube[id].pending || youtube[id].chatId.isEmpty()) return;
+	auto &state = youtube[id];
+	state.pending = true;
+	const QString chatId = state.chatId;
+	QList<QPair<QString, QString>> params{
+		{QStringLiteral("liveChatId"), chatId},
+		{QStringLiteral("part"), QStringLiteral("id,snippet,authorDetails")},
+		{QStringLiteral("maxResults"), QStringLiteral("200")}};
+	if (!state.nextPage.isEmpty())
+		params.append({QStringLiteral("pageToken"), state.nextPage});
+	const QString url = apiUrl(QStringLiteral("https://www.googleapis.com/youtube/v3/liveChat/messages"), params);
+	authorized(id, url, {}, [this, id, chatId](const HttpResult &result) {
+		if (!youtube.contains(id) || youtube[id].chatId != chatId || !youtube[id].restFallback) return;
+		auto &state = youtube[id];
+		state.pending = false;
+		const qint64 now = QDateTime::currentMSecsSinceEpoch();
+		if (!result.ok) {
+			state.attempts = std::min(6, state.attempts + 1);
+			state.nextAt = std::max(youtubeQuotaResumeAt, now +
+				std::min(120000, 5000 * (1 << state.attempts)));
+			const auto details = result.json.value(QStringLiteral("error")).toObject()
+				.value(QStringLiteral("errors")).toArray();
+			const QString reason = details.isEmpty() ? QString{} : details.first().toObject()
+				.value(QStringLiteral("reason")).toString();
+			if (reason == QStringLiteral("liveChatEnded") || reason == QStringLiteral("liveChatNotFound")) {
+				state.chatId.clear(); state.nextPage.clear(); state.baseline = false;
+				state.nextAt = now + 60000;
+			}
+			status(id, QStringLiteral("YouTube REST-чат: ") + result.error);
+			return;
+		}
+		// The server supplies a per-chat minimum polling interval. Never
+		// spin a 1-second poll or discard a continuation token on reconnect.
+		const qint64 serverInterval = result.json.value(QStringLiteral("pollingIntervalMillis"))
+			.toVariant().toLongLong();
+		state.nextAt = now + std::max(serverInterval, qint64(10000));
+		state.attempts = 0;
+		if (state.baseline) handleYouTubePage(id, result.json);
+		else {
+			state.baseline = true;
+			status(id, QStringLiteral("YouTube: REST-чат подключён"));
+		}
+		state.nextPage = result.json.value(QStringLiteral("nextPageToken")).toString(state.nextPage);
+		if (result.json.contains(QStringLiteral("offlineAt"))) {
+			state.chatId.clear(); state.nextPage.clear(); state.baseline = false;
+			state.nextAt = now + 60000;
+			status(id, QStringLiteral("YouTube: эфир завершён"));
+		}
+	});
 }
 
 void ChatGateway::handleYouTubePage(const QString &id, const QJsonObject &page)
@@ -1413,9 +1503,13 @@ void ChatGateway::setKickRoomId(const QString &accountId, const QString &roomId)
 	if (!path.isEmpty()) {
 		QSettings settings(path, QSettings::IniFormat);
 		settings.setValue(QStringLiteral("chat/kickRoom-%1").arg(accountId), value);
+		settings.setValue(QStringLiteral("chat/kickRoomOwner-%1").arg(accountId), known.value(accountId).providerId);
+		const QString userId = known.value(accountId).providerId;
+		if (!userId.isEmpty()) settings.setValue(QStringLiteral("chat/kickRoomForUser-%1").arg(userId), value);
 	}
 	delete kickSockets.take(accountId);
 	auto &state = kick[accountId];
+	++state.lookupVersion;
 	state.roomId = value;
 	state.pending = false;
 	state.subscribed = false;
@@ -1436,33 +1530,68 @@ void ChatGateway::startKick(const QString &id)
 
 void ChatGateway::kickResolveRoom(const QString &id)
 {
-	if (!kick.contains(id)) return;
+	if (!kick.contains(id) || kick[id].pending) return;
 	auto &state = kick[id];
-	const auto slug = state.slug;
-	if (!QRegularExpression(QStringLiteral("^[a-z0-9_]{1,40}$")).match(slug).hasMatch()) {
-		status(id, QStringLiteral("Kick: укажи chatroom ID или обнови имя канала OAuth"));
-		state.nextAt = QDateTime::currentMSecsSinceEpoch() + 60000;
-		return;
-	}
 	state.pending = true;
-	const auto url = apiUrl(QStringLiteral("https://kick.com/api/v2/channels/%1").arg(slug), {});
-	request(id, url, {}, {}, [this, id](const HttpResult &result) {
-		if (!kick.contains(id)) return;
-		kick[id].pending = false;
-		const QString room = result.json.value(QStringLiteral("chatroom")).toObject()
-					.value(QStringLiteral("id")).toVariant().toString();
-		if (!result.ok || !QRegularExpression(QStringLiteral("^[0-9]{1,15}$")).match(room).hasMatch()) {
-			status(id, QStringLiteral("Kick: не удалось определить комнату, введи её ID вручную"));
-			auto &state = kick[id];
-			state.attempts = std::min(6, state.attempts + 1);
-			state.nextAt = QDateTime::currentMSecsSinceEpoch() +
-				std::min(120000, 2000 * (1 << state.attempts));
+	const quint64 lookupVersion = ++state.lookupVersion;
+	const QString providerId = known.value(id).providerId;
+	// The OAuth user ID is stable across channel renames. Refresh the slug
+	// using the official API before using the unofficial chatroom lookup.
+	const auto resolveSlug = [this, id, providerId, lookupVersion](const QString &slug) {
+		if (!kick.contains(id) || known.value(id).providerId != providerId ||
+		    kick[id].lookupVersion != lookupVersion) return;
+		auto &state = kick[id];
+		state.slug = slug.toLower().trimmed();
+		state.pending = false;
+		if (!QRegularExpression(QStringLiteral("^[a-z0-9_-]{1,60}$")).match(state.slug).hasMatch()) {
+			status(id, QStringLiteral("Kick: неизвестное имя канала · введи chatroom ID"));
+			state.nextAt = QDateTime::currentMSecsSinceEpoch() + 60000;
 			return;
 		}
-		kick[id].roomId = room;
-		status(id, QStringLiteral("Kick: найдена комната %1").arg(room));
-		kickDiscover(id);
-	}, false, {QStringLiteral("User-Agent: Mozilla/5.0")});
+		state.pending = true;
+		const QString targetSlug = state.slug;
+		const auto url = apiUrl(QStringLiteral("https://kick.com/api/v2/channels/%1").arg(targetSlug), {});
+		request(id, url, {}, {}, [this, id, targetSlug, providerId, lookupVersion](const HttpResult &result) {
+			if (!kick.contains(id) || known.value(id).providerId != providerId ||
+			    kick[id].lookupVersion != lookupVersion || kick[id].slug != targetSlug) return;
+			auto &state = kick[id];
+			state.pending = false;
+			const QString room = result.json.value(QStringLiteral("chatroom")).toObject()
+				.value(QStringLiteral("id")).toVariant().toString();
+			if (!result.ok || !QRegularExpression(QStringLiteral("^[0-9]{1,15}$")).match(room).hasMatch()) {
+				status(id, QStringLiteral("Kick: chatroom ID не получен (%1). Нажми «Kick ID» для ввода")
+					.arg(result.error.isEmpty() ? QStringLiteral("нет chatroom.id") : result.error));
+				state.attempts = std::min(6, state.attempts + 1);
+				state.nextAt = QDateTime::currentMSecsSinceEpoch() +
+					std::min(120000, 2000 * (1 << state.attempts));
+				return;
+			}
+			state.roomId = room;
+			// Chatroom ID survives username changes. Cache it against the
+			// immutable OAuth user ID, never the mutable Kick channel slug.
+			const auto config = studioSettingsPath();
+			if (!config.isEmpty() && !providerId.isEmpty()) {
+				QSettings settings(config, QSettings::IniFormat);
+				settings.setValue(QStringLiteral("chat/kickRoomForUser-%1").arg(providerId), room);
+			}
+			status(id, QStringLiteral("Kick: найдена комната %1").arg(room));
+			kickDiscover(id);
+		}, false, {QStringLiteral("User-Agent: Mozilla/5.0")});
+	};
+	if (QRegularExpression(QStringLiteral("^[0-9]{1,15}$")).match(providerId).hasMatch()) {
+		const QString url = apiUrl(QStringLiteral("https://api.kick.com/public/v1/channels"),
+			{{QStringLiteral("broadcaster_user_id"), providerId}});
+		authorized(id, url, {}, [this, id, providerId, lookupVersion, resolveSlug](const HttpResult &result) {
+			if (!kick.contains(id) || known.value(id).providerId != providerId ||
+			    kick[id].lookupVersion != lookupVersion) return;
+			const auto channels = result.json.value(QStringLiteral("data")).toArray();
+			const QString freshSlug = channels.isEmpty() ? QString{} : channels.first().toObject()
+				.value(QStringLiteral("slug")).toString();
+			resolveSlug(freshSlug.isEmpty() ? kick[id].slug : freshSlug);
+		});
+	} else {
+		resolveSlug(state.slug);
+	}
 }
 
 void ChatGateway::kickDiscover(const QString &id)
@@ -1470,6 +1599,8 @@ void ChatGateway::kickDiscover(const QString &id)
 	if (!kick.contains(id) || kick[id].pending) return;
 	auto &state = kick[id];
 	state.pending = true;
+	const quint64 lookupVersion = state.lookupVersion;
+	const QString roomId = state.roomId;
 	if (state.guestId.isEmpty()) state.guestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
 	const QJsonObject body{
 		{QStringLiteral("client"), QJsonObject{{QStringLiteral("id"), state.guestId},
@@ -1479,8 +1610,9 @@ void ChatGateway::kickDiscover(const QString &id)
 	};
 	request(id, QStringLiteral("https://web.kick.com/api/v1/realtime/connection"),
 		QJsonDocument(body).toJson(QJsonDocument::Compact), QByteArray("application/json"),
-		[this, id](const HttpResult &result) {
-			if (!kick.contains(id)) return;
+		[this, id, lookupVersion, roomId](const HttpResult &result) {
+			if (!kick.contains(id) || kick[id].lookupVersion != lookupVersion ||
+			    kick[id].roomId != roomId) return;
 			if (!result.ok) {
 				kick[id].pending = false;
 				kick[id].attempts = std::min(6, kick[id].attempts + 1);
@@ -1515,8 +1647,9 @@ void ChatGateway::kickDiscover(const QString &id)
 			}
 			kick[id].socketUrl = socketUrl;
 			kick[id].pending = false;
-			kickGuestToken(id, [this, id](const QString &token) {
-				if (token.isEmpty() || !kick.contains(id) || kickSockets.contains(id)) return;
+			kickGuestToken(id, [this, id, lookupVersion, roomId](const QString &token) {
+				if (token.isEmpty() || !kick.contains(id) || kickSockets.contains(id) ||
+				    kick[id].lookupVersion != lookupVersion || kick[id].roomId != roomId) return;
 				const auto url = kick[id].socketUrl;
 				status(id, QStringLiteral("Kick: соединяемся с комнатой %1").arg(kick[id].roomId));
 				const quint64 generation = ++nextSocketGeneration;
