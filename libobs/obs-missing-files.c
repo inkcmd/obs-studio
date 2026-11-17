@@ -25,7 +25,7 @@ struct obs_missing_file {
 	char *file_path;
 	obs_missing_file_cb callback;
 	int src_type;
-	void *src;
+	obs_weak_source_t *weak_src;
 	char *src_name;
 	void *data;
 };
@@ -83,12 +83,16 @@ obs_missing_file_t *obs_missing_file_create(const char *path, obs_missing_file_c
 	file->file_path = bstrdup(path);
 	file->callback = callback;
 	file->src_type = src_type;
-	file->src = src;
-	file->data = data;
+	/* Some callbacks pass the path itself as user data.  That pointer may
+	 * refer to settings which are released before the dialog is saved. */
+	file->data = data == (const void *)path ? file->file_path : data;
 	file->ref = 1;
 
 	switch (src_type) {
 	case OBS_MISSING_FILE_SOURCE:
+		/* The missing-files dialog can outlive its scene collection.  Do not
+		 * retain a raw source pointer across that lifetime. */
+		file->weak_src = obs_source_get_weak_source((obs_source_t *)src);
 		file->src_name = bstrdup(obs_source_get_name(src));
 		break;
 	case OBS_MISSING_FILE_SCRIPT:
@@ -111,6 +115,7 @@ void obs_missing_file_destroy(obs_missing_file_t *file)
 {
 	switch (file->src_type) {
 	case OBS_MISSING_FILE_SOURCE:
+		obs_weak_source_release(file->weak_src);
 		bfree(file->src_name);
 		break;
 	case OBS_MISSING_FILE_SCRIPT:
@@ -123,9 +128,16 @@ void obs_missing_file_destroy(obs_missing_file_t *file)
 void obs_missing_file_issue_callback(obs_missing_file_t *file, const char *new_path)
 {
 	switch (file->src_type) {
-	case OBS_MISSING_FILE_SOURCE:
-		obs_source_replace_missing_file(file->callback, (obs_source_t *)file->src, new_path, file->data);
+	case OBS_MISSING_FILE_SOURCE: {
+		/* Lock the weak reference only for the duration of the callback.  If
+		 * the source was destroyed while the dialog was open, skip it. */
+		obs_source_t *source = obs_weak_source_get_source(file->weak_src);
+		if (source) {
+			obs_source_replace_missing_file(file->callback, source, new_path, file->data);
+			obs_source_release(source);
+		}
 		break;
+	}
 	case OBS_MISSING_FILE_SCRIPT:
 		break;
 	}
