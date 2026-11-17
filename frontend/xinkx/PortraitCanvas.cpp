@@ -569,6 +569,45 @@ void PortraitCanvas::save()
 		writeDiagnostic(QStringLiteral("portrait"), QStringLiteral("Failed to save portrait layout"));
 }
 
+void PortraitCanvas::persistRecoveredSourceSettings()
+{
+	// A source may be used by multiple portrait layouts. Keep all snapshots
+	// of currently loaded sources consistent without altering their geometry.
+	QSettings store(studioSettingsPath(), QSettings::IniFormat);
+	for (const QString &key : store.allKeys()) {
+		if (!key.startsWith(QStringLiteral("portrait/layout_")) ||
+		    !key.endsWith(QStringLiteral("_sources"))) continue;
+
+		QJsonArray extras = QJsonDocument::fromJson(store.value(key).toByteArray()).array();
+		bool changed = false;
+		for (int index = 0; index < extras.size(); ++index) {
+			QJsonObject record = extras.at(index).toObject();
+			const QString uuid = extras.at(index).isString() ? extras.at(index).toString()
+				: record.value(QStringLiteral("uuid")).toString();
+			if (uuid.isEmpty()) continue;
+
+			OBSSourceAutoRelease source = obs_get_source_by_uuid(uuid.toUtf8().constData());
+			if (!source) continue;
+			OBSDataAutoRelease saved = obs_save_source(source);
+			if (!saved) continue;
+			const char *json = obs_data_get_json(saved);
+			if (!json) continue;
+			const QJsonObject sourceData = QJsonDocument::fromJson(QByteArray(json)).object();
+			if (sourceData.isEmpty()) continue;
+
+			if (record.value(QStringLiteral("source")).toObject() == sourceData) continue;
+			record.insert(QStringLiteral("uuid"), uuid);
+			record.insert(QStringLiteral("source"), sourceData);
+			extras.replace(index, record);
+			changed = true;
+		}
+		if (changed) store.setValue(key, QJsonDocument(extras).toJson(QJsonDocument::Compact));
+	}
+	store.sync();
+	if (store.status() != QSettings::NoError)
+		writeDiagnostic(QStringLiteral("portrait"), QStringLiteral("Failed to persist recovered file paths"));
+}
+
 void PortraitCanvas::updateLayer(const QString &key, float x, float y, float width, float height, bool fill)
 {
 	for (const auto &layer : std::as_const(layers)) {

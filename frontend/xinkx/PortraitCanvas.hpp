@@ -46,6 +46,10 @@ public:
 	// previews remain visible together in the normal OBS preview container.
 	void setViewMode(int mode);
 	void closeEditor();
+	// Persist live source settings into portrait-only snapshots after OBS's
+	// missing-file dialog updates a source. Otherwise a restart restores the
+	// stale path from studio.ini rather than the recovered file.
+	void persistRecoveredSourceSettings();
 	void shutdown();
 
 private:

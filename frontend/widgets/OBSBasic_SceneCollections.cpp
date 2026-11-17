@@ -21,6 +21,7 @@
 #include <importer/OBSImporter.hpp>
 #include <models/SceneCollection.hpp>
 #include <utility/item-widget-helpers.hpp>
+#include <xinkx/PortraitCanvas.hpp>
 
 #include <qt-wrappers.hpp>
 
@@ -1673,37 +1674,38 @@ void OBSBasic::ClearSceneData()
 
 void OBSBasic::ShowMissingFilesDialog(obs_missing_files_t *files)
 {
-	if (obs_missing_files_count(files) > 0) {
-		/* When loading the missing files dialog on launch, the
-		* window hasn't fully initialized by this point on macOS,
-		* so put this at the end of the current task queue. Fixes
-		* a bug where the window is behind OBS on startup. */
-		QTimer::singleShot(0, [this, files] {
-			missDialog = new OBSMissingFiles(files, this);
+	const bool loadingCollection = disableSaving != 0;
+	/* Portrait-only sources are restored from studio.ini after OBS loads its
+	 * regular scene collection.  The list collected by obs_load_sources() is
+	 * therefore incomplete at this point.  Refresh it after the current event
+	 * has finished and the portrait composition can be instantiated. */
+	QTimer::singleShot(0, this, [this, files, loadingCollection] {
+		xinkx::PortraitCanvas::instance().sync();
+
+		obs_missing_files_t *liveFiles = obs_missing_files_create();
+		auto collectSource = [](void *data, obs_source_t *source) {
+			addMissingFiles(data, source);
+			return true;
+		};
+		obs_enum_all_sources(collectSource, liveFiles);
+		obs_missing_files_destroy(files);
+
+		if (obs_missing_files_count(liveFiles) > 0) {
+			missDialog = new OBSMissingFiles(liveFiles, this);
 			missDialog->setAttribute(Qt::WA_DeleteOnClose, true);
 			missDialog->show();
 			missDialog->raise();
-		});
-	} else {
-		obs_missing_files_destroy(files);
-
-		/* Only raise dialog if triggered manually */
-		if (!disableSaving) {
-			OBSMessageBox::information(this, QTStr("MissingFiles.NoMissing.Title"),
-						   QTStr("MissingFiles.NoMissing.Text"));
+		} else {
+			obs_missing_files_destroy(liveFiles);
+			if (!loadingCollection) {
+				OBSMessageBox::information(this, QTStr("MissingFiles.NoMissing.Title"),
+							   QTStr("MissingFiles.NoMissing.Text"));
+			}
 		}
-	}
+	});
 }
 
 void OBSBasic::on_actionShowMissingFiles_triggered()
 {
-	obs_missing_files_t *files = obs_missing_files_create();
-
-	auto cb_sources = [](void *data, obs_source_t *source) {
-		addMissingFiles(data, source);
-		return true;
-	};
-
-	obs_enum_all_sources(cb_sources, files);
-	ShowMissingFilesDialog(files);
+	ShowMissingFilesDialog(obs_missing_files_create());
 }

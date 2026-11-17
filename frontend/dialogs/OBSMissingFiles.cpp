@@ -20,6 +20,8 @@
 #include <OBSApp.hpp>
 #include <utility/MissingFilesModel.hpp>
 #include <utility/MissingFilesPathItemDelegate.hpp>
+#include <widgets/OBSBasic.hpp>
+#include <xinkx/PortraitCanvas.hpp>
 
 #include <QFileDialog>
 
@@ -89,6 +91,7 @@ void OBSMissingFiles::addMissingFile(const char *originalPath, const char *sourc
 
 void OBSMissingFiles::saveFiles()
 {
+	bool replaced = false;
 	for (int i = 0; i < filesModel->files.length(); i++) {
 		MissingFilesState state = filesModel->files[i].state;
 		if (state != MissingFilesState::Missing) {
@@ -103,7 +106,12 @@ void OBSMissingFiles::saveFiles()
 				obs_missing_file_issue_callback(f, p);
 				bfree(p);
 			}
+			replaced = true;
 		}
+	}
+	if (replaced) {
+		xinkx::PortraitCanvas::instance().persistRecoveredSourceSettings();
+		if (auto *main = OBSBasic::Get()) main->SaveProject();
 	}
 
 	QDialog::accept();
