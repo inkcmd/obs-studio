@@ -14,6 +14,10 @@
   .effect { position: absolute; left: 50%; top: 26%; transform: translate(-50%, -50%);
     animation: enter .24s cubic-bezier(.2,1.4,.2,1) both; will-change: transform, opacity; }
   .effect.leave { animation: exit .35s ease-in both; }
+  .effect.alert { animation: alertEnter .24s cubic-bezier(.2,1,.2,1) both; transform-origin:center; }
+  .effect.alert.leave { animation: alertExit .35s ease-in both; }
+  @keyframes alertEnter { from { opacity:0; scale:.78; } to { opacity:1; scale:1; } }
+  @keyframes alertExit { from { opacity:1; scale:1; } to { opacity:0; scale:.94; } }
   @keyframes enter { from { opacity: 0; transform: translate(-50%, -50%) scale(.78); } }
   @keyframes exit { to { opacity: 0; transform: translate(-50%, -65%) scale(.94); } }
   body[data-position="top-right"] .effect.alert { left: auto; right: 4%; top: 9%; transform: none; }
@@ -25,6 +29,7 @@
   .alert-card .kind { color: var(--cyan); letter-spacing: .2em; text-transform: uppercase; font-size: 15px; font-weight: 800; }
   .alert-card .name { font-size: var(--source-font-size,clamp(26px,3vw,47px)); font-weight: 800; margin: 8px 0; word-break: break-word; }
   .alert-card .detail { font-size: 20px; color: var(--source-text,#e0e8ff); overflow-wrap: anywhere; }
+  .alert-image { display:block; width:640px; height:220px; max-width:none; }
   .impact { text-align: center; font-size: clamp(85px, 12vw, 230px); font-weight: 950; letter-spacing: -.07em;
     line-height: 1; font-style: italic; text-shadow: 0 4px #09112e, 0 0 25px #53dfff, 0 0 85px #3c5dfb; }
   .impact.boom { color: #ffd268; text-shadow: 0 4px #8d1720,0 0 18px #ff9d31,0 0 100px #ff4034;
@@ -93,7 +98,6 @@
   body[data-preset="round"] #frame { border-radius:80px;border-width:12px; }
   body[data-preset="minimal"] #frame { border-width:3px;border-radius:0;box-shadow:none; }
   body[data-preset="neon"] #frame { border-color:#b66fff;box-shadow:0 0 30px #975aff,inset 0 0 22px #975aff; }
-  body[data-layer="alerts"] .effect.alert { left:50%;right:auto;top:50%;transform:translate(-50%,-50%); }
 </style>
 </head>
 <body data-position="top-right">
@@ -211,9 +215,18 @@
     const coordinates={'top-left':[16,16],'top-right':[84,16],'center':[50,46],
       'bottom-left':[16,78],'bottom-right':[84,78]};
     const center=coordinates[where]||[15+Math.random()*70,15+Math.random()*70];
-    if (!card.classList.contains('full')) {card.style.left=center[0]+'%';card.style.top=center[1]+'%';}
+    if (event.kind!=='alert' && !card.classList.contains('full')) {
+      card.style.left=center[0]+'%';card.style.top=center[1]+'%';
+    }
     card.style.zoom=(Math.max(30,Math.min(200,Number(style.effects.scalePercent)||100))/100);
-    if (event.kind==='alert' && labels[type]) {
+    const sharedAlert=event.kind==='alert' && labels[type] && typeof event.cardPng==='string' &&
+      event.cardPng.length<220000 && /^[A-Za-z0-9+/=]+$/.test(event.cardPng);
+    if (sharedAlert) {
+      const img=node('img','alert-image');
+      img.alt=[labels[type],event.name,event.amount,event.message].filter(Boolean).join(' · ');
+      img.src='data:image/png;base64,'+event.cardPng;
+      card.append(img);
+    } else if (event.kind==='alert' && labels[type]) {
       const alert = node('div','alert-card');
       alert.append(node('div','kind',labels[type]));
       alert.append(node('div','name',event.name||'Зритель'));
@@ -242,7 +255,25 @@
     };
     const duration=event.durationMs===0?0:(Number.isFinite(Number(event.durationMs))?
       Number(event.durationMs):Number(style.effects.durationMs));
-    if (duration>0) task.timeout=setTimeout(finish,Math.min(60000,Math.max(200,duration)));
+    const actualDuration=duration>0?Math.min(60000,Math.max(200,duration)):0;
+    if (sharedAlert) {
+      // The desktop QPainter uses these same entry/exit equations and timings.
+      // Animate the one shared image rather than maintaining another CSS card.
+      card.style.animation='none';
+      const started=performance.now();
+      const animate=() => {
+        if (!active.includes(task)) return;
+        const elapsed=performance.now()-started;
+        const entry=Math.max(0,Math.min(1,elapsed/240));
+        const eased=1-Math.pow(1-entry,3);
+        const exit=actualDuration>0?Math.max(0,Math.min(1,(actualDuration+350-elapsed)/350)):1;
+        card.style.opacity=String(entry*exit);
+        card.style.scale=String((.78+.22*eased)*(.94+.06*exit));
+        if (elapsed<240 || (actualDuration>0 && elapsed<actualDuration+350)) requestAnimationFrame(animate);
+      };
+      animate();
+    }
+    if (actualDuration>0) task.timeout=setTimeout(finish,actualDuration);
   }
   function drain() {
     if (paused || style.effects.enabled===false) return;

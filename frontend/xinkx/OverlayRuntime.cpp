@@ -15,6 +15,7 @@
 #include <obs.hpp>
 
 #include <QCheckBox>
+#include <QBuffer>
 #include <QColor>
 #include <QComboBox>
 #include <QDateTime>
@@ -22,6 +23,8 @@
 #include <QDockWidget>
 #include <QFile>
 #include <QFileInfo>
+#include <QFont>
+#include <QFontMetrics>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QGridLayout>
@@ -136,6 +139,81 @@ QString shortText(const QString &text, int maximum = 240)
 	QString result = text.left(maximum);
 	result.remove(QLatin1Char('\0'));
 	return result;
+}
+
+// A single rasterized alert card is sent to the OBS browser source and to
+// the local Qt overlay. Both display the identical pixels; only placement
+// and zoom remain independent settings on the two surfaces.
+QByteArray alertCardPng(const QJsonObject &event)
+{
+	const QString type = event.value(QStringLiteral("type")).toString();
+	QString title;
+	if (type == QStringLiteral("follow")) title = QStringLiteral("НОВЫЙ ФОЛЛОВЕР");
+	else if (type == QStringLiteral("sub")) title = QStringLiteral("НОВАЯ ПОДПИСКА");
+	else if (type == QStringLiteral("donation")) title = QStringLiteral("ДОНАТ");
+	else if (type == QStringLiteral("raid")) title = QStringLiteral("РЕЙД");
+	if (title.isEmpty()) return {};
+
+	QImage image(640, 220, QImage::Format_ARGB32_Premultiplied);
+	image.fill(Qt::transparent);
+	QPainter painter(&image);
+	painter.setRenderHint(QPainter::Antialiasing);
+	painter.setRenderHint(QPainter::TextAntialiasing);
+	const QRect card(20, 12, 600, 196);
+	for (int i = 10; i > 0; --i) {
+		QColor shadow(QStringLiteral("#4ec9ff"));
+		shadow.setAlpha(4);
+		painter.setPen(Qt::NoPen);
+		painter.setBrush(shadow);
+		painter.drawRoundedRect(card.adjusted(-i, -i / 2, i, i / 2), 16 + i, 16 + i);
+	}
+	painter.setBrush(QColor(10, 24, 56, 237));
+	painter.setPen(QPen(QColor(139, 229, 246, 140), 1));
+	painter.drawRoundedRect(card, 16, 16);
+
+	QFont font(QStringLiteral("Segoe UI"));
+	font.setPixelSize(15);
+	font.setWeight(QFont::ExtraBold);
+	painter.setFont(font);
+	painter.setPen(QColor(QStringLiteral("#6be4ef")));
+	painter.drawText(QRect(50, 31, 400, 29), Qt::AlignVCenter, title);
+	const QString platform = event.value(QStringLiteral("platform")).toString().left(24).toUpper();
+	if (!platform.isEmpty()) {
+		QFont platformFont = font;
+		platformFont.setPixelSize(12);
+		painter.setFont(platformFont);
+		painter.setPen(QColor(QStringLiteral("#9baed6")));
+		painter.drawText(QRect(452, 31, 136, 29), Qt::AlignRight | Qt::AlignVCenter, platform);
+	}
+
+	font.setPixelSize(42);
+	font.setWeight(QFont::ExtraBold);
+	painter.setFont(font);
+	painter.setPen(Qt::white);
+	const QRect nameBounds(50, 66, 540, 60);
+	const QString name = event.value(QStringLiteral("name")).toString().trimmed();
+	painter.drawText(nameBounds, Qt::AlignVCenter | Qt::AlignLeft,
+		QFontMetrics(font).elidedText(name.isEmpty() ? QStringLiteral("Зритель") : name,
+			Qt::ElideRight, nameBounds.width()));
+
+	QStringList details;
+	for (const auto &value : {event.value(QStringLiteral("amount")).toString(),
+				 event.value(QStringLiteral("message")).toString()})
+		if (!value.trimmed().isEmpty()) details.append(value.trimmed());
+	const QString detail = details.join(QStringLiteral(" · "));
+	if (!detail.isEmpty()) {
+		font.setPixelSize(19);
+		font.setWeight(QFont::Normal);
+		painter.setFont(font);
+		painter.setPen(QColor(QStringLiteral("#e0e8ff")));
+		painter.drawText(QRect(50, 134, 540, 60), Qt::AlignLeft | Qt::AlignVCenter | Qt::TextWordWrap,
+			QFontMetrics(font).elidedText(detail, Qt::ElideRight, 1000));
+	}
+	painter.end();
+	QByteArray png;
+	QBuffer buffer(&png);
+	if (!buffer.open(QIODevice::WriteOnly) || !image.save(&buffer, "PNG")) return {};
+	return png;
 }
 
 struct SourcePreset {
@@ -460,7 +538,7 @@ void OverlayRuntime::handleRequest(QTcpSocket *socket, const QByteArray &header)
 			socket->write("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
 					      "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
 					      "Content-Security-Policy: default-src 'self'; style-src 'unsafe-inline'; "
-					      "script-src 'unsafe-inline'; connect-src 'self'\r\n"
+					      "script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:\r\n"
 					      "Content-Length: " + QByteArray::number(bytes.size()) + "\r\nConnection: close\r\n\r\n" + bytes);
 			socket->disconnectFromHost();
 			return;
@@ -534,7 +612,13 @@ void OverlayRuntime::dispatch(QJsonObject event)
 	// OBS browser alerts use this same placement from SSE state; carry it in
 	// the shared event so the native desktop overlay can place the same alert.
 	if (event.value(QStringLiteral("kind")).toString() == QStringLiteral("alert"))
+	{
 		event.insert(QStringLiteral("alertPosition"), position);
+		const auto png = alertCardPng(event);
+		// Keep one SSE event below the browser socket's 256 KiB queue guard.
+		if (!png.isEmpty() && png.size() <= 160 * 1024)
+			event.insert(QStringLiteral("cardPng"), QString::fromLatin1(png.toBase64()));
+	}
 	event.insert(QStringLiteral("at"), QDateTime::currentMSecsSinceEpoch());
 	broadcast("effect", event);
 	emit effectGenerated(event);

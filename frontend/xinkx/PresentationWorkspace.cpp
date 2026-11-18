@@ -21,6 +21,7 @@
 #include <QFormLayout>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLabel>
@@ -44,6 +45,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <memory>
 #include <utility>
@@ -75,6 +77,8 @@ public:
 		QString name;
 		QString detail;
 		QString platform;
+		QString alertPosition;
+		QImage card;
 	};
 
 	explicit StreamerOverlay(QWidget *parent = nullptr)
@@ -86,7 +90,9 @@ public:
 		setAttribute(Qt::WA_TransparentForMouseEvents);
 		setFocusPolicy(Qt::NoFocus);
 		auto *timer = new QTimer(this);
-		timer->setInterval(50);
+		// Match the browser overlay's animation cadence while an alert is visible.
+		timer->setInterval(16);
+		timer->setTimerType(Qt::PreciseTimer);
 		connect(timer, &QTimer::timeout, this, [this] {
 			const qint64 now = QDateTime::currentMSecsSinceEpoch();
 			const int before = events.size();
@@ -99,6 +105,14 @@ public:
 			events.erase(std::remove_if(events.begin(), events.end(), [now](const Effect &event) {
 				return event.until > 0 && event.until < now;
 			}), events.end());
+			const int max = std::max(1, profile.value(QStringLiteral("effects")).toObject()
+				.value(QStringLiteral("maxConcurrent")).toInt(2));
+			while (events.size() < max && !pendingEvents.isEmpty()) {
+				Effect next = pendingEvents.takeFirst();
+				if (next.until > 0) next.until = now + (next.until - next.born);
+				next.born = now;
+				events.push_back(std::move(next));
+			}
 			if (markerToastUntil > 0 && now >= markerToastUntil) {
 				markerToastUntil = 0;
 				markerToast.clear();
@@ -171,7 +185,6 @@ public:
 		const auto params = profile.value(QStringLiteral("effects")).toObject();
 		if (!params.value(QStringLiteral("enabled")).toBool()) return;
 		const int max = params.value(QStringLiteral("maxConcurrent")).toInt(2);
-		if (events.size() >= max) events.removeFirst();
 		const QString kind = event.value(QStringLiteral("type")).toString().toUpper();
 		const QString text = kind == QStringLiteral("CONFETTI") ? QStringLiteral("✦ ✦ ✦")
 			: kind == QStringLiteral("LOW-HP") ? QStringLiteral("LOW HP") : kind;
@@ -199,10 +212,24 @@ public:
 					 event.value(QStringLiteral("message")).toString()})
 			if (!value.isEmpty()) details.append(value);
 		const QString detail = details.join(QStringLiteral(" · "));
-		events.push_back({text, point, now, duration == 0 ? 0 : now + duration,
+		const QString cardPng = event.value(QStringLiteral("cardPng")).toString();
+		const QImage card = cardPng.isEmpty() ? QImage{} :
+			QImage::fromData(QByteArray::fromBase64(cardPng.toLatin1()), "PNG");
+		const qint64 until = duration == 0 ? 0 :
+			now + std::max(200, duration) + (alertKind == QStringLiteral("alert") ? 350 : 0);
+		Effect next{text, point, now, until,
 			count, QRandomGenerator::global()->generate(), alertKind,
 			event.value(QStringLiteral("name")).toString().left(80), detail.left(260),
-			event.value(QStringLiteral("platform")).toString().left(24)});
+			event.value(QStringLiteral("platform")).toString().left(24),
+			event.value(QStringLiteral("alertPosition")).toString(), card};
+		if (events.size() >= max && !events.isEmpty() && events.first().until == 0)
+			events.removeFirst();
+		if (events.size() >= max || !pendingEvents.isEmpty()) {
+			if (pendingEvents.size() >= 20) pendingEvents.removeFirst();
+			pendingEvents.push_back(std::move(next));
+		} else {
+			events.push_back(std::move(next));
+		}
 		update();
 	}
 
@@ -213,7 +240,7 @@ public:
 		update();
 	}
 
-	void clearEffects() { events.clear(); update(); }
+	void clearEffects() { events.clear(); pendingEvents.clear(); update(); }
 	void setViewers(const QString &platform, int count)
 	{
 		// An unavailable API count is distinct from zero viewers.
@@ -482,7 +509,30 @@ protected:
 				? qBound(0.0, double(now - event.born) / double(event.until - event.born), 1.0) : 0.35;
 			painter.save();
 			painter.setOpacity(std::min({1.0, progress * 7.0 + 0.1, (1.0 - progress) * 5.0}));
-			if (event.kind == QStringLiteral("alert")) {
+			if (event.kind == QStringLiteral("alert") && !event.card.isNull()) {
+				// This image is the very same PNG sent to the OBS browser overlay.
+				// Desktop and broadcast may independently position and zoom it.
+				const double entry = qBound(0.0, double(now - event.born) / 240.0, 1.0);
+				const double eased = 1.0 - std::pow(1.0 - entry, 3.0);
+				const double exit = event.until > 0
+					? qBound(0.0, double(event.until - now) / 350.0, 1.0) : 1.0;
+				const double animatedScale = (0.78 + 0.22 * eased) * (0.94 + 0.06 * exit);
+				painter.setOpacity(entry * exit);
+				painter.setRenderHint(QPainter::SmoothPixmapTransform);
+				const double zoom = effects.value(QStringLiteral("scalePercent")).toInt(70) / 100.0;
+				const double cardWidth = event.card.width() * zoom;
+				const double cardHeight = event.card.height() * zoom;
+				const QString position = event.alertPosition;
+				const double x = position == QStringLiteral("top-left") ? width() * 0.04 :
+					position == QStringLiteral("center") ? (width() - cardWidth) / 2.0 :
+					width() * 0.96 - cardWidth;
+				const double y = position == QStringLiteral("center") ? height() * 0.40 - cardHeight / 2.0 :
+					height() * 0.09;
+				const QRectF target(x + cardWidth * (1.0 - animatedScale) / 2.0,
+					y + cardHeight * (1.0 - animatedScale) / 2.0,
+					cardWidth * animatedScale, cardHeight * animatedScale);
+				painter.drawImage(target, event.card);
+			} else if (event.kind == QStringLiteral("alert")) {
 				QString title;
 				if (event.text == QStringLiteral("FOLLOW")) title = QStringLiteral("НОВЫЙ ФОЛЛОВЕР");
 				else if (event.text == QStringLiteral("SUB")) title = QStringLiteral("НОВАЯ ПОДПИСКА");
@@ -556,6 +606,7 @@ private:
 	QJsonObject profile;
 	QVector<Chat> messages;
 	QVector<Effect> events;
+	QVector<Effect> pendingEvents;
 	QHash<QString, int> viewers;
 	QString markerToast;
 	qint64 markerToastUntil = 0;

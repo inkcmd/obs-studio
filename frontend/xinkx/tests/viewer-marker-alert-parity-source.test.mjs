@@ -39,7 +39,15 @@ assert.match(workspace, /markerToastUntil/);
 
 // Same EventCore->AlertEngine->OverlayRuntime event feeds browser and local UI.
 assert.match(runtime, /broadcast\("effect", event\);\s*emit effectGenerated\(event\)/);
+assert.match(runtime, /QByteArray alertCardPng\(const QJsonObject &event\)/);
+assert.match(runtime, /event\.insert\(QStringLiteral\("cardPng"\), QString::fromLatin1\(png\.toBase64\(\)\)\)/);
+assert.match(runtime, /img-src 'self' data:/);
 assert.match(workspace, /OverlayRuntime::effectGenerated, streamer, &StreamerOverlay::addEffect/);
+assert.match(workspace, /QImage::fromData\(QByteArray::fromBase64\(cardPng\.toLatin1\(\)\), "PNG"\)/);
+assert.match(workspace, /painter\.drawImage\(target, event\.card\)/);
+assert.match(workspace, /pendingEvents\.push_back\(std::move\(next\)\)/);
+assert.match(workspace, /pendingEvents\.takeFirst\(\)/);
+assert.match(browser, /img\.src='data:image\/png;base64,'\+event\.cardPng/);
 assert.match(workspace, /event\.value\(QStringLiteral\("name"\)\)/);
 assert.match(workspace, /event\.value\(QStringLiteral\("amount"\)\)/);
 assert.match(workspace, /event\.value\(QStringLiteral\("message"\)\)/);
@@ -75,6 +83,8 @@ const getElement = id => {
   return elements.get(id);
 };
 const listeners = new Map();
+let fakeNow = 1200;
+const animationFrames = [];
 class EventSourceStub {
   addEventListener(event, handler) {listeners.set(event, handler);}
 }
@@ -88,6 +98,9 @@ const script = browser.match(/<script>([\s\S]*?)<\/script>/)?.[1];
 assert.ok(script, 'browser overlay script missing');
 vm.runInNewContext(script, {
   document, location: {search: ''}, URLSearchParams, EventSource: EventSourceStub,
+  performance: {now: () => fakeNow}, requestAnimationFrame: callback => {
+    animationFrames.push(callback); return animationFrames.length;
+  },
   setTimeout: () => 1, clearTimeout: () => {}, setInterval: () => 1
 });
 const emit = (event, payload) => listeners.get(event)({data: JSON.stringify(payload)});
@@ -113,6 +126,23 @@ const alert = getElement('surface').children.at(-1)?.children?.[0];
 assert.equal(alert.children[0].textContent, 'НОВАЯ ПОДПИСКА');
 assert.equal(alert.children[1].textContent, 'Tester');
 assert.equal(alert.children[2].textContent, '3 месяца · Привет');
+const cardBytes = Buffer.from('shared-alert-renderer-test').toString('base64');
+emit('effect', {kind: 'alert', type: 'follow', platform: 'twitch',
+  name: 'SameCard', cardPng: cardBytes, durationMs: 5000});
+const cardImage = getElement('surface').children.at(-1)?.children?.[0];
+assert.equal(cardImage.src, `data:image/png;base64,${cardBytes}`);
+assert.match(cardImage.alt, /SameCard/);
+assert.equal(Number(getElement('surface').children.at(-1).style.scale), .78);
+fakeNow += 240;
+for (const frame of animationFrames.splice(0)) frame();
+assert.equal(Number(getElement('surface').children.at(-1).style.opacity), 1);
+assert.equal(Number(getElement('surface').children.at(-1).style.scale), 1);
+fakeNow += 4935;
+for (const frame of animationFrames.splice(0)) frame();
+assert.equal(Number(getElement('surface').children.at(-1).style.opacity), .5);
+assert.equal(Number(getElement('surface').children.at(-1).style.scale), .97);
+assert.equal(getElement('surface').children.at(-1)?.style?.left, undefined,
+  'Native and browser alerts must follow the same scene placement');
 emit('state', {presentation: {viewer: {chat: {showViewers: false}, effects: {enabled: true}}},
   viewers: {twitch: 17}});
 assert.equal(viewerElement.style.display, 'none');
