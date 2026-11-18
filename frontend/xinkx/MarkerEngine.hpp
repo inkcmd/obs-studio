@@ -57,6 +57,7 @@ public:
 
 signals:
 	void changed();
+	void momentMarked(const QString &label);
 
 private:
 	QString path;

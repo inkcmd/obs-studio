@@ -52,8 +52,8 @@
   #timer.hidden { opacity:0; transform:translate(-50%,-30px); }
   #chat { position:absolute; bottom:5%; left:3%; display:flex; flex-direction:column; align-items:stretch;
     gap:8px; width:min(660px,70vw); }
-  #viewers { position:absolute; top:3%; left:3%; font-size:19px; font-weight:650;
-    color:var(--cyan); text-shadow:0 2px 5px #000a; }
+  #viewers { position:absolute; top:3%; left:3%; display:flex; align-items:center; white-space:nowrap;
+    font-size:19px; font-weight:650; color:var(--cyan); text-shadow:0 2px 5px #000a; }
   .chat-line { width:100%; min-width:0; background:#08152bdc; border-left:4px solid var(--cyan);
     border-radius:6px 12px 12px 6px; padding:9px 14px; font-size:clamp(17px,1.5vw,29px);
     box-shadow:0 4px 28px #0008; overflow-wrap:anywhere; animation:chatIn .28s both; }
@@ -301,7 +301,30 @@
       chat.style.width='calc(100% - 10px)';chat.style.height='calc(100% - 10px)';chat.style.transform='none';
       chat.style.justifyContent=c.vertical==='top'?'flex-start':c.vertical==='center'?'center':'flex-end';
     }
+    applyViewerAppearance(profile.viewers||{});
     for (const line of chat.children) updateLine(line);
+  }
+  function applyViewerAppearance(v) {
+    const standalone=layer==='viewers';
+    const h=standalone?'left':String(v.horizontal||'left');
+    const vertical=standalone?'top':String(v.vertical||'top');
+    const dx=Math.max(-3840,Math.min(3840,Number(v.offsetX)||0));
+    const dy=Math.max(-2160,Math.min(2160,Number(v.offsetY)||0));
+    viewers.style.left=h==='left'?`calc(${standalone?'12px':'3%'} + ${dx}px)`:
+      h==='center'?`calc(50% + ${dx}px)`:'auto';
+    viewers.style.right=h==='right'?`calc(3% - ${dx}px)`:'auto';
+    viewers.style.top=vertical==='top'?`calc(${standalone?'12px':'3%'} + ${dy}px)`:
+      vertical==='center'?`calc(50% + ${dy}px)`:'auto';
+    viewers.style.bottom=vertical==='bottom'?`calc(3% - ${dy}px)`:'auto';
+    viewers.style.transform=(h==='center'?'translateX(-50%)':'')+
+      (vertical==='center'?' translateY(-50%)':'');
+    viewers.style.fontSize=Math.max(10,Math.min(90,Number(v.fontSize)||22))+'px';
+    viewers.style.color=String(v.textColor||'#6be4ef');
+    const opacity=Math.max(0,Math.min(100,Number(v.backgroundOpacity??0)));
+    viewers.style.background=String(v.backgroundColor||'#09152c')+
+      Math.round(opacity*2.55).toString(16).padStart(2,'0');
+    viewers.style.borderRadius=Math.max(0,Math.min(64,Number(v.radius??10)))+'px';
+    viewers.style.padding=Math.max(0,Math.min(64,Number(v.padding??0)))+'px';
   }
   function updateLine(line) {
     const c=style.chat||{};
@@ -329,6 +352,7 @@
       const item=node('span','viewer-mark');
       item.append(icon(platform),node('span','',count));viewers.append(item);
     }
+    viewers.style.display=viewers.childElementCount?'flex':'none';
     paused=Boolean(value.paused);
     const where=String(value.position||'top-right');
     document.body.dataset.position=['top-right','top-left','center'].includes(where)?where:'top-right';

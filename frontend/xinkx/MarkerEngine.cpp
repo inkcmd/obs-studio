@@ -191,6 +191,7 @@ bool MarkerEngine::markMoment()
 	if (!add(label, QStringLiteral("moment"), QStringLiteral("local"), true)) return false;
 	++momentCounter;
 	flush();
+	emit momentMarked(label);
 	return true;
 }
 

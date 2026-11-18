@@ -531,6 +531,10 @@ void OverlayRuntime::dispatch(QJsonObject event)
 	if (!available() || effectsPaused) {
 		return;
 	}
+	// OBS browser alerts use this same placement from SSE state; carry it in
+	// the shared event so the native desktop overlay can place the same alert.
+	if (event.value(QStringLiteral("kind")).toString() == QStringLiteral("alert"))
+		event.insert(QStringLiteral("alertPosition"), position);
 	event.insert(QStringLiteral("at"), QDateTime::currentMSecsSinceEpoch());
 	broadcast("effect", event);
 	emit effectGenerated(event);

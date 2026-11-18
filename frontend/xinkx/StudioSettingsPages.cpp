@@ -95,8 +95,8 @@ QWidget *chatPage(QWidget *parent, PresentationSettings *settings, const QString
 			QObject::connect(overlayEnabled, &QCheckBox::toggled, toggle, &QCheckBox::setChecked);
 		}
 		form->addRow(overlayEnabled);
-		auto *dragMode = new QCheckBox(QStringLiteral("Режим размещения · перетаскивать чат мышью"), page);
-		dragMode->setToolTip(QStringLiteral("В этом режиме мышь захватывается только областью чата. "
+		auto *dragMode = new QCheckBox(QStringLiteral("Режим размещения · перетаскивать чат и счётчик"), page);
+		dragMode->setToolTip(QStringLiteral("В этом режиме мышь захватывается только областью чата и счётчика. "
 			"Отключи режим после перемещения, чтобы клики проходили в игру."));
 		if (auto *overlay = mainWindow->findChild<QWidget *>(QStringLiteral("xinkxStreamerOverlay"))) {
 			dragMode->setChecked(overlay->property("xinkxEditChat").toBool());
@@ -276,6 +276,128 @@ QWidget *chatPage(QWidget *parent, PresentationSettings *settings, const QString
 		QObject::connect(combo, &QComboBox::currentIndexChanged, page, schedule);
 	for (auto *button : {textColor, nameColor, background, panelColor})
 		QObject::connect(button, &QPushButton::clicked, page, schedule);
+	guardWheelFields(page);
+	return page;
+}
+
+QWidget *viewerCounterPage(QWidget *parent, PresentationSettings *settings)
+{
+	QVBoxLayout *layout;
+	auto *page = section(parent, QStringLiteral("Счётчик зрителей"),
+		QStringLiteral("Отдельные фон, размер и расположение для зрителей OBS и для оверлея поверх игры. "
+			"Поверх игры счётчик также можно перетаскивать в режиме размещения чата. "
+			"Под ним на 2,6 секунды появляется локальное уведомление «Метка создана»."), &layout);
+	auto *form = new QFormLayout();
+	auto *surface = new QComboBox(page);
+	surface->addItem(QStringLiteral("Для меня · поверх игры"), QStringLiteral("streamer"));
+	surface->addItem(QStringLiteral("Для зрителей · OBS"), QStringLiteral("viewer"));
+	form->addRow(QStringLiteral("Оверлей"), surface);
+	auto *visible = new QCheckBox(QStringLiteral("Показывать счётчик"), page);
+	form->addRow(visible);
+	auto *horizontal = new QComboBox(page);
+	horizontal->addItem(QStringLiteral("Слева"), QStringLiteral("left"));
+	horizontal->addItem(QStringLiteral("По центру"), QStringLiteral("center"));
+	horizontal->addItem(QStringLiteral("Справа"), QStringLiteral("right"));
+	form->addRow(QStringLiteral("По горизонтали"), horizontal);
+	auto *vertical = new QComboBox(page);
+	vertical->addItem(QStringLiteral("Сверху"), QStringLiteral("top"));
+	vertical->addItem(QStringLiteral("По центру"), QStringLiteral("center"));
+	vertical->addItem(QStringLiteral("Снизу"), QStringLiteral("bottom"));
+	form->addRow(QStringLiteral("По вертикали"), vertical);
+	auto *offsetX = number(page, -3840, 3840, 0, QStringLiteral(" px"));
+	form->addRow(QStringLiteral("Смещение X"), offsetX);
+	auto *offsetY = number(page, -2160, 2160, 0, QStringLiteral(" px"));
+	form->addRow(QStringLiteral("Смещение Y"), offsetY);
+	auto *fontSize = number(page, 10, 90, 18, QStringLiteral(" px"));
+	form->addRow(QStringLiteral("Размер цифр"), fontSize);
+	auto *textColor = new QPushButton(page);
+	form->addRow(QStringLiteral("Цвет цифр"), textColor);
+	auto *background = new QPushButton(page);
+	form->addRow(QStringLiteral("Цвет подложки"), background);
+	for (auto *button : {textColor, background}) {
+		QObject::connect(button, &QPushButton::clicked, page, [=] {
+			const QColor selected = QColorDialog::getColor(QColor(button->text()), page,
+				QStringLiteral("Цвет счётчика зрителей"));
+			if (selected.isValid()) button->setText(selected.name());
+		});
+	}
+	auto *opacity = number(page, 0, 100, 75, QStringLiteral(" %"));
+	form->addRow(QStringLiteral("Непрозрачность подложки"), opacity);
+	auto *padding = number(page, 0, 64, 10, QStringLiteral(" px"));
+	form->addRow(QStringLiteral("Внутренние отступы"), padding);
+	auto *radius = number(page, 0, 64, 10, QStringLiteral(" px"));
+	form->addRow(QStringLiteral("Скругление"), radius);
+	layout->addLayout(form);
+	auto *status = new QLabel(QStringLiteral("Изменения сохраняются автоматически"), page);
+	status->setWordWrap(true);
+	layout->addWidget(status);
+	layout->addStretch();
+	auto *save = new QPushButton(QStringLiteral("Сохранить счётчик"), page);
+	layout->insertWidget(layout->count() - 1, save);
+	auto *delay = new QTimer(page);
+	delay->setInterval(350);
+	delay->setSingleShot(true);
+	auto selectedSurface = std::make_shared<QString>(QStringLiteral("streamer"));
+	auto loading = std::make_shared<bool>(false);
+	const auto refresh = [=] {
+		*loading = true;
+		const auto profile = settings->snapshot().value(*selectedSurface).toObject();
+		auto options = profile.value(QStringLiteral("viewers")).toObject();
+		if (options.isEmpty()) options = PresentationSettings::defaults()
+			.value(*selectedSurface).toObject().value(QStringLiteral("viewers")).toObject();
+		visible->setChecked(profile.value(QStringLiteral("chat")).toObject()
+			.value(QStringLiteral("showViewers")).toBool(true));
+		horizontal->setCurrentIndex(qMax(0, horizontal->findData(options.value(QStringLiteral("horizontal")).toString())));
+		vertical->setCurrentIndex(qMax(0, vertical->findData(options.value(QStringLiteral("vertical")).toString())));
+		offsetX->setValue(options.value(QStringLiteral("offsetX")).toInt());
+		offsetY->setValue(options.value(QStringLiteral("offsetY")).toInt());
+		fontSize->setValue(options.value(QStringLiteral("fontSize")).toInt());
+		textColor->setText(options.value(QStringLiteral("textColor")).toString());
+		background->setText(options.value(QStringLiteral("backgroundColor")).toString());
+		opacity->setValue(options.value(QStringLiteral("backgroundOpacity")).toInt());
+		padding->setValue(options.value(QStringLiteral("padding")).toInt());
+		radius->setValue(options.value(QStringLiteral("radius")).toInt());
+		*loading = false;
+	};
+	QObject::connect(save, &QPushButton::clicked, page, [=] {
+		auto document = settings->snapshot();
+		auto profile = document.value(*selectedSurface).toObject();
+		auto chat = profile.value(QStringLiteral("chat")).toObject();
+		chat.insert(QStringLiteral("showViewers"), visible->isChecked());
+		profile.insert(QStringLiteral("chat"), chat);
+		auto options = profile.value(QStringLiteral("viewers")).toObject();
+		options.insert(QStringLiteral("horizontal"), horizontal->currentData().toString());
+		options.insert(QStringLiteral("vertical"), vertical->currentData().toString());
+		options.insert(QStringLiteral("offsetX"), offsetX->value());
+		options.insert(QStringLiteral("offsetY"), offsetY->value());
+		options.insert(QStringLiteral("fontSize"), fontSize->value());
+		options.insert(QStringLiteral("textColor"), textColor->text());
+		options.insert(QStringLiteral("backgroundColor"), background->text());
+		options.insert(QStringLiteral("backgroundOpacity"), opacity->value());
+		options.insert(QStringLiteral("padding"), padding->value());
+		options.insert(QStringLiteral("radius"), radius->value());
+		profile.insert(QStringLiteral("viewers"), options);
+		document.insert(*selectedSurface, profile);
+		if (commit(settings, document, page)) status->setText(QStringLiteral("Сохранено автоматически"));
+	});
+	QObject::connect(delay, &QTimer::timeout, save, &QPushButton::click);
+	const auto schedule = [=] { if (!*loading) delay->start(); };
+	QObject::connect(visible, &QCheckBox::toggled, page, schedule);
+	for (auto *field : {offsetX, offsetY, fontSize, opacity, padding, radius})
+		QObject::connect(field, &QSpinBox::valueChanged, page, schedule);
+	for (auto *combo : {horizontal, vertical})
+		QObject::connect(combo, &QComboBox::currentIndexChanged, page, schedule);
+	for (auto *button : {textColor, background})
+		QObject::connect(button, &QPushButton::clicked, page, schedule);
+	QObject::connect(surface, &QComboBox::currentIndexChanged, page, [=] {
+		if (delay->isActive()) { delay->stop(); save->click(); }
+		*selectedSurface = surface->currentData().toString();
+		refresh();
+	});
+	QObject::connect(page, &QObject::destroyed, settings, [=] {
+		if (delay->isActive()) { delay->stop(); save->click(); }
+	});
+	refresh();
 	guardWheelFields(page);
 	return page;
 }
@@ -660,6 +782,8 @@ void installStudioSettingsPages(QWidget *settingsDialog)
 	add(QStringLiteral("Чат для зрителей"), chatPage(stack, presentation, QStringLiteral("viewer"), mainWindow),
 		QStringLiteral(":/settings/images/settings/appearance.svg"));
 	add(QStringLiteral("Чат для меня"), chatPage(stack, presentation, QStringLiteral("streamer"), mainWindow),
+		QStringLiteral(":/settings/images/settings/appearance.svg"));
+	add(QStringLiteral("Счётчик зрителей"), viewerCounterPage(stack, presentation),
 		QStringLiteral(":/settings/images/settings/appearance.svg"));
 	add(QStringLiteral("Реакции и боты"), reactionsPage(stack, presentation),
 		QStringLiteral(":/settings/images/settings/hotkeys.svg"));

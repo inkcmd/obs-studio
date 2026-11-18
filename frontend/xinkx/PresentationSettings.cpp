@@ -51,6 +51,18 @@ QJsonObject profile(bool streamer)
 			{QStringLiteral("durationMs"), 5000},
 			{QStringLiteral("maxConcurrent"), 2},
 		}},
+		{QStringLiteral("viewers"), QJsonObject{
+			{QStringLiteral("horizontal"), streamer ? QStringLiteral("right") : QStringLiteral("left")},
+			{QStringLiteral("vertical"), QStringLiteral("top")},
+			{QStringLiteral("offsetX"), 0},
+			{QStringLiteral("offsetY"), 0},
+			{QStringLiteral("fontSize"), streamer ? 18 : 22},
+			{QStringLiteral("textColor"), QStringLiteral("#6be4ef")},
+			{QStringLiteral("backgroundColor"), QStringLiteral("#09152c")},
+			{QStringLiteral("backgroundOpacity"), 75},
+			{QStringLiteral("padding"), 10},
+			{QStringLiteral("radius"), 10},
+		}},
 	};
 }
 
@@ -126,6 +138,30 @@ bool PresentationSettings::validate(const QJsonObject &value, QString *error)
 		const auto chat = entry.value(QStringLiteral("chat")).toObject();
 		const auto effects = entry.value(QStringLiteral("effects")).toObject();
 		if (chat.isEmpty() || effects.isEmpty()) return invalid(surface + QStringLiteral(": нет настроек"));
+		// Existing presentation.json profiles without viewer options remain valid.
+		if (entry.contains(QStringLiteral("viewers"))) {
+			const auto viewers = entry.value(QStringLiteral("viewers")).toObject();
+			if (!oneOf(viewers.value(QStringLiteral("horizontal")).toString(),
+				{QStringLiteral("left"), QStringLiteral("center"), QStringLiteral("right")}) ||
+			    !oneOf(viewers.value(QStringLiteral("vertical")).toString(),
+				{QStringLiteral("top"), QStringLiteral("center"), QStringLiteral("bottom")}))
+				return invalid(surface + QStringLiteral("/viewers/position"));
+			for (const auto &spec : {std::tuple{QStringLiteral("offsetX"), -3840, 3840},
+					     std::tuple{QStringLiteral("offsetY"), -2160, 2160},
+					     std::tuple{QStringLiteral("fontSize"), 10, 90},
+					     std::tuple{QStringLiteral("backgroundOpacity"), 0, 100},
+					     std::tuple{QStringLiteral("padding"), 0, 64},
+					     std::tuple{QStringLiteral("radius"), 0, 64}}) {
+				const auto &[key, low, high] = spec;
+				if (!within(viewers, key, low, high))
+					return invalid(surface + QStringLiteral("/viewers/") + key);
+			}
+			for (const auto &key : {QStringLiteral("textColor"), QStringLiteral("backgroundColor")}) {
+				if (!QRegularExpression(QStringLiteral("^#[a-fA-F0-9]{6}$"))
+						.match(viewers.value(key).toString()).hasMatch())
+					return invalid(surface + QStringLiteral("/viewers/") + key);
+			}
+		}
 		for (const auto &key : {QStringLiteral("fontSize"), QStringLiteral("fontWeight"),
 				       QStringLiteral("maxMessages"), QStringLiteral("messageDurationMs"), QStringLiteral("gap"),
 				       QStringLiteral("padding"), QStringLiteral("radius"),
