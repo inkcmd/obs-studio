@@ -235,8 +235,9 @@ public:
 		browse->setMaximumWidth(35);
 		folderRow->addWidget(browse);
 		form->addRow(QStringLiteral("Корневая папка"), folderRow);
-		sessionFolder = new QCheckBox(QStringLiteral("Создавать папку по дате и времени запуска записей"), right);
-		sessionFolder->setToolTip(QStringLiteral("Все одновременно запущенные задания с одной корневой папкой попадут в один каталог сеанса"));
+		sessionFolder = new QCheckBox(QStringLiteral("Группировать записи: дата → время запуска"), right);
+		sessionFolder->setToolTip(QStringLiteral("Например: Записи/2026-11-18/12-49-00-000/Игра.mkv. "
+			"Все задания одного запуска с общей корневой папкой попадут в один каталог."));
 		form->addRow(sessionFolder);
 		auto *hint = new QLabel(QStringLiteral(
 			"Разрешение 0×0 — исходное. Каждый отмеченный микшер OBS попадёт "

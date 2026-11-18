@@ -22,7 +22,7 @@ assert.match(header, /bool sessionFolder = true;/);
 assert.match(engine, /QString currentSession;/);
 assert.match(engine, /if \(!anyRunning\) currentSession\.clear\(\);/);
 assert.match(engine, /if \(currentSession\.isEmpty\(\)\)/);
-assert.match(engine, /yyyy-MM-dd_HH-mm-ss-zzz/);
+assert.match(engine, /yyyy-MM-dd\/HH-mm-ss-zzz/);
 assert.match(engine, /job\.sessionFolder \? QDir\(root\)\.filePath\(currentSession\) : root/);
 assert.match(engine, /QFileInfo::exists\(QDir\(directory\)\.filePath\(filename\)\)/);
 assert.match(engine, /obj\.value\(QStringLiteral\("sessionFolder"\)\)\.toBool\(true\)/);

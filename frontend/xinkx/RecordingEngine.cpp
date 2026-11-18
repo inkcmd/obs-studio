@@ -486,8 +486,11 @@ private:
 				 (run->created.isValid() && run->created.elapsed() < 1000));
 		});
 		if (!anyRunning) currentSession.clear();
-		if (currentSession.isEmpty())
-			currentSession = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss-zzz"));
+		if (currentSession.isEmpty()) {
+			// One date directory per day, then one time directory per recording batch.
+			// Concurrent jobs share the same path even if their encoders start later.
+			currentSession = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd/HH-mm-ss-zzz"));
+		}
 	}
 
 	bool startJob(const RecordingJob &job, QStringList &errors)
