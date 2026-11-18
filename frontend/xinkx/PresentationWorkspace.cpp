@@ -523,9 +523,9 @@ protected:
 				const double cardWidth = event.card.width() * zoom;
 				const double cardHeight = event.card.height() * zoom;
 				const QString position = event.alertPosition;
-				const double x = position == QStringLiteral("top-left") ? width() * 0.04 :
-					position == QStringLiteral("center") ? (width() - cardWidth) / 2.0 :
-					width() * 0.96 - cardWidth;
+				const double x = position == QStringLiteral("top-left") ? this->width() * 0.04 :
+					position == QStringLiteral("center") ? (this->width() - cardWidth) / 2.0 :
+					this->width() * 0.96 - cardWidth;
 				const double y = position == QStringLiteral("center") ? height() * 0.40 - cardHeight / 2.0 :
 					height() * 0.09;
 				const QRectF target(x + cardWidth * (1.0 - animatedScale) / 2.0,
