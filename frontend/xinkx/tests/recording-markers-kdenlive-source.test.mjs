@@ -25,6 +25,8 @@ assert.match(markers, /if \(requireRecording && recordings\.isEmpty\(\)\) return
 assert.match(engine, /obs_output_add_packet_callback\(output, packet, this\)/);
 assert.match(engine, /obs_output_remove_packet_callback\(output, packet, this\)/);
 assert.match(engine, /time->cts >= request\.requestedNs/);
+assert.match(engine, /struct Pending \{\s*qsizetype index;/);
+assert.match(engine, /std::vector<std::pair<qsizetype, qint64>> completed;/);
 assert.match(engine, /obs_output_paused\(output\)/);
 assert.match(engine, /for \(const auto &run : runs\) \{[\s\S]*run->marker->append\(label, type, alsoCsv, item\)/);
 assert.match(engine, /nativeMarker->append\(label, type, alsoCsv, item\)/);

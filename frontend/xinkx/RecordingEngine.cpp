@@ -109,7 +109,7 @@ struct MarkerOutput {
 	bool wantCsv = false;
 	bool subscribed = false;
 	struct Pending {
-		int index;
+		qsizetype index;
 		uint64_t requestedNs;
 		qint64 actualFrame = 0;
 		bool resolved = false;
@@ -202,7 +202,7 @@ struct MarkerOutput {
 
 	void reconcile()
 	{
-		std::vector<std::pair<int, qint64>> completed;
+		std::vector<std::pair<qsizetype, qint64>> completed;
 		{
 			std::lock_guard<std::mutex> lock(packetMutex);
 			for (const auto &request : pending)
