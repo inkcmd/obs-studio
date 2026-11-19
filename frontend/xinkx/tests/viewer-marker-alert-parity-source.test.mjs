@@ -48,6 +48,19 @@ assert.match(workspace, /painter\.drawImage\(target, event\.card\)/);
 assert.match(workspace, /pendingEvents\.push_back\(std::move\(next\)\)/);
 assert.match(workspace, /pendingEvents\.takeFirst\(\)/);
 assert.match(browser, /img\.src='data:image\/png;base64,'\+event\.cardPng/);
+// Reactions must not invent separate random particles on each surface.
+assert.match(runtime, /event\.insert\(QStringLiteral\("particles"\), particles\)/);
+assert.match(workspace, /event\.value\(QStringLiteral\("particles"\)\)\.toArray\(\)/);
+assert.match(workspace, /for \(qsizetype i = 0; i < event\.particles\.size\(\); \+\+i\)/);
+assert.match(browser, /particles\(type==='gg',event\.particles\)/);
+assert.match(browser, /new EventSource\('\/events\?layer='\+encodeURIComponent\(layer\)\)/);
+assert.match(runtime, /socket->setProperty\("xinkxOverlayLayer"/);
+assert.match(runtime, /connectedReactionSources\(\) const/);
+assert.match(runtime, /xinkxReactionSourceHealth/);
+// Scale, density, concurrency and lifetime share the viewer profile.
+assert.match(workspace, /viewerEffects\.contains\(key\)/);
+assert.match(studioSettings, /shared\.insert\(QStringLiteral\("scalePercent"\), scale->value\(\)\)/);
+assert.match(studioSettings, /shared\.insert\(QStringLiteral\("particleMin"\), minParticles->value\(\)\)/);
 assert.match(workspace, /event\.value\(QStringLiteral\("name"\)\)/);
 assert.match(workspace, /event\.value\(QStringLiteral\("amount"\)\)/);
 assert.match(workspace, /event\.value\(QStringLiteral\("message"\)\)/);
@@ -143,6 +156,17 @@ assert.equal(Number(getElement('surface').children.at(-1).style.opacity), .5);
 assert.equal(Number(getElement('surface').children.at(-1).style.scale), .97);
 assert.equal(getElement('surface').children.at(-1)?.style?.left, undefined,
   'Native and browser alerts must follow the same scene placement');
+emit('clear');
+emit('effect', {kind: 'reaction', type: 'gg', particles: [
+  {x: 42.5, fallMs: 3200, delayMs: 220, drift: -35, angle: 135}
+]});
+const sharedReaction = getElement('surface').children.at(-1)?.children?.[0]?.children?.[0];
+assert.equal(sharedReaction.textContent, 'GG');
+assert.equal(sharedReaction.style.left, '42.5%');
+assert.equal(sharedReaction.style['--fall'], '3.2s');
+assert.equal(sharedReaction.style['--delay'], '0.22s');
+assert.equal(sharedReaction.style['--drift'], '-35px');
+assert.equal(sharedReaction.style['--angle'], '135deg');
 emit('state', {presentation: {viewer: {chat: {showViewers: false}, effects: {enabled: true}}},
   viewers: {twitch: 17}});
 assert.equal(viewerElement.style.display, 'none');

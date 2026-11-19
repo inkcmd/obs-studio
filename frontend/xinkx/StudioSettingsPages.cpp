@@ -496,7 +496,12 @@ QWidget *reactionsPage(QWidget *parent, PresentationSettings *settings)
 	auto *surface = new QComboBox(page);
 	surface->addItem(QStringLiteral("Для зрителей · OBS"), QStringLiteral("viewer"));
 	surface->addItem(QStringLiteral("Для меня · поверх игры"), QStringLiteral("streamer"));
-	effectForm->addRow(QStringLiteral("Оформление"), surface);
+	effectForm->addRow(QStringLiteral("Где показывать"), surface);
+	auto *sharedNote = new QLabel(QStringLiteral(
+		"Один стиль реакций для трансляции и моего экрана. "
+		"Отдельно выбираются только видимость и положение."), page);
+	sharedNote->setWordWrap(true);
+	effectForm->addRow(sharedNote);
 	auto *enabledEffects = new QCheckBox(QStringLiteral("Показывать эффекты"), page);
 	effectForm->addRow(enabledEffects);
 	auto *position = new QComboBox(page);
@@ -518,15 +523,25 @@ QWidget *reactionsPage(QWidget *parent, PresentationSettings *settings)
 	effectForm->addRow(QStringLiteral("Общая пауза"), globalCooldown);
 	layout->addLayout(effectForm);
 	auto fillEffects = [=] {
-		const auto profile = settings->snapshot().value(surface->currentData().toString()).toObject();
+		const auto snapshot = settings->snapshot();
+		const auto profile = snapshot.value(surface->currentData().toString()).toObject();
 		const auto effects = profile.value(QStringLiteral("effects")).toObject();
+		const auto shared = snapshot.value(QStringLiteral("viewer")).toObject()
+			.value(QStringLiteral("effects")).toObject();
+		const QSignalBlocker blockEnabled(enabledEffects);
+		const QSignalBlocker blockPosition(position);
+		const QSignalBlocker blockScale(scale);
+		const QSignalBlocker blockMin(minParticles);
+		const QSignalBlocker blockMax(maxParticles);
+		const QSignalBlocker blockConcurrent(maxConcurrent);
+		const QSignalBlocker blockDuration(duration);
 		enabledEffects->setChecked(effects.value(QStringLiteral("enabled")).toBool(true));
 		position->setCurrentIndex(qMax(0, position->findText(effects.value(QStringLiteral("position")).toString())));
-		scale->setValue(effects.value(QStringLiteral("scalePercent")).toInt(100));
-		minParticles->setValue(effects.value(QStringLiteral("particleMin")).toInt());
-		maxParticles->setValue(effects.value(QStringLiteral("particleMax")).toInt());
-		maxConcurrent->setValue(effects.value(QStringLiteral("maxConcurrent")).toInt(2));
-		duration->setValue(effects.value(QStringLiteral("durationMs")).toInt(5000));
+		scale->setValue(shared.value(QStringLiteral("scalePercent")).toInt(100));
+		minParticles->setValue(shared.value(QStringLiteral("particleMin")).toInt());
+		maxParticles->setValue(shared.value(QStringLiteral("particleMax")).toInt());
+		maxConcurrent->setValue(shared.value(QStringLiteral("maxConcurrent")).toInt(2));
+		duration->setValue(shared.value(QStringLiteral("durationMs")).toInt(5000));
 	};
 	fillEffects();
 	auto *saveEffects = new QPushButton(QStringLiteral("Сохранить параметры эффектов"), page);
@@ -541,13 +556,22 @@ QWidget *reactionsPage(QWidget *parent, PresentationSettings *settings)
 		const QString surfaceName = surface->currentData().toString();
 		QJsonObject profile = document.value(surfaceName).toObject();
 		QJsonObject effects = profile.value(QStringLiteral("effects")).toObject();
+		QJsonObject viewer = document.value(QStringLiteral("viewer")).toObject();
+		QJsonObject shared = viewer.value(QStringLiteral("effects")).toObject();
 		effects.insert(QStringLiteral("enabled"), enabledEffects->isChecked());
 		effects.insert(QStringLiteral("position"), position->currentText());
-		effects.insert(QStringLiteral("scalePercent"), scale->value());
-		effects.insert(QStringLiteral("particleMin"), minParticles->value());
-		effects.insert(QStringLiteral("particleMax"), maxParticles->value());
-		effects.insert(QStringLiteral("maxConcurrent"), maxConcurrent->value());
-		effects.insert(QStringLiteral("durationMs"), duration->value());
+		shared.insert(QStringLiteral("scalePercent"), scale->value());
+		shared.insert(QStringLiteral("particleMin"), minParticles->value());
+		shared.insert(QStringLiteral("particleMax"), maxParticles->value());
+		shared.insert(QStringLiteral("maxConcurrent"), maxConcurrent->value());
+		shared.insert(QStringLiteral("durationMs"), duration->value());
+		if (surfaceName == QStringLiteral("viewer")) {
+			shared.insert(QStringLiteral("enabled"), enabledEffects->isChecked());
+			shared.insert(QStringLiteral("position"), position->currentText());
+			effects = shared;
+		}
+		viewer.insert(QStringLiteral("effects"), shared);
+		document.insert(QStringLiteral("viewer"), viewer);
 		profile.insert(QStringLiteral("effects"), effects);
 		document.insert(surfaceName, profile);
 		document.insert(QStringLiteral("globalCooldownMs"), globalCooldown->value());

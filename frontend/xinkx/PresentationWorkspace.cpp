@@ -79,6 +79,7 @@ public:
 		QString platform;
 		QString alertPosition;
 		QImage card;
+		QJsonArray particles;
 	};
 
 	explicit StreamerOverlay(QWidget *parent = nullptr)
@@ -165,6 +166,16 @@ public:
 	void configure(const QJsonObject &document)
 	{
 		profile = document.value(QStringLiteral("streamer")).toObject();
+		// Effect appearance is shared. The desktop keeps only its own enable
+		// switch and placement; all other values come from the viewer profile.
+		QJsonObject desktopEffects = profile.value(QStringLiteral("effects")).toObject();
+		const QJsonObject viewerEffects = document.value(QStringLiteral("viewer")).toObject()
+			.value(QStringLiteral("effects")).toObject();
+		for (const QString &key : {QStringLiteral("scalePercent"), QStringLiteral("particleMin"),
+					  QStringLiteral("particleMax"), QStringLiteral("durationMs"),
+					  QStringLiteral("maxConcurrent")})
+			if (viewerEffects.contains(key)) desktopEffects.insert(key, viewerEffects.value(key));
+		profile.insert(QStringLiteral("effects"), desktopEffects);
 		if (editing) setMask(editingRegion());
 		update();
 	}
@@ -215,13 +226,13 @@ public:
 		const QString cardPng = event.value(QStringLiteral("cardPng")).toString();
 		const QImage card = cardPng.isEmpty() ? QImage{} :
 			QImage::fromData(QByteArray::fromBase64(cardPng.toLatin1()), "PNG");
-		const qint64 until = duration == 0 ? 0 :
-			now + std::max(200, duration) + (alertKind == QStringLiteral("alert") ? 350 : 0);
+		const qint64 until = duration == 0 ? 0 : now + std::max(200, duration) + 350;
 		Effect next{text, point, now, until,
 			count, QRandomGenerator::global()->generate(), alertKind,
 			event.value(QStringLiteral("name")).toString().left(80), detail.left(260),
 			event.value(QStringLiteral("platform")).toString().left(24),
-			event.value(QStringLiteral("alertPosition")).toString(), card};
+			event.value(QStringLiteral("alertPosition")).toString(), card,
+			event.value(QStringLiteral("particles")).toArray()};
 		if (events.size() >= max && !events.isEmpty() && events.first().until == 0)
 			events.removeFirst();
 		if (events.size() >= max || !pendingEvents.isEmpty()) {
@@ -572,31 +583,103 @@ protected:
 							QFontMetrics(detailsFont).elidedText(event.detail, Qt::ElideRight, detailsBounds.width()));
 					}
 				}
-			} else if (event.particleCount > 0) {
-				QFont particleFont = effectFont;
-				particleFont.setPixelSize(34 * effects.value(QStringLiteral("scalePercent")).toInt(70) / 100);
-				painter.setFont(particleFont);
-				for (int i = 0; i < event.particleCount; ++i) {
-					const quint32 seed = event.seed + static_cast<quint32>(i * 0x9e3779b9u);
-					const int px = (seed % static_cast<quint32>(std::max(1, this->width())));
-					const int py = ((seed >> 9) % static_cast<quint32>(std::max(1, height()))) -
-						static_cast<int>(progress * 160);
-					painter.drawText(QRect(px - 55, py - 20, 110, 40), Qt::AlignCenter,
-						event.text == QStringLiteral("GG") ? QStringLiteral("GG") : QStringLiteral("✦"));
+			} else if (event.kind == QStringLiteral("reaction") &&
+				   (event.text == QStringLiteral("GG") || event.text == QStringLiteral("✦ ✦ ✦"))) {
+				// The same particle array is used by the browser's CSS animations.
+				// Convert its 1920x1080 CSS pixel units to desktop pixels.
+				const double pixelRatio = double(height()) / 1080.0;
+				const double zoom = effects.value(QStringLiteral("scalePercent")).toInt(100) / 100.0;
+				const double elapsed = std::max<qint64>(0, now - event.born);
+				const double entry = qBound(0.0, elapsed / 240.0, 1.0);
+				const double exit = event.until > 0
+					? qBound(0.0, double(event.until - now) / 350.0, 1.0) : 1.0;
+				const bool gg = event.text == QStringLiteral("GG");
+				QFont particleFont(QStringLiteral("Segoe UI"));
+				particleFont.setWeight(QFont::ExtraBold);
+				particleFont.setPixelSize(std::max(1, int(27 * pixelRatio * zoom)));
+				const QColor palette[]{QColor(QStringLiteral("#66ebfd")), QColor(QStringLiteral("#8175ff")),
+					QColor(QStringLiteral("#f4e96c")), QColor(QStringLiteral("#ff7799")),
+					QColor(QStringLiteral("#76f5bb"))};
+				for (qsizetype i = 0; i < event.particles.size(); ++i) {
+					const auto spec = event.particles.at(i).toObject();
+					const double localElapsed = elapsed - spec.value(QStringLiteral("delayMs")).toDouble();
+					const double fallMs = std::max(1.0, spec.value(QStringLiteral("fallMs")).toDouble(3000));
+					const double fraction = qBound(0.0, localElapsed / fallMs, 1.0);
+					if (fraction >= 1.0) continue;
+					const double px = this->width() * spec.value(QStringLiteral("x")).toDouble() / 100.0 +
+						spec.value(QStringLiteral("drift")).toDouble() * pixelRatio * zoom * fraction;
+					const double py = (-0.12 + 1.22 * fraction) * height();
+					const double angle = spec.value(QStringLiteral("angle")).toDouble();
+					painter.save();
+					painter.setOpacity(entry * exit * (1.0 - 0.8 * fraction));
+					painter.translate(px, py);
+					painter.rotate(angle + (750.0 - angle) * fraction);
+					if (gg) {
+						painter.setFont(particleFont);
+						const QRectF glyph(-50 * pixelRatio * zoom, -20 * pixelRatio * zoom,
+							100 * pixelRatio * zoom, 40 * pixelRatio * zoom);
+						painter.setPen(QColor(QStringLiteral("#35aafc")));
+						painter.drawText(glyph.translated(1, 2), Qt::AlignCenter, QStringLiteral("GG"));
+						painter.setPen(QColor(QStringLiteral("#6be4ef")));
+						painter.drawText(glyph, Qt::AlignCenter, QStringLiteral("GG"));
+					} else {
+						painter.setPen(Qt::NoPen);
+						painter.setBrush(palette[i % 5]);
+						painter.drawRoundedRect(QRectF(-6 * pixelRatio * zoom, -10.5 * pixelRatio * zoom,
+							12 * pixelRatio * zoom, 21 * pixelRatio * zoom),
+							3 * pixelRatio * zoom, 3 * pixelRatio * zoom);
+					}
+					painter.restore();
 				}
-				painter.setFont(effectFont);
 			} else {
 				const QPoint point(event.location.x() * this->width(), event.location.y() * height());
+				const double pixelRatio = double(height()) / 1080.0;
+				const double zoom = effects.value(QStringLiteral("scalePercent")).toInt(100) / 100.0;
 				if (event.text == QStringLiteral("LOW HP")) {
-					painter.setPen(QPen(QColor(QStringLiteral("#ff384d")), 12));
-					painter.setBrush(QColor(130, 12, 35, 36 + static_cast<int>(progress * 35)));
-					painter.drawRect(rect().adjusted(9, 9, -9, -9));
+					// Full-screen red pulse and lower caption, as in the OBS vignette.
+					const double elapsed = std::max<qint64>(0, now - event.born);
+					const double pulse = 0.35 + 0.65 * std::abs(std::sin(elapsed * 3.141592653589793 / 1000.0));
+					const double exit = event.until > 0
+						? qBound(0.0, double(event.until - now) / 350.0, 1.0) : 1.0;
+					painter.setOpacity(pulse * exit);
+					painter.setBrush(Qt::NoBrush);
+					painter.setPen(QPen(QColor(234, 21, 52, 75), 90 * pixelRatio * zoom));
+					painter.drawRect(rect().adjusted(40, 40, -40, -40));
+					painter.setPen(QPen(QColor(255, 56, 77, 180), 12 * pixelRatio * zoom));
+					painter.drawRect(rect().adjusted(6, 6, -6, -6));
+					QFont danger(QStringLiteral("Segoe UI"));
+					danger.setWeight(QFont::Black);
+					danger.setPixelSize(std::max(1, int(165 * pixelRatio * zoom)));
+					painter.setFont(danger);
 					painter.setPen(QColor(QStringLiteral("#ff384d")));
+					painter.drawText(QRect(0, int(height() * 0.68), this->width(), int(height() * 0.2)),
+						Qt::AlignCenter, QStringLiteral("LOW HP"));
 				} else if (event.text == QStringLiteral("BOOM")) {
+					QFont boom(QStringLiteral("Segoe UI"));
+					boom.setWeight(QFont::Black);
+					boom.setItalic(true);
+					boom.setPixelSize(std::max(1, int(230 * pixelRatio * zoom)));
+					painter.setFont(boom);
+					const double elapsed = std::max<qint64>(0, now - event.born);
+					const double shake = elapsed < 1040 ? std::sin(elapsed * 3.141592653589793 / 65.0) : 0;
+					painter.translate(point.x() + shake * 9 * pixelRatio, point.y());
+					painter.rotate(shake * 4);
+					const QRectF area(-450 * pixelRatio * zoom, -130 * pixelRatio * zoom,
+						900 * pixelRatio * zoom, 260 * pixelRatio * zoom);
+					painter.setPen(QColor(QStringLiteral("#8d1720")));
+					painter.drawText(area.translated(0, 5 * pixelRatio), Qt::AlignCenter, QStringLiteral("BOOM!"));
 					painter.setPen(QColor(QStringLiteral("#ffd268")));
+					painter.drawText(area, Qt::AlignCenter, QStringLiteral("BOOM!"));
+				} else {
+				QFont custom(QStringLiteral("Segoe UI"));
+				custom.setWeight(QFont::Black);
+				custom.setItalic(true);
+				custom.setPixelSize(std::max(1, int(150 * pixelRatio * zoom)));
+				painter.setFont(custom);
+				painter.setPen(QColor(QStringLiteral("#6be4ef")));
+				painter.drawText(QRect(point.x() - 500, point.y() - 100,
+					1000, 200), Qt::AlignCenter, QStringLiteral("МОЯ РЕАКЦИЯ"));
 				}
-				painter.drawText(QRect(point.x() - 400, point.y() - 100 - static_cast<int>(progress * 45),
-					800, 200), Qt::AlignCenter, event.text);
 			}
 			painter.restore();
 		}
@@ -784,6 +867,11 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 	form->addRow(QStringLiteral("Зрители · скругление"), viewerRadius);
 	auto *effectsEnabled = new QCheckBox(QStringLiteral("Эффекты включены"), panel);
 	form->addRow(QStringLiteral("Эффекты"), effectsEnabled);
+	auto *sharedEffectsNote = new QLabel(QStringLiteral(
+		"Оформление реакций общее для OBS и моего экрана. "
+		"Включение и положение на каждом экране отдельные."), panel);
+	sharedEffectsNote->setWordWrap(true);
+	form->addRow(sharedEffectsNote);
 	auto *effectPosition = new QComboBox(panel);
 	for (const auto &entry : {QStringLiteral("random"), QStringLiteral("top-left"),
 		QStringLiteral("top-right"), QStringLiteral("center"), QStringLiteral("bottom-left"),
@@ -973,6 +1061,8 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 		const auto profile = draft->value(surface->currentData().toString()).toObject();
 		const auto chat = profile.value(QStringLiteral("chat")).toObject();
 		const auto effects = profile.value(QStringLiteral("effects")).toObject();
+		const auto sharedEffects = draft->value(QStringLiteral("viewer")).toObject()
+			.value(QStringLiteral("effects")).toObject();
 		auto viewerStyle = profile.value(QStringLiteral("viewers")).toObject();
 		if (viewerStyle.isEmpty()) viewerStyle = PresentationSettings::defaults()
 			.value(surface->currentData().toString()).toObject().value(QStringLiteral("viewers")).toObject();
@@ -1009,11 +1099,11 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 		viewerRadius->setValue(viewerStyle.value(QStringLiteral("radius")).toInt());
 		effectsEnabled->setChecked(effects.value(QStringLiteral("enabled")).toBool());
 		effectPosition->setCurrentIndex(effectPosition->findData(effects.value(QStringLiteral("position")).toString()));
-		scale->setValue(effects.value(QStringLiteral("scalePercent")).toInt());
-		maxConcurrent->setValue(effects.value(QStringLiteral("maxConcurrent")).toInt());
-		particleMin->setValue(effects.value(QStringLiteral("particleMin")).toInt());
-		particleMax->setValue(effects.value(QStringLiteral("particleMax")).toInt());
-		duration->setValue(effects.value(QStringLiteral("durationMs")).toInt());
+		scale->setValue(sharedEffects.value(QStringLiteral("scalePercent")).toInt());
+		maxConcurrent->setValue(sharedEffects.value(QStringLiteral("maxConcurrent")).toInt());
+		particleMin->setValue(sharedEffects.value(QStringLiteral("particleMin")).toInt());
+		particleMax->setValue(sharedEffects.value(QStringLiteral("particleMax")).toInt());
+		duration->setValue(sharedEffects.value(QStringLiteral("durationMs")).toInt());
 		cooldown->setValue(draft->value(QStringLiteral("globalCooldownMs")).toInt());
 	};
 	QObject::connect(fontName, &QPushButton::clicked, dock, [=] {
@@ -1039,6 +1129,8 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 		auto profile = draft->value(key).toObject();
 		auto chat = profile.value(QStringLiteral("chat")).toObject();
 		auto effects = profile.value(QStringLiteral("effects")).toObject();
+		auto viewerProfile = draft->value(QStringLiteral("viewer")).toObject();
+		auto sharedEffects = viewerProfile.value(QStringLiteral("effects")).toObject();
 		auto viewerStyle = profile.value(QStringLiteral("viewers")).toObject();
 		chat.insert(QStringLiteral("font"), *selectedFont);
 		chat.insert(QStringLiteral("fontSize"), fontSize->value());
@@ -1072,15 +1164,22 @@ void installPresentationWorkspace(OBSBasic *mainWindow)
 		viewerStyle.insert(QStringLiteral("radius"), viewerRadius->value());
 		effects.insert(QStringLiteral("enabled"), effectsEnabled->isChecked());
 		effects.insert(QStringLiteral("position"), effectPosition->currentData().toString());
-		effects.insert(QStringLiteral("scalePercent"), scale->value());
-		effects.insert(QStringLiteral("maxConcurrent"), maxConcurrent->value());
-		effects.insert(QStringLiteral("particleMin"), particleMin->value());
-		effects.insert(QStringLiteral("particleMax"), particleMax->value());
-		effects.insert(QStringLiteral("durationMs"), duration->value());
+		sharedEffects.insert(QStringLiteral("scalePercent"), scale->value());
+		sharedEffects.insert(QStringLiteral("maxConcurrent"), maxConcurrent->value());
+		sharedEffects.insert(QStringLiteral("particleMin"), particleMin->value());
+		sharedEffects.insert(QStringLiteral("particleMax"), particleMax->value());
+		sharedEffects.insert(QStringLiteral("durationMs"), duration->value());
+		viewerProfile.insert(QStringLiteral("effects"), sharedEffects);
+		if (key == QStringLiteral("viewer")) {
+			sharedEffects.insert(QStringLiteral("enabled"), effectsEnabled->isChecked());
+			sharedEffects.insert(QStringLiteral("position"), effectPosition->currentData().toString());
+			effects = sharedEffects;
+		}
 		profile.insert(QStringLiteral("chat"), chat);
 		profile.insert(QStringLiteral("viewers"), viewerStyle);
 		profile.insert(QStringLiteral("effects"), effects);
 		draft->insert(key, profile);
+		if (key != QStringLiteral("viewer")) draft->insert(QStringLiteral("viewer"), viewerProfile);
 		draft->insert(QStringLiteral("globalCooldownMs"), cooldown->value());
 		draft->insert(QStringLiteral("reactions"), *rules);
 		draft->insert(QStringLiteral("botCommands"), *botCommands);

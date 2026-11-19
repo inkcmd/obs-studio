@@ -37,6 +37,7 @@ public:
 	explicit OverlayRuntime(QObject *parent = nullptr);
 	~OverlayRuntime() override;
 	bool available() const { return listener.isListening(); }
+	int connectedReactionSources() const;
 	QString error() const;
 	QString sourceUrl(const QString &layer = QStringLiteral("all")) const;
 	void reaction(const QString &type);

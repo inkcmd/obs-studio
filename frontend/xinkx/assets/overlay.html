@@ -190,18 +190,20 @@
       play.setAttribute('d','M10 8v8l7-4z');play.setAttribute('fill','#fff');svg.append(play);}
     wrapper.append(svg);return wrapper;
   }
-  function particles(gg) {
+  function particles(gg, shared) {
     const root = node('div','particles');
     const config = style.effects;
     const min=Math.max(0,Number(config.particleMin)||0),max=Math.max(min,Number(config.particleMax)||0);
-    const count=Math.min(200,Math.floor(min+Math.random()*(max-min+1)));
+    const count=Array.isArray(shared)?Math.min(200,shared.length):
+      Math.min(200,Math.floor(min+Math.random()*(max-min+1)));
     for (let i = 0; i < count; ++i) {
+      const spec=Array.isArray(shared)?shared[i]:null;
       const bit = node('span', 'particle'+(gg?' gg':''),gg?'GG':undefined);
-      bit.style.left = (Math.random()*100)+'%';
-      bit.style.setProperty('--fall', (2+Math.random()*3.5)+'s');
-      bit.style.setProperty('--delay', (Math.random()*.8)+'s');
-      bit.style.setProperty('--drift', (Math.random()*200-100)+'px');
-      bit.style.setProperty('--angle', (Math.random()*270)+'deg');
+      bit.style.left = (spec?Number(spec.x):Math.random()*100)+'%';
+      bit.style.setProperty('--fall', (spec?Number(spec.fallMs)/1000:2+Math.random()*3.5)+'s');
+      bit.style.setProperty('--delay', (spec?Number(spec.delayMs)/1000:Math.random()*.8)+'s');
+      bit.style.setProperty('--drift', (spec?Number(spec.drift):Math.random()*200-100)+'px');
+      bit.style.setProperty('--angle', (spec?Number(spec.angle):Math.random()*270)+'deg');
       if (!gg) bit.style.background = palette[i%palette.length];
       root.append(bit);
     }
@@ -242,7 +244,7 @@
       text.style.fontSize='clamp(40px,8vw,150px)';
       card.append(text);
     } else if (type==='gg'||type==='confetti') {
-      card.append(particles(type==='gg'));
+      card.append(particles(type==='gg',event.particles));
       if (customCaption) {const caption=node('div','impact',customCaption);caption.style.position='absolute';
         caption.style.left='50%';caption.style.top='35%';caption.style.transform='translateX(-50%)';card.append(caption);}
     }
@@ -393,7 +395,7 @@
     deadline=Number(value.deadline)||0;
     clock();
   }
-  const source=new EventSource('/events');
+  const source=new EventSource('/events?layer='+encodeURIComponent(layer));
   source.addEventListener('state',e=>{try{state(JSON.parse(e.data));}catch{}});
   source.addEventListener('effect',e=>{try{effect(JSON.parse(e.data));}catch{}});
   source.addEventListener('chat',e=>{try{showChat(JSON.parse(e.data));}catch{}});

@@ -44,6 +44,7 @@
 #include <QPen>
 #include <QIcon>
 #include <QPixmap>
+#include <QRandomGenerator>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSettings>
@@ -503,12 +504,18 @@ void OverlayRuntime::acceptConnections()
 void OverlayRuntime::handleRequest(QTcpSocket *socket, const QByteArray &header)
 {
 	const auto requestLine = header.left(header.indexOf("\r\n") < 0 ? header.size() : header.indexOf("\r\n"));
-	if (requestLine == "GET /events HTTP/1.1") {
+	const QList<QByteArray> requestParts = requestLine.split(' ');
+	const QUrl requested = requestParts.size() == 3 ? QUrl::fromEncoded(requestParts.at(1)) : QUrl();
+	const QUrlQuery query(requested);
+	if (requestParts.size() == 3 && requestParts.at(0) == "GET" &&
+	    requested.path() == QStringLiteral("/events")) {
 		if (clients.size() >= 32) {
 			socket->write("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
 			socket->disconnectFromHost();
 			return;
 		}
+		const QString layer = query.queryItemValue(QStringLiteral("layer"));
+		socket->setProperty("xinkxOverlayLayer", validLayer(layer) ? layer : QStringLiteral("all"));
 		socket->write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n"
 			      "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
 			      "Transfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n");
@@ -525,9 +532,6 @@ void OverlayRuntime::handleRequest(QTcpSocket *socket, const QByteArray &header)
 						    {QStringLiteral("viewers"), currentViewers}});
 		return;
 	}
-	const QList<QByteArray> requestParts = requestLine.split(' ');
-	const QUrl requested = requestParts.size() == 3 ? QUrl::fromEncoded(requestParts.at(1)) : QUrl();
-	const QUrlQuery query(requested);
 	if (requestParts.size() == 3 && requestParts.at(0) == "GET" &&
 	    requested.path() == QStringLiteral("/overlay") &&
 	    validLayer(query.queryItemValue(QStringLiteral("layer")).isEmpty()
@@ -546,6 +550,16 @@ void OverlayRuntime::handleRequest(QTcpSocket *socket, const QByteArray &header)
 	}
 	socket->write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
 	socket->disconnectFromHost();
+}
+
+int OverlayRuntime::connectedReactionSources() const
+{
+	int connected = 0;
+	for (auto *socket : clients)
+		if (socket->state() == QAbstractSocket::ConnectedState &&
+		    socket->property("xinkxOverlayLayer").toString() == QStringLiteral("effects"))
+			++connected;
+	return connected;
 }
 
 void OverlayRuntime::sendEvent(QTcpSocket *socket, const QByteArray &name, const QJsonObject &payload)
@@ -618,6 +632,31 @@ void OverlayRuntime::dispatch(QJsonObject event)
 		// Keep one SSE event below the browser socket's 256 KiB queue guard.
 		if (!png.isEmpty() && png.size() <= 160 * 1024)
 			event.insert(QStringLiteral("cardPng"), QString::fromLatin1(png.toBase64()));
+	}
+	if (event.value(QStringLiteral("kind")).toString() == QStringLiteral("reaction")) {
+		// Sample the animation once, before distributing it to the OBS source
+		// and the desktop overlay. Each renderer uses the same particles,
+		// timing, colors and positions, even at different resolutions.
+		const QString type = event.value(QStringLiteral("type")).toString();
+		if (type == QStringLiteral("gg") || type == QStringLiteral("confetti")) {
+			const QJsonObject effects = presentation.value(QStringLiteral("viewer")).toObject()
+				.value(QStringLiteral("effects")).toObject();
+			const int minimum = std::clamp(effects.value(QStringLiteral("particleMin")).toInt(25), 0, 200);
+			const int maximum = std::clamp(effects.value(QStringLiteral("particleMax")).toInt(65), minimum, 200);
+			auto *random = QRandomGenerator::global();
+			const int count = minimum + random->bounded(maximum - minimum + 1);
+			QJsonArray particles;
+			for (int i = 0; i < count; ++i) {
+				particles.append(QJsonObject{
+					{QStringLiteral("x"), random->bounded(10000) / 100.0},
+					{QStringLiteral("fallMs"), 2000 + random->bounded(3501)},
+					{QStringLiteral("delayMs"), random->bounded(801)},
+					{QStringLiteral("drift"), random->bounded(201) - 100},
+					{QStringLiteral("angle"), random->bounded(271)},
+				});
+			}
+			event.insert(QStringLiteral("particles"), particles);
+		}
 	}
 	event.insert(QStringLiteral("at"), QDateTime::currentMSecsSinceEpoch());
 	broadcast("effect", event);
@@ -1181,6 +1220,20 @@ void installOverlayWorkspace(OBSBasic *mainWindow, QDockWidget *sourceInspector)
 	auto *status = new QLabel(runtime->available() ? QStringLiteral("Локальный движок · готов") : runtime->error(), content);
 	status->setWordWrap(true);
 	layout->addWidget(status);
+	auto *reactionHealth = new QLabel(content);
+	reactionHealth->setObjectName(QStringLiteral("xinkxReactionSourceHealth"));
+	const auto refreshReactionHealth = [runtime, reactionHealth] {
+		const int connections = runtime->connectedReactionSources();
+		reactionHealth->setText(connections > 0
+			? QStringLiteral("Источник реакций OBS: подключён (%1)").arg(connections)
+			: QStringLiteral("Источник реакций OBS: нет подключения к событиям"));
+	};
+	auto *reactionHealthTimer = new QTimer(reactionHealth);
+	reactionHealthTimer->setInterval(2000);
+	QObject::connect(reactionHealthTimer, &QTimer::timeout, reactionHealth, refreshReactionHealth);
+	reactionHealthTimer->start();
+	refreshReactionHealth();
+	layout->addWidget(reactionHealth);
 	// The overlay is a subscriber, not a second provider ingress path. Chat,
 	// follows, paid memberships and donations now share ordered delivery.
 	if (auto *events = mainWindow->findChild<EventCore *>(QStringLiteral("xinkxEventCore"))) {
