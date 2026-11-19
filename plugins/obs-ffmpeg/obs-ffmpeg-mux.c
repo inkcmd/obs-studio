@@ -135,7 +135,12 @@ static void add_video_encoder_params(struct ffmpeg_muxer *stream, os_process_arg
 {
 	obs_data_t *settings = obs_encoder_get_settings(vencoder);
 	int bitrate = (int)obs_data_get_int(settings, "bitrate");
-	video_t *video = obs_get_video();
+	// Use the encoder's effective video clock. Its fps_den already includes
+	// obs_encoder_set_frame_rate_divisor(), unlike obs_get_video() which
+	// always reports the primary OBS canvas FPS (e.g. 60 for a 30 FPS job).
+	video_t *video = obs_encoder_video(vencoder);
+	if (!video)
+		video = obs_get_video();
 	const struct video_output_info *info = video_output_get_info(video);
 
 	int codec_tag = (int)obs_data_get_int(settings, "codec_type");
